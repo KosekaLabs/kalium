@@ -1,7 +1,7 @@
 //! `init`: the first instance. Runs the M1 boot-test scenario from
-//! `docs/prototype-plan.md` (plus the WASI demos of modules 10 and 11, the
-//! revocation test of module 8 and the snapshot test of module 9) and
-//! reports every child's exit code.
+//! `docs/prototype-plan.md` (plus the WASI demos of modules 11 and 12, the
+//! revocation test of module 8, the snapshot test of module 9 and the
+//! resource quota test of module 10) and reports every child's exit code.
 //!
 //! Initial capabilities: slot 0 `Console(WRITE|DERIVE|TRANSFER)`, slot 1
 //! `Spawn(SPAWN|TRANSFER)`.
@@ -9,7 +9,7 @@
 
 use kalium_sdk::{
     cap_drop, cap_revoke, exit, rights, spawn, spawn_snapshot, time_now, yield_now, Cap, Channel,
-    Class, Console, Entry, Errno, Instance, Line,
+    Class, Console, Entry, Errno, Instance, Line, MemObj,
 };
 
 /// Boot image module indices (the order `cargo xtask wasm` lays out and
@@ -19,12 +19,14 @@ const MOD_PONG: u32 = 2;
 const MOD_RT: u32 = 3;
 const MOD_FAIR: u32 = 4;
 const MOD_FAULTY: u32 = 5;
+const MOD_PARK: u32 = 6;
 const MOD_GREEDY: u32 = 7;
 const MOD_REVOKED: u32 = 8;
 const MOD_SHELF: u32 = 9;
+const MOD_HOG: u32 = 10;
 /// The WASI demos (`demos/`): a Rust `std` program and a C program.
-const MOD_HELLO_STD: u32 = 10;
-const MOD_HELLO_C: u32 = 11;
+const MOD_HELLO_STD: u32 = 11;
+const MOD_HELLO_C: u32 = 12;
 
 /// `rt` parameters: period 2 ms, budget 500 µs.
 const RT_PERIOD_NS: i64 = 2_000_000;
@@ -230,6 +232,36 @@ pub extern "C" fn _start() {
     for c in [snapshot.cap(), ready_rx.cap()] {
         cap_drop(c).unwrap_or_else(|e| fail("cap_drop (shelf phase)", e));
     }
+
+    // Phase 3e: a hostile hoarder. `hog` takes memory objects, linear
+    // memory, channels and queue space until each quota refuses it, checks
+    // that the kernel still serves it, and exits with everything held, so
+    // that the kernel frees it all. Then an ordinary instance (`park`,
+    // released at once) and a memory object of the largest size show that
+    // the kernel is unharmed and the memory came back.
+    let hog_console = derive_demo_console(console);
+    let hog = spawn_fair(spawner, MOD_HOG, &[hog_console], "hog");
+    report("hog", hog);
+    let (park_tx, park_rx) =
+        Channel::create().unwrap_or_else(|e| fail("channel_create (after hog)", e));
+    let park = spawn_fair(spawner, MOD_PARK, &[park_rx.cap()], "park");
+    cap_drop(park_tx.cap()).unwrap_or_else(|e| fail("cap_drop (after hog)", e));
+    match park.wait() {
+        Ok(0) => {}
+        Ok(code) => {
+            let _ = Line::new()
+                .str("init: after hog, park exited ")
+                .int(code as i64)
+                .println(console);
+            exit(1)
+        }
+        Err(e) => fail("instance_wait (after hog)", e),
+    }
+    let probe = MemObj::create(kalium_sdk::memobj::MAX_SIZE)
+        .unwrap_or_else(|e| fail("memobj_create (after hog)", e));
+    cap_drop(probe.cap()).unwrap_or_else(|e| fail("cap_drop (after hog probe)", e));
+    cap_drop(park.cap()).unwrap_or_else(|e| fail("cap_drop (after hog park)", e));
+    say("init: after hog, spawn ok");
 
     // Phase 4: a hostile spawner. `greedy` floods the kernel with `park`
     // instances, dropping their capabilities, until the kernel-wide instance

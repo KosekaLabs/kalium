@@ -10,6 +10,7 @@
 //! [`crate::instance`] for why `Rc`/`RefCell` are the right tools in this
 //! kernel.
 
+use crate::budget::BudgetRef;
 use crate::error::Trap;
 use crate::types::{MemType, ResizableLimits, MAX_PAGES, PAGE_SIZE};
 use alloc::rc::Rc;
@@ -25,7 +26,12 @@ use core::cell::RefCell;
 pub type MemoryRef = Rc<RefCell<Memory>>;
 
 /// A bounds-checked linear memory.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+///
+/// A memory may be charged to a [`Budget`](crate::Budget)
+/// ([`set_budget`](Memory::set_budget)): its size is then counted against
+/// the budget, a `grow` the budget refuses fails like one the allocator
+/// refuses, and the charge is released when the memory is dropped.
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct Memory {
     bytes: Vec<u8>,
     /// Upper bound in pages (the smaller of the type's max and the instance
@@ -35,9 +41,56 @@ pub struct Memory {
     /// (`None` for a memory declared without one, however small the
     /// runtime cap `max_pages` is).
     declared_max: Option<u32>,
+    /// The budget the memory is charged to, and how many bytes it holds
+    /// of it (its size, from `set_budget` on).
+    budget: Option<BudgetRef>,
+    charged: usize,
+}
+
+impl Clone for Memory {
+    /// A copy of the contents and limits that is charged to no budget
+    /// (the original keeps its charge).
+    fn clone(&self) -> Memory {
+        Memory {
+            bytes: self.bytes.clone(),
+            max_pages: self.max_pages,
+            declared_max: self.declared_max,
+            budget: None,
+            charged: 0,
+        }
+    }
+}
+
+impl Drop for Memory {
+    fn drop(&mut self) {
+        if let Some(b) = &self.budget {
+            b.release(self.charged);
+        }
+    }
 }
 
 impl Memory {
+    /// Charges the memory's current size to `budget`, and every later
+    /// growth to it, until the memory is dropped (which releases the
+    /// charge) or `set_budget` is called again (which moves it). Returns
+    /// `false`, leaving the memory charged to its previous budget if any,
+    /// when the current size does not fit `budget`.
+    pub fn set_budget(&mut self, budget: &BudgetRef) -> bool {
+        if !budget.reserve(self.bytes.len()) {
+            return false;
+        }
+        if let Some(old) = self.budget.take() {
+            old.release(self.charged);
+        }
+        self.charged = self.bytes.len();
+        self.budget = Some(budget.clone());
+        true
+    }
+
+    /// The budget the memory is charged to, if any.
+    pub fn budget(&self) -> Option<&BudgetRef> {
+        self.budget.as_ref()
+    }
     /// Create a memory of `min_pages` pages that may grow to `max_pages`:
     /// a memory of type `(memory min_pages max_pages)`. Returns `None` if
     /// `min_pages > max_pages` or the allocation would be larger than
@@ -71,6 +124,8 @@ impl Memory {
             bytes,
             max_pages,
             declared_max: ty.limits.max,
+            budget: None,
+            charged: 0,
         })
     }
 
@@ -91,6 +146,8 @@ impl Memory {
             bytes,
             max_pages,
             declared_max: ty.limits.max,
+            budget: None,
+            charged: 0,
         })
     }
 
@@ -135,8 +192,9 @@ impl Memory {
     }
 
     /// Grow by `delta` pages. Returns the old size in pages, or `None` if the
-    /// limit would be exceeded or the allocation fails (`memory.grow`
-    /// semantics: the caller turns `None` into `-1`).
+    /// limit would be exceeded, the budget refuses the growth or the
+    /// allocation fails (`memory.grow` semantics: the caller turns `None`
+    /// into `-1`).
     pub fn grow(&mut self, delta: u32) -> Option<u32> {
         let old = self.size_pages();
         let new = old.checked_add(delta)?;
@@ -144,10 +202,20 @@ impl Memory {
             return None;
         }
         let new_len = (new as usize).checked_mul(PAGE_SIZE)?;
-        self.bytes
-            .try_reserve_exact(new_len - self.bytes.len())
-            .ok()?;
+        let added = new_len - self.bytes.len();
+        if self.budget.as_ref().is_some_and(|b| !b.reserve(added)) {
+            return None;
+        }
+        if self.bytes.try_reserve_exact(added).is_err() {
+            if let Some(b) = &self.budget {
+                b.release(added);
+            }
+            return None;
+        }
         self.bytes.resize(new_len, 0);
+        if self.budget.is_some() {
+            self.charged += added;
+        }
         Some(old)
     }
 

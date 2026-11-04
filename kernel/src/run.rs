@@ -289,6 +289,10 @@ fn shutdown(k: &Kernel, meter: &FuelMeter, code: i32) -> ! {
         meter.total_ns / 1_000_000,
         meter.instructions_per_second()
     );
+    // Every instance has exited and released its objects by now (the
+    // scenario checks this reads 0: nothing charged at `send`, `spawn`,
+    // `memobj_create` or `instance_snapshot` outlived its release).
+    println!("kalium: instance budget: {} bytes in use", k.budget.used());
     println!("kalium: init exited {}", code);
     kalium_hal::exit(if code == 0 && running == 0 { 0 } else { 1 })
 }

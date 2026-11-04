@@ -170,4 +170,5 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "kalium-abi",
+ "kalium-ipc",
 ]

@@ -1,9 +1,9 @@
 //! Embeds the boot image: the SDK example modules built by `cargo xtask wasm`
 //! into `target/wasm/<name>.wasm`, in the fixed order the plan prescribes
 //! (`init=0, ping=1, pong=2, rt=3, fair=4, faulty=5, park=6, greedy=7,
-//! revoked=8, shelf=9`; `init` and `greedy` hardcode the indices of the
-//! others), followed by the WASI demo programs from `demos/`
-//! (`hello_std=10, hello_c=11`), which
+//! revoked=8, shelf=9, hog=10`; `init` and `greedy` hardcode the indices
+//! of the others), followed by the WASI demo programs from `demos/`
+//! (`hello_std=11, hello_c=12`), which
 //! `cargo xtask demos` (run by `cargo xtask wasm`) puts in the same
 //! directory.
 //!
@@ -21,7 +21,7 @@ use std::path::PathBuf;
 
 /// Boot image order. Keep in sync with `xtask` (`WASM_MODULES` +
 /// `DEMO_MODULES`) and `sdk/examples/init`.
-const MODULES: [&str; 12] = [
+const MODULES: [&str; 13] = [
     "init",
     "ping",
     "pong",
@@ -32,6 +32,7 @@ const MODULES: [&str; 12] = [
     "greedy",
     "revoked",
     "shelf",
+    "hog",
     "hello_std",
     "hello_c",
 ];

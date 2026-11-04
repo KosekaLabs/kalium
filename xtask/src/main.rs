@@ -37,13 +37,13 @@ const QEMU_MEMORY: &str = "256M";
 const SELFTEST_ODD_MEMORY: &str = "129M";
 
 /// The SDK example modules in boot-image order (`init=0, ping=1, pong=2,
-/// rt=3, fair=4, faulty=5, park=6, greedy=7, revoked=8, shelf=9`); the
-/// kernel's `build.rs` embeds `target/wasm/<name>.wasm` in this order.
-const WASM_MODULES: [&str; 10] = [
-    "init", "ping", "pong", "rt", "fair", "faulty", "park", "greedy", "revoked", "shelf",
+/// rt=3, fair=4, faulty=5, park=6, greedy=7, revoked=8, shelf=9, hog=10`);
+/// the kernel's `build.rs` embeds `target/wasm/<name>.wasm` in this order.
+const WASM_MODULES: [&str; 11] = [
+    "init", "ping", "pong", "rt", "fair", "faulty", "park", "greedy", "revoked", "shelf", "hog",
 ];
 /// The WASI demo programs from `demos/`, which follow the SDK modules in
-/// the boot image (`hello_std=10, hello_c=11`). `hello_std` is a Rust `std`
+/// the boot image (`hello_std=11, hello_c=12`). `hello_std` is a Rust `std`
 /// program built for `wasm32-wasip1`; `hello_c` is a C program compiled with
 /// clang and wasi-libc, or taken from `demos/hello-c/prebuilt/` when that
 /// toolchain is absent.
@@ -845,6 +845,37 @@ const RT_MIN_MET: u32 = 380;
 /// How many `park` children `greedy` spawns before the kernel-wide instance
 /// limit refuses the next one: everything but `init` and `greedy` itself.
 const GREEDY_CHILDREN: u32 = kalium_abi::limits::MAX_INSTANCES as u32 - 2;
+/// What `hog` gets before each quota refuses it: memory objects of the
+/// largest size up to its memory object quota, linear memory up to the
+/// kernel's page limit, channels up to its channel quota, and a full queue
+/// on each.
+const HOG_MEMOBJS: u64 =
+    kalium_abi::limits::MAX_MEMOBJ_BYTES_PER_INSTANCE / kalium_abi::limits::MAX_MEMOBJ_SIZE;
+const HOG_PAGES: u64 = 256;
+const HOG_CHANNELS: u64 = kalium_abi::limits::MAX_CHANNELS_PER_INSTANCE as u64;
+const HOG_QUEUE_DEPTH: u64 = kalium_abi::limits::CHANNEL_QUEUE_DEPTH as u64;
+const HOG_MESSAGES: u64 = HOG_CHANNELS * HOG_QUEUE_DEPTH;
+/// The messages with no payload but the most capabilities a message may
+/// carry that `hog` sends on its fresh channel (the queue less the
+/// 4096-byte message already in it) and how many messages of that queue
+/// it takes back (half of it: the 4096-byte one and then cap-only ones).
+const HOG_CAP_ONLY_SENT: u64 = HOG_QUEUE_DEPTH - 1;
+const HOG_RECEIVED_BACK: u64 = HOG_QUEUE_DEPTH / 2;
+/// What `hog`'s exit drains from the channels it still holds: a full queue
+/// of 4096-byte messages on every channel but the one it gave back, and
+/// what is left of the fresh channel, which is cap-only messages. The
+/// bytes are what the kernel charged for them at `send` and must give back
+/// to its budget: the cost of a queued message
+/// (`kalium_ipc::Message::cost_of`: slot, payload and capabilities), not
+/// just the payload, or a queue of cap-only messages is free and eats the
+/// kernel's headroom.
+const HOG_DRAINED_MESSAGES: u64 =
+    (HOG_CHANNELS - 1) * HOG_QUEUE_DEPTH + (HOG_QUEUE_DEPTH - HOG_RECEIVED_BACK);
+const HOG_DRAINED_BYTES: u64 = (HOG_CHANNELS - 1)
+    * HOG_QUEUE_DEPTH
+    * kalium_ipc::Message::cost_of(kalium_abi::limits::MAX_MESSAGE_LEN, 0) as u64
+    + (HOG_QUEUE_DEPTH - HOG_RECEIVED_BACK)
+        * kalium_ipc::Message::cost_of(0, kalium_abi::limits::MAX_MESSAGE_CAPS) as u64;
 
 /// One expected console line.
 enum Expect {
@@ -863,6 +894,24 @@ enum Expect {
     /// `init: shelf init N us, restore M us` with `M < N`: starting an
     /// instance from the snapshot was faster than its initialisation.
     ShelfRestoreFaster,
+    /// `hog: memobjs N, pages P, channels C, messages M` with exactly the
+    /// quotas' values: each quota held, and not before its limit.
+    HogQuota,
+    /// `hog: N cap-only messages sent, M received back` with exactly
+    /// [`HOG_CAP_ONLY_SENT`] and [`HOG_RECEIVED_BACK`]: the queue took
+    /// zero-byte messages carrying capabilities up to its depth and gave
+    /// them back.
+    HogCapOnly,
+    /// `kalium: instance <id> (hog) exit drained N queued messages, B
+    /// budget bytes` with exactly [`HOG_DRAINED_MESSAGES`] and
+    /// [`HOG_DRAINED_BYTES`]: the kernel charged every queued message's
+    /// slot, payload and capabilities to its budget and released them with
+    /// the channels.
+    HogDrain,
+    /// `kalium: instance budget: 0 bytes in use`: once every instance has
+    /// exited, nothing charged to the kernel-wide budget outlived its
+    /// release.
+    BudgetSettled,
 }
 
 impl Expect {
@@ -883,6 +932,16 @@ impl Expect {
             Expect::ShelfRestoreFaster => {
                 parse_shelf_times(line).is_some_and(|(init, restore)| restore < init)
             }
+            Expect::HogQuota => {
+                parse_hog(line) == Some((HOG_MEMOBJS, HOG_PAGES, HOG_CHANNELS, HOG_MESSAGES))
+            }
+            Expect::HogCapOnly => {
+                parse_hog_cap_only(line) == Some((HOG_CAP_ONLY_SENT, HOG_RECEIVED_BACK))
+            }
+            Expect::HogDrain => {
+                parse_hog_drain(line) == Some((HOG_DRAINED_MESSAGES, HOG_DRAINED_BYTES))
+            }
+            Expect::BudgetSettled => parse_budget_in_use(line) == Some(0),
         }
     }
 
@@ -898,8 +957,58 @@ impl Expect {
             }
             Expect::HelloCTime => "`hello_c: time() ok (N s)`".into(),
             Expect::ShelfRestoreFaster => "`init: shelf init N us, restore M us` with M < N".into(),
+            Expect::HogQuota => format!(
+                "`hog: memobjs {HOG_MEMOBJS}, pages {HOG_PAGES}, channels {HOG_CHANNELS}, messages {HOG_MESSAGES}`"
+            ),
+            Expect::HogCapOnly => format!(
+                "`hog: {HOG_CAP_ONLY_SENT} cap-only messages sent, {HOG_RECEIVED_BACK} received back`"
+            ),
+            Expect::HogDrain => format!(
+                "`kalium: instance <id> (hog) exit drained {HOG_DRAINED_MESSAGES} queued messages, {HOG_DRAINED_BYTES} budget bytes`"
+            ),
+            Expect::BudgetSettled => "`kalium: instance budget: 0 bytes in use`".into(),
         }
     }
+}
+
+/// Parses `hog: N cap-only messages sent, M received back` into `(N, M)`.
+fn parse_hog_cap_only(line: &str) -> Option<(u64, u64)> {
+    let rest = line.strip_prefix("hog: ")?;
+    let (sent, rest) = rest.split_once(" cap-only messages sent, ")?;
+    let received = rest.strip_suffix(" received back")?;
+    Some((sent.parse().ok()?, received.parse().ok()?))
+}
+
+/// Parses `kalium: instance <id> (hog) exit drained N queued messages, B
+/// budget bytes` into `(N, B)`.
+fn parse_hog_drain(line: &str) -> Option<(u64, u64)> {
+    let rest = line.strip_prefix("kalium: instance ")?;
+    let (_, rest) = rest.split_once(" (hog) exit drained ")?;
+    let (messages, rest) = rest.split_once(" queued messages, ")?;
+    let bytes = rest.strip_suffix(" budget bytes")?;
+    Some((messages.parse().ok()?, bytes.parse().ok()?))
+}
+
+/// Parses `kalium: instance budget: N bytes in use` into `N`.
+fn parse_budget_in_use(line: &str) -> Option<u64> {
+    line.strip_prefix("kalium: instance budget: ")?
+        .strip_suffix(" bytes in use")?
+        .parse()
+        .ok()
+}
+
+/// Parses `hog: memobjs N, pages P, channels C, messages M`.
+fn parse_hog(line: &str) -> Option<(u64, u64, u64, u64)> {
+    let rest = line.strip_prefix("hog: memobjs ")?;
+    let (memobjs, rest) = rest.split_once(", pages ")?;
+    let (pages, rest) = rest.split_once(", channels ")?;
+    let (channels, messages) = rest.split_once(", messages ")?;
+    Some((
+        memobjs.parse().ok()?,
+        pages.parse().ok()?,
+        channels.parse().ok()?,
+        messages.parse().ok()?,
+    ))
 }
 
 /// Parses `init: shelf init N us, restore M us` into `(N, M)`.
@@ -991,10 +1100,31 @@ const ORDERED: &[Expect] = &[
     Expect::Line("init: resumed shelf exited 0"),
     Expect::Line("init: shelf exited 0"),
     Expect::ShelfRestoreFaster,
+    // Resource quotas: `hog` hoards memory objects, linear memory, channels
+    // and queue space until each quota refuses it (the counts are the
+    // quotas' values exactly), finds the kernel still working, and exits
+    // holding everything; init then spawns an ordinary instance and
+    // creates a memory object of the largest size to show the kernel is
+    // unharmed and the memory was released.
+    // The kernel-wide budget charges a queued message's capabilities and
+    // slot, not only its payload: `hog` fills the rest of its fresh queue
+    // with zero-byte messages carrying four capabilities each, takes half
+    // back, and the kernel's report of what its exit drained gives back
+    // exactly their cost (`Message::cost_of`).
+    Expect::HogQuota,
+    Expect::HogCapOnly,
+    Expect::Line("hog: quota reached, kernel alive"),
+    Expect::HogDrain,
+    Expect::Line("init: hog exited 0"),
+    Expect::Line("init: after hog, spawn ok"),
     Expect::GreedyLimit,
     Expect::Line("greedy: slot reclaimed, park exited 0"),
     Expect::Line("init: greedy exited 0"),
     Expect::Line("init: done"),
+    // Everything charged to the budget was released: `send`, `spawn`,
+    // `memobj_create` and `instance_snapshot` charge what `recv`, exit
+    // and the objects' destruction give back.
+    Expect::BudgetSettled,
     Expect::Line("kalium: init exited 0"),
 ];
 
@@ -1027,6 +1157,30 @@ fn check_scenario(out: &str) -> Vec<String> {
                             Some((init, restore)) => {
                                 format!(" (found `init {init} us, restore {restore} us`)")
                             }
+                            None => String::new(),
+                        }
+                    }
+                    Expect::HogQuota => match lines.iter().find_map(|l| parse_hog(l)) {
+                        Some((m, p, c, n)) => {
+                            format!(" (found `memobjs {m}, pages {p}, channels {c}, messages {n}`)")
+                        }
+                        None => String::new(),
+                    },
+                    Expect::HogCapOnly => match lines.iter().find_map(|l| parse_hog_cap_only(l)) {
+                        Some((s, r)) => {
+                            format!(" (found `{s} cap-only messages sent, {r} received back`)")
+                        }
+                        None => String::new(),
+                    },
+                    Expect::HogDrain => match lines.iter().find_map(|l| parse_hog_drain(l)) {
+                        Some((n, b)) => {
+                            format!(" (found `drained {n} queued messages, {b} budget bytes`)")
+                        }
+                        None => String::new(),
+                    },
+                    Expect::BudgetSettled => {
+                        match lines.iter().find_map(|l| parse_budget_in_use(l)) {
+                            Some(b) => format!(" (found `{b} bytes in use`)"),
                             None => String::new(),
                         }
                     }
@@ -1192,8 +1346,27 @@ fn fmt_check(root: &Path) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::LazyLock;
 
-    const GOOD: &str = "kalium: boot\n\
+    /// [`GOOD_TEMPLATE`] with `hog`'s figures filled in from the constants
+    /// the scenario is checked against.
+    static GOOD: LazyLock<String> = LazyLock::new(|| {
+        GOOD_TEMPLATE
+            .replace(
+                "{hog_cap_only}",
+                &format!(
+                    "{HOG_CAP_ONLY_SENT} cap-only messages sent, {HOG_RECEIVED_BACK} received back"
+                ),
+            )
+            .replace(
+                "{hog_drain}",
+                &format!(
+                    "{HOG_DRAINED_MESSAGES} queued messages, {HOG_DRAINED_BYTES} budget bytes"
+                ),
+            )
+    });
+
+    const GOOD_TEMPLATE: &str = "kalium: boot\n\
         hello from init\n\
         kalium: instance 0 (init) spawned instance 1 (ping, fair)\n\
         kalium: instance 1 (ping) exited 0\n\
@@ -1258,6 +1431,17 @@ mod tests {
         kalium: instance 1 (shelf) exited 0 after 11665700 instructions\n\
         init: shelf exited 0\n\
         init: shelf init 284494 us, restore 27429 us\n\
+        kalium: instance 0 (init) spawned instance 1 (hog, fair)\n\
+        hog: memobjs 2, pages 256, channels 64, messages 1024\n\
+        hog: send 4096 bytes on a fresh channel: ok\n\
+        hog: {hog_cap_only}\n\
+        hog: quota reached, kernel alive\n\
+        kalium: instance 1 (hog) exited 0 after 20000 instructions\n\
+        kalium: instance 1 (hog) exit drained {hog_drain}\n\
+        init: hog exited 0\n\
+        kalium: instance 0 (init) spawned instance 1 (park, fair)\n\
+        kalium: instance 1 (park) exited 0 after 53 instructions\n\
+        init: after hog, spawn ok\n\
         kalium: instance 0 (init) spawned instance 1 (greedy, fair)\n\
         kalium: instance 1 (greedy) spawned instance 2 (park, fair)\n\
         greedy: spawn refused (ENOMEM) after 30 instances\n\
@@ -1266,14 +1450,15 @@ mod tests {
         kalium: instance 1 (greedy) exited 0\n\
         init: greedy exited 0\n\
         init: done\n\
+        kalium: instance budget: 0 bytes in use\n\
         kalium: init exited 0\n";
 
     #[test]
     fn good_output_passes() {
         assert!(
-            check_scenario(GOOD).is_empty(),
+            check_scenario(&GOOD).is_empty(),
             "{:?}",
-            check_scenario(GOOD)
+            check_scenario(&GOOD)
         );
         assert!(check_scenario(&GOOD.replace('\n', "\r\n")).is_empty());
     }
@@ -1305,11 +1490,12 @@ mod tests {
             .replace("init: ping exited 0\n", "")
             .replace("init: done\n", "init: ping exited 0\ninit: done\n");
         assert!(check_scenario(&late_ping)[0].contains("before"));
-        let panicked = format!("{GOOD}kalium: panic at x: y\n");
+        let panicked = format!("{}kalium: panic at x: y\n", *GOOD);
         assert_eq!(check_scenario(&panicked).len(), 1);
         let faulted = format!(
-            "{GOOD}kalium: unhandled Synchronous exception (CurrentElSp0)\n\
-             kalium: kernel fault: data abort (permission fault, level 3, write) at FAR_EL1 = 0x1, ELR_EL1 = 0x2\n"
+            "{}kalium: unhandled Synchronous exception (CurrentElSp0)\n\
+             kalium: kernel fault: data abort (permission fault, level 3, write) at FAR_EL1 = 0x1, ELR_EL1 = 0x2\n",
+            *GOOD
         );
         assert_eq!(check_scenario(&faulted).len(), 2);
     }
@@ -1423,5 +1609,134 @@ mod tests {
             .replace("greedy: slot reclaimed, park exited 0\n", "")
             .replace("init: greedy exited 0", "init: greedy exited 1");
         assert_eq!(check_scenario(&unlimited).len(), 3);
+    }
+
+    #[test]
+    fn hog_must_hit_every_quota_exactly() {
+        assert_eq!(
+            parse_hog("hog: memobjs 2, pages 256, channels 64, messages 1024"),
+            Some((2, 256, 64, 1024))
+        );
+        assert_eq!(
+            parse_hog("hog: memobjs x, pages 256, channels 64, messages 1024"),
+            None
+        );
+        assert_eq!((HOG_MEMOBJS, HOG_CHANNELS, HOG_MESSAGES), (2, 64, 1024));
+        // A quota that did not hold (or held too early) fails the scenario.
+        for wrong in [
+            "hog: memobjs 3, pages 256, channels 64, messages 1024",
+            "hog: memobjs 2, pages 255, channels 64, messages 1024",
+            "hog: memobjs 2, pages 256, channels 63, messages 1024",
+            "hog: memobjs 2, pages 256, channels 64, messages 1023",
+        ] {
+            let off = GOOD.replace(
+                "hog: memobjs 2, pages 256, channels 64, messages 1024",
+                wrong,
+            );
+            let f = check_scenario(&off);
+            assert_eq!(f.len(), 1, "{f:?}");
+            assert!(f[0].contains("found `memobjs"), "{f:?}");
+        }
+        // A kernel that panics under the hog: the forbidden line and
+        // everything after it missing.
+        let panicked = GOOD
+            .split("hog: memobjs")
+            .next()
+            .map(|head| {
+                format!("{head}kalium: panic at x: memory allocation of 4096 bytes failed\n")
+            })
+            .unwrap();
+        assert!(check_scenario(&panicked).len() > 5);
+        // The kernel survived but a later spawn did not.
+        let no_spawn = GOOD.replace("init: after hog, spawn ok\n", "");
+        assert_eq!(check_scenario(&no_spawn).len(), 1);
+        // An ENOMEM on the fresh send is acceptable; a panic line is not.
+        let enomem = GOOD.replace(
+            "hog: send 4096 bytes on a fresh channel: ok",
+            "hog: send 4096 bytes on a fresh channel: ENOMEM",
+        );
+        assert!(check_scenario(&enomem).is_empty());
+    }
+
+    /// Regression: the kernel once charged a queued message's payload
+    /// only, so a zero-byte message carrying capabilities parked uncharged
+    /// heap. The scenario checks what `hog`'s exit drains against the full
+    /// cost of a queued message, and that the budget settles at zero.
+    #[test]
+    fn hog_cap_only_messages_are_charged_and_released() {
+        assert_eq!((HOG_CAP_ONLY_SENT, HOG_RECEIVED_BACK), (15, 8));
+        assert_eq!(HOG_DRAINED_MESSAGES, 63 * 16 + 8);
+        let payload_only = 63 * 16 * kalium_abi::limits::MAX_MESSAGE_LEN as u64;
+        // Slot, payload and capabilities: strictly more than the payload,
+        // and the cap-only messages are not free.
+        assert!(HOG_DRAINED_BYTES > payload_only);
+        assert!(kalium_ipc::Message::cost_of(0, 4) > 0);
+        assert_eq!(
+            parse_hog_cap_only("hog: 15 cap-only messages sent, 8 received back"),
+            Some((15, 8))
+        );
+        assert_eq!(
+            parse_hog_cap_only("hog: x cap-only messages sent, 8 received back"),
+            None
+        );
+        assert_eq!(
+            parse_hog_drain(
+                "kalium: instance 1 (hog) exit drained 1016 queued messages, 4179200 budget bytes"
+            ),
+            Some((1016, 4179200))
+        );
+        assert_eq!(
+            parse_hog_drain(
+                "kalium: instance 1 (park) exit drained 1 queued messages, 1 budget bytes"
+            ),
+            None
+        );
+        assert_eq!(
+            parse_budget_in_use("kalium: instance budget: 0 bytes in use"),
+            Some(0)
+        );
+        assert_eq!(
+            parse_budget_in_use("kalium: instance budget: 4096 bytes in use"),
+            Some(4096)
+        );
+        assert_eq!(
+            parse_budget_in_use("kalium: instance budget: x bytes in use"),
+            None
+        );
+        let drain =
+            format!("{HOG_DRAINED_MESSAGES} queued messages, {HOG_DRAINED_BYTES} budget bytes");
+        // Payload-only accounting: the right number of messages, too few bytes.
+        let payload_only_line =
+            format!("{HOG_DRAINED_MESSAGES} queued messages, {payload_only} budget bytes");
+        let f = check_scenario(&GOOD.replace(&drain, &payload_only_line));
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0].contains("found `drained"), "{f:?}");
+        // A message not drained (or drained twice).
+        let fewer = format!(
+            "{} queued messages, {HOG_DRAINED_BYTES} budget bytes",
+            HOG_DRAINED_MESSAGES - 1
+        );
+        assert_eq!(check_scenario(&GOOD.replace(&drain, &fewer)).len(), 1);
+        // The queue refused the cap-only messages early, or gave none back.
+        for wrong in [
+            "hog: 14 cap-only messages sent, 8 received back",
+            "hog: 15 cap-only messages sent, 0 received back",
+        ] {
+            let f = check_scenario(
+                &GOOD.replace("hog: 15 cap-only messages sent, 8 received back", wrong),
+            );
+            assert_eq!(f.len(), 1, "{f:?}");
+            assert!(f[0].contains("found `"), "{f:?}");
+        }
+        // Something charged to the budget was never released.
+        let leaked = GOOD.replace(
+            "kalium: instance budget: 0 bytes in use",
+            "kalium: instance budget: 4096 bytes in use",
+        );
+        let f = check_scenario(&leaked);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0].contains("found `4096 bytes in use`"), "{f:?}");
+        let no_report = GOOD.replace("kalium: instance budget: 0 bytes in use\n", "");
+        assert_eq!(check_scenario(&no_report).len(), 1);
     }
 }

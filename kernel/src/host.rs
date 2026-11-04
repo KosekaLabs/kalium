@@ -26,7 +26,14 @@
 //!   `sleep` use the same mechanism with a per-instance flag/deadline so
 //!   that the re-issued call completes;
 //! - the [`Effect`] tells the run loop how to account the slice when the
-//!   outcome is `Block`.
+//!   outcome is `Block`;
+//! - nothing sized by the instance's arguments is allocated infallibly:
+//!   message copies, capability lists and the like go through
+//!   `try_reserve` ([`try_vec`]) and report `ENOMEM`, the objects an
+//!   instance creates are charged to its quotas and the kernel-wide
+//!   budget first (`kernel.rs`, "Quotas and the instance budget"), and
+//!   capability lists longer than a table (`wait_any`, `spawn`) or a
+//!   message (`send`) could hold are refused before they are read.
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -45,7 +52,7 @@ use kalium_wasm::{
     ValType, Value,
 };
 
-use crate::kernel::{Kernel, Object, CAP_TABLE_LIMIT};
+use crate::kernel::{Kernel, Object, Quota, CAP_TABLE_LIMIT};
 
 // Host function ids: positions in `kalium_abi::imports::ALL_IMPORTS`.
 pub const CONSOLE_WRITE: u32 = 0;
@@ -294,16 +301,35 @@ pub(crate) fn range_n(
     range(mem, ptr, bytes)
 }
 
+/// An empty vector with room for `n` elements, or `ENOMEM`: the host
+/// never lets an allocation sized by an instance's arguments abort the
+/// kernel.
+pub(crate) fn try_vec<T>(n: usize) -> Result<Vec<T>, i32> {
+    let mut v = Vec::new();
+    v.try_reserve_exact(n).map_err(|_| errno::ENOMEM)?;
+    Ok(v)
+}
+
+/// A copy of `bytes`, or `ENOMEM`.
+pub(crate) fn try_copy(bytes: &[u8]) -> Result<Vec<u8>, i32> {
+    let mut v = try_vec(bytes.len())?;
+    v.extend_from_slice(bytes);
+    Ok(v)
+}
+
 fn read_i32s(mem: &Memory, ptr: i32, count: i32) -> Result<Vec<i32>, i32> {
     let (p, len) = range_n(mem, ptr, count, 4)?;
     if len == 0 {
         return Ok(Vec::new());
     }
     let bytes = mem.slice(p, len).map_err(|_| errno::EFAULT)?;
-    Ok(bytes
-        .chunks_exact(4)
-        .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect())
+    let mut v = try_vec(len / 4)?;
+    v.extend(
+        bytes
+            .chunks_exact(4)
+            .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]])),
+    );
+    Ok(v)
 }
 
 pub(crate) fn write_bytes(mem: &mut Memory, ptr: u32, bytes: &[u8]) -> Result<(), i32> {
@@ -507,33 +533,46 @@ impl<'a> HostCall<'a> {
 
     // -- kalium:ipc ------------------------------------------------------------
 
+    /// `channel_create`: the channel counts against the caller's channel
+    /// quota (`MAX_CHANNELS_PER_INSTANCE`, `ENOMEM`) until it is freed or
+    /// the caller exits.
     fn channel_create(&mut self, mem: &mut Memory, out_send: i32, out_recv: i32) -> R {
         let (sp, _) = range(mem, out_send, 4)?;
         let (rp, _) = range(mem, out_recv, 4)?;
         if self.caps().len() + 2 > self.caps().limit() {
             return Err(errno::ENOMEM);
         }
-        let id = self.k.new_object(
+        self.k.charge(self.cur, Quota::Channel, 0)?;
+        // Pinned while the two capabilities are minted, so that a failure
+        // half-way frees the object (and its charge) through the unpin.
+        let id = self.k.new_owned_object(
             Object::Channel {
                 channel: Channel::with_abi_limits(),
                 waiters: WaitQueue::new(),
             },
+            1,
+            self.cur,
             0,
         );
+        let now = timer::now_ns();
         let send = Rights::from_bits_truncate(rights::CHANNEL_SEND_END);
         let recv = Rights::from_bits_truncate(rights::CHANNEL_RECV_END);
-        let si = self
-            .k
-            .mint_root(self.cur, id, ObjectKind::Channel, send)
-            .map_err(cap_errno)?;
-        let ri = match self.k.mint_root(self.cur, id, ObjectKind::Channel, recv) {
+        let si = match self.k.mint_root(self.cur, id, ObjectKind::Channel, send) {
             Ok(i) => i,
             Err(e) => {
-                let now = timer::now_ns();
-                let _ = self.k.destroy_slot(self.cur, si, now);
+                self.k.unpin(id, now);
                 return Err(cap_errno(e));
             }
         };
+        let ri = match self.k.mint_root(self.cur, id, ObjectKind::Channel, recv) {
+            Ok(i) => i,
+            Err(e) => {
+                let _ = self.k.destroy_slot(self.cur, si, now);
+                self.k.unpin(id, now);
+                return Err(cap_errno(e));
+            }
+        };
+        self.k.unpin(id, now);
         write_i32(mem, sp, si.as_i32())?;
         write_i32(mem, rp, ri.as_i32())?;
         OK
@@ -545,8 +584,14 @@ impl<'a> HostCall<'a> {
             .check_cap(idx, ObjectKind::Channel, Rights::SEND)?
             .object;
         let (mp, ml) = range(mem, msg, len)?;
+        range_n(mem, caps, ncaps, 4)?;
+        // More capabilities than a message may carry: refused before the
+        // list is read (and allocated), with the error `can_send` gives.
+        if ncaps as usize > kalium_abi::limits::MAX_MESSAGE_CAPS {
+            return Err(errno::ETOOBIG);
+        }
         let list = read_i32s(mem, caps, ncaps)?;
-        let mut idxs = Vec::with_capacity(list.len());
+        let mut idxs = try_vec(list.len())?;
         for c in list {
             let i = cap_index(c)?;
             self.check_cap_rights(i, Rights::TRANSFER)?;
@@ -557,17 +602,41 @@ impl<'a> HostCall<'a> {
             .ok_or(errno::EBADCAP)?
             .can_send(ml, idxs.len())
             .map_err(|e| e.errno())?;
-        let bytes = if ml > 0 {
-            mem.slice(mp, ml).map_err(|_| errno::EFAULT)?.to_vec()
+        // The kernel's copy of the message (its queue slot, the payload and
+        // the capabilities it carries: `Message::cost_of`) is charged to
+        // the kernel-wide budget until it is received (or the channel is
+        // destroyed with it still queued). A message with no payload but
+        // capabilities is not free.
+        let cost = Message::cost_of(ml, idxs.len());
+        if !self.k.budget.reserve(cost) {
+            return Err(errno::ENOMEM);
+        }
+        let bytes = match if ml > 0 {
+            mem.slice(mp, ml)
+                .map_err(|_| errno::EFAULT)
+                .and_then(try_copy)
         } else {
-            Vec::new()
+            Ok(Vec::new())
+        } {
+            Ok(b) => b,
+            Err(e) => {
+                self.k.budget.release(cost);
+                return Err(e);
+            }
         };
-        let mut moved = Vec::with_capacity(idxs.len());
+        let mut moved = match try_vec(idxs.len()) {
+            Ok(v) => v,
+            Err(e) => {
+                self.k.budget.release(cost);
+                return Err(e);
+            }
+        };
         for &i in &idxs {
             match self.caps().take(i) {
                 Ok(c) => moved.push(c),
                 Err(e) => {
                     restore(self.caps(), moved);
+                    self.k.budget.release(cost);
                     return Err(cap_errno(e));
                 }
             }
@@ -581,6 +650,7 @@ impl<'a> HostCall<'a> {
             }
             Err((e, msg)) => {
                 restore(self.caps(), msg.caps);
+                self.k.budget.release(cost);
                 Err(e.errno())
             }
         }
@@ -610,6 +680,8 @@ impl<'a> HostCall<'a> {
             Err(IpcError::Empty) if blocking => return Ok(self.block_on(&[chan])),
             Err(e) => return Err(e.errno()),
         };
+        // Charged at `send`: the queue slot, the payload and the caps.
+        self.k.budget.release(msg.cost());
         let Message { bytes, caps: mcaps } = msg;
         let n = bytes.len().min(bl);
         write_bytes(mem, bp, &bytes[..n])?;
@@ -643,9 +715,15 @@ impl<'a> HostCall<'a> {
         if n <= 0 {
             return Err(errno::EINVAL);
         }
-        let list = read_i32s(mem, caps, n)?;
+        range_n(mem, caps, n, 4)?;
         let (op, _) = range(mem, out_index, 4)?;
-        let mut ids = Vec::with_capacity(list.len());
+        // More entries than the table has slots is a bad argument, and
+        // keeps the list the call reads bounded.
+        if n as usize > CAP_TABLE_LIMIT {
+            return Err(errno::EINVAL);
+        }
+        let list = read_i32s(mem, caps, n)?;
+        let mut ids = try_vec(list.len())?;
         for c in list {
             let i = cap_index(c)?;
             let id = self.check_cap(i, ObjectKind::Channel, Rights::WAIT)?.object;
@@ -669,20 +747,38 @@ impl<'a> HostCall<'a> {
     fn memobj_create(&mut self, mem: &mut Memory, size: i64, out: i32) -> R {
         let (op, _) = range(mem, out, 4)?;
         let size = u64::try_from(size).map_err(|_| errno::EINVAL)?;
+        if size > kalium_mm::MAX_MEMOBJ_BYTES {
+            return Err(errno::ETOOBIG);
+        }
         if self.caps().len() >= self.caps().limit() {
             return Err(errno::ENOMEM);
         }
-        let obj = MemObject::new(size).map_err(mem_errno)?;
-        let id = self.k.new_object(Object::MemObj(obj), 0);
-        let ix = self
+        // The object counts against the caller's memory object quota
+        // (`MAX_MEMOBJ_BYTES_PER_INSTANCE`) and the kernel-wide budget,
+        // both checked before the bytes are allocated.
+        let bytes = usize::try_from(size).map_err(|_| errno::ETOOBIG)?;
+        self.k.charge(self.cur, Quota::MemObj, bytes)?;
+        let obj = match MemObject::new(size) {
+            Ok(o) => o,
+            Err(e) => {
+                self.k.refund(self.cur, Quota::MemObj, bytes);
+                return Err(mem_errno(e));
+            }
+        };
+        let now = timer::now_ns();
+        let id = self
             .k
-            .mint_root(
-                self.cur,
-                id,
-                ObjectKind::MemObj,
-                Rights::from_bits_truncate(rights::MEMOBJ_OWNER),
-            )
-            .map_err(cap_errno)?;
+            .new_owned_object(Object::MemObj(obj), 1, self.cur, bytes);
+        let minted = self.k.mint_root(
+            self.cur,
+            id,
+            ObjectKind::MemObj,
+            Rights::from_bits_truncate(rights::MEMOBJ_OWNER),
+        );
+        // The pin kept the object through minting; without a capability
+        // it is freed (and its charge released) here.
+        self.k.unpin(id, now);
+        let ix = minted.map_err(cap_errno)?;
         write_i32(mem, op, ix.as_i32())?;
         OK
     }
@@ -792,6 +888,14 @@ impl<'a> HostCall<'a> {
             Some(State::Blocked) | Some(State::Sleeping { .. }) => {}
             _ => return Err(errno::EBUSY),
         }
+        // The snapshot counts against the caller's snapshot quota
+        // (`MAX_SNAPSHOT_BYTES_PER_INSTANCE`) and the kernel-wide budget:
+        // checked against the memory size before the copy is made, and
+        // charged exactly once the encoded size is known.
+        let estimate = self.k.memory_size_of(target).ok_or(errno::EBUSY)?;
+        if !self.k.can_charge(self.cur, Quota::Snapshot, estimate) {
+            return Err(errno::ENOMEM);
+        }
         let snapshot = match self.k.snapshot_instance(target) {
             Some(Ok(s)) => s,
             Some(Err(WasmError::OutOfMemory)) => return Err(errno::ENOMEM),
@@ -801,13 +905,16 @@ impl<'a> HostCall<'a> {
         };
         let module = self.k.instances[target].module;
         let (pages, bytes) = (snapshot.memory_pages(), snapshot.encoded_len());
+        self.k.charge(self.cur, Quota::Snapshot, bytes)?;
         let now = timer::now_ns();
-        let sid = self.k.new_object(
+        let sid = self.k.new_owned_object(
             Object::Snapshot {
                 module,
                 snapshot: Arc::new(snapshot),
             },
             1,
+            self.cur,
+            bytes,
         );
         let minted = self.k.mint_root(
             self.cur,
@@ -892,6 +999,13 @@ impl<'a> HostCall<'a> {
         out: i32,
     ) -> R {
         let (op, _) = range(mem, out, 4)?;
+        range_n(mem, caps, ncaps, 4)?;
+        // More capabilities than the child's table could hold: refused
+        // before the list is read (and allocated), with the error the
+        // child's table would give.
+        if ncaps as usize > CAP_TABLE_LIMIT {
+            return Err(errno::ENOMEM);
+        }
         let list = read_i32s(mem, caps, ncaps)?;
         let class = match class {
             abi_sched::CLASS_FAIR => Class::Fair { weight: 1 },
@@ -904,7 +1018,7 @@ impl<'a> HostCall<'a> {
         if !class.is_valid() {
             return Err(errno::EINVAL);
         }
-        let mut idxs = Vec::with_capacity(list.len());
+        let mut idxs = try_vec(list.len())?;
         for c in list {
             let i = cap_index(c)?;
             self.check_cap_rights(i, Rights::TRANSFER)?;
@@ -914,7 +1028,7 @@ impl<'a> HostCall<'a> {
         if self.caps().len().saturating_sub(idxs.len()) >= self.caps().limit() {
             return Err(errno::ENOMEM);
         }
-        let mut moved = Vec::with_capacity(idxs.len());
+        let mut moved = try_vec(idxs.len())?;
         for &i in &idxs {
             match self.caps().take(i) {
                 Ok(c) => moved.push(c),
@@ -940,9 +1054,15 @@ impl<'a> HostCall<'a> {
         };
         let id = match created {
             Ok(id) => id,
-            Err((e, child)) => {
-                let back: Vec<Capability> = child.iter().map(|(_, c)| *c).collect();
-                restore(self.caps(), back);
+            Err((e, mut child)) => {
+                // Back to the caller, last taken first so that each
+                // regains its slot (as `restore` does): the child's slots
+                // `0..n` hold them in the order they were taken.
+                for i in (0..child.len()).rev() {
+                    if let Ok(c) = CapIndex::try_from(i).and_then(|i| child.take(i)) {
+                        let _ = self.caps().insert(c);
+                    }
+                }
                 return Err(e.errno());
             }
         };

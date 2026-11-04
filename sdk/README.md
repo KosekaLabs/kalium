@@ -5,7 +5,8 @@ This directory is a separate Cargo workspace that targets
 the kernel's host ABI, and the example services in `examples/` that make up
 the M1 boot-test scenario (`init`, `ping`, `pong`, `rt`, `fair`, `faulty`)
 plus the hostile pair that checks the kernel's instance limit (`greedy`,
-`park`), the revocation victim `revoked` and the shelved service `shelf`.
+`park`), the revocation victim `revoked`, the shelved service `shelf` and
+the hoarder `hog` that checks the kernel's resource quotas.
 
 The ABI itself (import names, errno values, rights, kinds, wire layouts) is
 defined once, in `crates/kalium-abi`, and both the kernel and this SDK are
@@ -22,8 +23,8 @@ cargo xtask wasm
 builds every example in release mode (`opt-level = "s"`, LTO, `panic =
 "abort"`, stripped) and copies them to `target/wasm/<name>.wasm` in boot
 image order (`init=0, ping=1, pong=2, rt=3, fair=4, faulty=5, park=6,
-greedy=7, revoked=8, shelf=9`), then builds the WASI demo programs from `demos/`
-after them (`hello_std=10, hello_c=11`; they do not use the SDK, see
+greedy=7, revoked=8, shelf=9, hog=10`), then builds the WASI demo programs from `demos/`
+after them (`hello_std=11, hello_c=12`; they do not use the SDK, see
 `docs/running.md`, "The WASI demos"). The kernel's `build.rs` embeds them
 all from there. To build the SDK examples by hand:
 
@@ -203,6 +204,12 @@ instances from the snapshot at `resume`, each checking the table's
 checksum (`shelf: resumed ok`, `init: resumed shelf exited 0`), closes
 the original's channel (`init: shelf exited 0`) and prints
 `init: shelf init N us, restore M us`, where the restore must be the
-faster start.
+faster start. Then `hog` hoards memory objects, linear memory, channels
+and queue space until each quota refuses it, prints the counts
+(`hog: memobjs 2, pages 256, channels 64, messages 1024`), checks that a
+4096-byte `send` on a fresh channel still works and exits 0 holding
+everything (`hog: quota reached, kernel alive`); `init` then spawns `park`
+and creates a 16 MiB memory object to show the kernel is unharmed
+(`init: after hog, spawn ok`).
 `init` waits for each instance, prints `init: <name> exited <code>` for
 each, prints `init: done` and exits with 0.

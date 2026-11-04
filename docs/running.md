@@ -3,7 +3,8 @@
 The M1 prototype boots on QEMU `virt` (aarch64, cortex-a72, GICv2), runs the
 boot-test scenario from [prototype-plan.md](prototype-plan.md) with the
 example services from `sdk/examples` (the six of the plan, the hostile
-`greedy`/`park` pair, see [Testing hostile services](#testing-hostile-services),
+`greedy`/`park` pair and the hoarder `hog`, see
+[Testing hostile services](#testing-hostile-services),
 `revoked`, see [Revoking capabilities](#revoking-capabilities), and
 `shelf`, see [The runtime shelf](#the-runtime-shelf-snapshots))
 and the two WASI demo programs from `demos/` (an ordinary Rust `std` program
@@ -53,7 +54,7 @@ stdout, which is the same capability). The `rt: met` count varies a little
 from run to run; `cargo xtask test` requires at least 380 of 400. Instance
 ids are slot numbers and are reused once an instance has exited (like
 process ids), so `fair`, `faulty`, `hello_std`, `hello_c`, `revoked`,
-`shelf` and `greedy` all show up as instance 1 after `ping` is gone, and
+`shelf`, `hog`, `park` and `greedy` all show up as instance 1 after `ping` is gone, and
 the three instances restored from `shelf`'s snapshot as instance 2 one
 after the other. The times on the `init: shelf init N us, restore M us`
 line vary with the host; `cargo xtask test` requires `M < N`. The instruction count on each
@@ -64,9 +65,9 @@ that ends in a trap is not counted, so `faulty` shows 0).
 kalium: boot
 kalium: timer frequency 62500000 Hz
 kalium: entered at EL1, dtb at 0x40000000 (1048576 bytes), RAM 0x40000000..0x50000000 (256 MiB) from the device tree
-kalium: image 0x40200000..0x403b5000 (W^X: text RX, rodata RO, data/stacks RW, guards unmapped), heap 0x403b5000..0x50000000 (252 MiB)
-kalium: boot image: 12 modules
-kalium:   module 0: init (8373 bytes)
+kalium: image 0x40200000..0x403b6000 (W^X: text RX, rodata RO, data/stacks RW, guards unmapped), heap 0x403b6000..0x50000000 (252 MiB)
+kalium: boot image: 13 modules
+kalium:   module 0: init (9377 bytes)
 kalium:   module 1: ping (1945 bytes)
 kalium:   module 2: pong (2668 bytes)
 kalium:   module 3: rt (1059 bytes)
@@ -76,9 +77,11 @@ kalium:   module 6: park (215 bytes)
 kalium:   module 7: greedy (3782 bytes)
 kalium:   module 8: revoked (1110 bytes)
 kalium:   module 9: shelf (1257 bytes)
-kalium:   module 10: hello_std (101148 bytes)
-kalium:   module 11: hello_c (202342 bytes)
+kalium:   module 10: hog (3470 bytes)
+kalium:   module 11: hello_std (101148 bytes)
+kalium:   module 12: hello_c (202342 bytes)
 kalium: instance limits: 256 pages, 65536 stack values, call depth 1024, 256 cap slots
+kalium: instance quotas: 32 MiB memory objects, 32 MiB snapshots, 64 channels; budget 244 MiB for all instances (8 MiB kernel headroom)
 kalium: created instance 0 (init)
 hello from init
 kalium: instance 0 (init) spawned instance 1 (ping, fair)
@@ -158,6 +161,17 @@ init: resumed shelf exited 0
 kalium: instance 1 (shelf) exited 0 after 11665700 instructions
 init: shelf exited 0
 init: shelf init 284494 us, restore 27429 us
+kalium: instance 0 (init) spawned instance 1 (hog, fair)
+hog: memobjs 2, pages 256, channels 64, messages 1024
+hog: send 4096 bytes on a fresh channel: ok
+hog: 15 cap-only messages sent, 8 received back
+hog: quota reached, kernel alive
+kalium: instance 1 (hog) exited 0 after 32084 instructions
+kalium: instance 1 (hog) exit drained 1016 queued messages, 4179200 budget bytes
+init: hog exited 0
+kalium: instance 0 (init) spawned instance 1 (park, fair)
+kalium: instance 1 (park) exited 0 after 32 instructions
+init: after hog, spawn ok
 kalium: instance 0 (init) spawned instance 1 (greedy, fair)
 kalium: instance 1 (greedy) spawned instance 2 (park, fair)
 kalium: instance 1 (greedy) spawned instance 3 (park, fair)
@@ -174,8 +188,9 @@ greedy: slot reclaimed, park exited 0
 kalium: instance 1 (greedy) exited 0 after 3768 instructions
 init: greedy exited 0
 init: done
-kalium: instance 0 (init) exited 0 after 9095 instructions
-kalium: interpreter ran 44926654 instructions in 1337 ms (33590266 instr/s)
+kalium: instance 0 (init) exited 0 after 10054 instructions
+kalium: interpreter ran 44173705 instructions in 1898 ms (23269797 instr/s)
+kalium: instance budget: 0 bytes in use
 kalium: init exited 0
 ```
 
@@ -290,9 +305,12 @@ its stdin; see [The WASI demos](#the-wasi-demos). Then it spawns `revoked`
 and takes its capabilities back; see
 [Revoking capabilities](#revoking-capabilities). Then it shelves `shelf`:
 a snapshot of the initialised service, and three instances started from
-it; see [The runtime shelf](#the-runtime-shelf-snapshots).
-The last phase hands `init`'s `Spawn` capability to `greedy`, a deliberately
-hostile service; see [Testing hostile services](#testing-hostile-services).
+it; see [The runtime shelf](#the-runtime-shelf-snapshots). Then it spawns
+`hog`, which hoards until every quota refuses it, and checks that the
+kernel is unharmed afterwards; see
+[Resource quotas](#resource-quotas-hog). The last phase hands `init`'s
+`Spawn` capability to `greedy`, a deliberately hostile service; see
+[Testing hostile services](#testing-hostile-services).
 
 ## Writing and adding a service
 
@@ -323,8 +341,8 @@ To add it to the boot image:
 2. Add `<name>` to the module lists in `xtask/src/main.rs` and
    `kernel/build.rs` (`MODULES`), which must agree: the SDK modules
    (`WASM_MODULES` in `xtask`: `init=0 ... faulty=5`, `park=6`, `greedy=7`,
-   `revoked=8`, `shelf=9`) come first, then the WASI demos (`DEMO_MODULES`:
-   `hello_std=10`, `hello_c=11`). The position is the module index `spawn` takes, and the
+   `revoked=8`, `shelf=9`, `hog=10`) come first, then the WASI demos (`DEMO_MODULES`:
+   `hello_std=11`, `hello_c=12`). The position is the module index `spawn` takes, and the
    existing indices are hardcoded in `init` and `greedy`, so append a new
    SDK module to the end of `WASM_MODULES` and insert it before `hello_std`
    in `build.rs`, then bump `MOD_HELLO_STD`/`MOD_HELLO_C` in `init`; a
@@ -344,7 +362,11 @@ are at most 16 MiB; channel messages at most 4096 bytes and 4 capabilities,
 with a queue depth of 16. At most 32 instances are live at once
 (`kalium_abi::limits::MAX_INSTANCES`, kernel-wide and counting `init`):
 `spawn` fails with `ENOMEM` beyond that, and the slot of an exited instance
-is reused by the next one created.
+is reused by the next one created. What a service creates is charged to
+it until it is freed or the service exits: at most 32 MiB of memory
+objects, 32 MiB of snapshots and 64 channels per instance, and all
+instances together at most the heap minus an 8 MiB kernel headroom
+(`ENOMEM` beyond any of them); see [Resource quotas](#resource-quotas-hog).
 
 ## The WASI demos
 
@@ -360,7 +382,7 @@ clocks), `random_get` is a non-cryptographic xorshift, and `poll_oneoff`
 sleeps on clock subscriptions. `demos/` holds two such programs, written as
 anyone would write them:
 
-- `demos/hello-std` (module 10, `hello_std`): a Rust `std` program with
+- `demos/hello-std` (module 11, `hello_std`): a Rust `std` program with
   `println!`, a `Vec`, `format!`, a `HashMap` (its hasher is seeded through
   `random_get`), floating point, `std::env::args`/`vars` (both empty),
   `thread::sleep` (through `poll_oneoff`) and `process::exit(3)`. Built by
@@ -368,7 +390,7 @@ anyone would write them:
   `cargo build --release --target wasm32-wasip1 --manifest-path demos/Cargo.toml`
   (profile: `opt-level = "s"`, LTO, `panic = "abort"`, stripped); about
   100 KB, about 1.3 M interpreted instructions.
-- `demos/hello-c` (module 11, `hello_c`): a C program with `printf` in
+- `demos/hello-c` (module 12, `hello_c`): a C program with `printf` in
   several conversions, `malloc`/`free`, `qsort`, `strtod`/`strtol`,
   `snprintf`, recursion, `time()`, stdin through `fgets`, `readv` and
   `read`, and `return 5`. Compiled with clang and
@@ -557,3 +579,120 @@ QEMU exit code 1, after about 131 000 spawns). With the limit the loop runs
 for as long as the hostile `init` likes: `spawn` either succeeds into a
 reused slot or returns `ENOMEM`, and the kernel heap stays flat. Run
 `cargo xtask build` afterwards to restore the normal kernel binary.
+
+### Resource quotas: `hog`
+
+A service that holds no `Spawn` capability can still try to exhaust the
+kernel through what any instance may create: memory objects of 16 MiB,
+snapshots of other instances, channels with queues of 16 messages of
+4096 bytes, and its own linear memory. Before the quotas, a loop of
+`memobj_create(16 MiB)` (or of `instance_snapshot` on a parked child, or
+`memory.grow` in many instances) filled the 252 MiB heap in a few dozen
+calls, each refused with `ENOMEM` only once the heap was actually empty,
+and the kernel's next ordinary allocation, a registry entry or the copy
+of a 4096-byte message in `send`, failed:
+
+```
+memonly: start
+
+kalium: panic at /rustc/.../library/alloc/src/alloc.rs:573:9: memory allocation of 1952 bytes failed
+```
+
+QEMU exit code 1, every instance gone: a denial of service by any
+service. The kernel now accounts for every byte it allocates on an
+instance's behalf ([prototype-plan.md](prototype-plan.md), "Resource
+quotas"): per instance, the memory objects it created (32 MiB,
+`kalium_abi::limits::MAX_MEMOBJ_BYTES_PER_INSTANCE`), the snapshots it
+took (32 MiB, `MAX_SNAPSHOT_BYTES_PER_INSTANCE`) and the channels it
+created (64, `MAX_CHANNELS_PER_INSTANCE`), charged until the object is
+freed or the creator exits; and kernel-wide, one budget of the heap
+minus an 8 MiB headroom (`kalium: instance quotas: ... budget 244 MiB
+for all instances (8 MiB kernel headroom)` in the boot banner) that
+linear memories and tables (on creation and on every `grow`), execution
+stacks, memory objects, snapshots and queued messages (each at the cost
+of the kernel's copy, `kalium_ipc::Message::cost_of`: its queue slot,
+its payload and the capabilities it carries with their lineage nodes,
+so that a zero-byte message carrying four capabilities is charged too)
+are charged
+to. Over a quota or over the budget is `ENOMEM` (a `memory.grow` returns
+-1) with nothing allocated; the headroom is what the kernel's own small
+allocations and the compiled programs of the boot image (about 2.5 MiB
+for its modules) live in, and the host calls allocate everything sized
+by an instance's arguments fallibly, so a short heap is an `ENOMEM`
+there too, not a panic. The same loop now stops at two objects and the
+kernel goes on:
+
+```
+memonly: start
+memonly: heap filled with 2 memobjs
+memonly: send 4096 bytes under memory pressure: ok
+memonly: done
+kalium: instance 0 (init) exited 0 after 1415 instructions
+kalium: init exited 0
+```
+
+The boot-test scenario checks this on every `cargo xtask test` with
+`hog` (module 10), spawned after `shelf` with a console only. It creates
+memory objects of the largest size until refused, grows its linear memory
+until refused (64 pages at a time, halving on refusal), creates channels
+until refused and fills each queue with 4096-byte messages until refused,
+prints the counts, which must be exactly the quotas' values
+(`hog: memobjs 2, pages 256, channels 64, messages 1024`), gives one
+channel back, takes a fresh one and sends 4096 bytes on it
+(`hog: send 4096 bytes on a fresh channel: ok`; `ENOMEM` would be
+accepted, a panic would not), fills the rest of that queue with
+zero-byte messages carrying four capabilities each (derived from a
+channel end it keeps) and takes half of the queue back
+(`hog: 15 cap-only messages sent, 8 received back`), prints
+`hog: quota reached, kernel alive` and exits 0 holding everything: 32 MiB
+of memory objects, 16 MiB of linear memory and 63 full queues of
+4096-byte messages plus 8 cap-only ones, which the kernel frees at its
+exit and reports: `kalium: instance 1 (hog) exit drained 1016 queued
+messages, 4179200 budget bytes`, where the bytes must be exactly what
+those messages cost the budget (`Message::cost_of`, computed by `xtask`
+from the same function: 1008 messages of 4096 bytes and 8 of none with 4
+capabilities, slot and capability lists included). A kernel that charged
+only the payload would report 4128768 and fail on that line: a queue of
+cap-only messages would then be free, and 32 instances with 64 full
+queues each could park about 5 MiB of capability lists and lineage nodes
+in the 8 MiB headroom. `init` then spawns `park` (released at once) and
+creates a 16 MiB memory object of its own, and reports
+`init: after hog, spawn ok`. When `init` exits, the kernel reports
+`kalium: instance budget: 0 bytes in use`: everything charged at `send`,
+`spawn`, `memobj_create` and `instance_snapshot` was released by `recv`,
+exit and the objects' destruction. A
+kernel that panics fails the scenario on the `kalium: panic` line (and
+every line after it); one whose quota is missing or wrong fails on the
+counts.
+
+The kernel-wide budget is what stops several instances doing this at
+once. A variant for running by hand (built like the unbounded `spawn`
+variant above: an `init` that spawns hoarders which park instead of
+exiting, each holding its share, with a console, a receive end to park
+on and a send end to report through) shows it: the first four get their
+full quotas (32 MiB of memory objects, 16 MiB of linear memory, 4 MiB of
+queued messages, plus the reservation for the execution stack, about
+52.5 MiB each), the fifth and sixth get what is left of the 244 MiB
+(`memory.grow` returns -1 at 145 and 81 pages, `memobj_create` and
+`send` return `ENOMEM`), the seventh `spawn` is refused, `init`'s own
+16 MiB `memobj_create` is refused while they are parked and succeeds once
+they have exited, and the kernel never panics:
+
+```
+hogpark 4: memobjs 2, pages 256, channels 64, messages 1024
+hogpark 5: memobjs 2, pages 145, channels 64, messages 1024
+hogpark 6: memobjs 0, pages 81, channels 64, messages 382
+global: spawn hogpark refused: ENOMEM
+global: 6 hogs parked
+global: init memobj_create 16 MiB with hogs parked: ENOMEM
+global: init send 4096 bytes with hogs parked: ok
+kalium: instance 1 (park) exited 0 after 66655 instructions
+...
+global: init memobj_create 16 MiB after hogs exited: ok
+kalium: init exited 0
+```
+
+(The hoarders give their channels back before reporting, since a `send`
+needs room in the budget for its copy of the message; a service that
+has exhausted the budget itself cannot even send until it frees
+something, which is the point.)

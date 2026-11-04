@@ -185,7 +185,7 @@ mod imp {
         use kalium_wasm::Limits;
 
         use crate::boot_image::BOOT_IMAGE;
-        use crate::kernel::{Kernel, CAP_TABLE_LIMIT};
+        use crate::kernel::{Kernel, CAP_TABLE_LIMIT, HEAP_HEADROOM};
 
         /// Instance limits; `max_memory_pages` shrinks on a small heap.
         fn limits(heap_bytes: usize) -> Limits {
@@ -219,8 +219,19 @@ mod imp {
                 limits.max_call_depth,
                 CAP_TABLE_LIMIT
             );
+            // What instances may take of the heap between them; the rest is
+            // the kernel's (`kernel.rs`, "Quotas and the instance budget").
+            let instance_bytes = heap_bytes.saturating_sub(HEAP_HEADROOM);
+            println!(
+                "kalium: instance quotas: {} MiB memory objects, {} MiB snapshots, {} channels; budget {} MiB for all instances ({} MiB kernel headroom)",
+                kalium_abi::limits::MAX_MEMOBJ_BYTES_PER_INSTANCE >> 20,
+                kalium_abi::limits::MAX_SNAPSHOT_BYTES_PER_INSTANCE >> 20,
+                kalium_abi::limits::MAX_CHANNELS_PER_INSTANCE,
+                instance_bytes >> 20,
+                HEAP_HEADROOM >> 20
+            );
 
-            let mut k = Kernel::new(&BOOT_IMAGE, limits);
+            let mut k = Kernel::new(&BOOT_IMAGE, limits, instance_bytes);
             let mut caps = CapTable::new(CAP_TABLE_LIMIT);
             let console = k.mint_root_into(
                 &mut caps,

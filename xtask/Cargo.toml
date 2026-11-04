@@ -8,3 +8,6 @@ publish = false
 [dependencies]
 # The scenario check compares `greedy`'s report with the ABI's instance limit.
 kalium-abi.workspace = true
+# ... and what `hog`'s exit gives back to the kernel's budget with the cost
+# of a queued message (`Message::cost_of`).
+kalium-ipc.workspace = true

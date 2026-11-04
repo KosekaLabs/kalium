@@ -92,8 +92,11 @@
 //! linear memory before anything is read, written or output, with the
 //! helpers shared with the `kalium:*` functions in `host.rs`; a failure is
 //! WASI `EFAULT`. iovec arrays are checked as a whole and then each buffer
-//! they name; a negative count is `EINVAL`. Errno values are the WASI
-//! preview1 ones (`wasi/api.h`), not Kalium's.
+//! they name; a negative count is `EINVAL`. The arrays the layer builds
+//! from them (`fd_read`/`fd_write` iovecs, `poll_oneoff` subscriptions)
+//! are allocated fallibly and an allocation failure is WASI `ENOMEM`, so
+//! a program passing a huge count cannot abort the kernel. Errno values
+//! are the WASI preview1 ones (`wasi/api.h`), not Kalium's.
 
 use alloc::vec::Vec;
 
@@ -118,6 +121,7 @@ pub mod errno {
     pub const BADF: i32 = 8;
     pub const FAULT: i32 = 21;
     pub const INVAL: i32 = 28;
+    pub const NOMEM: i32 = 48;
     pub const NOSYS: i32 = 52;
     pub const NOTSUP: i32 = 58;
     pub const SPIPE: i32 = 70;
@@ -327,7 +331,7 @@ fn read_u64(mem: &Memory, ptr: u32) -> Result<u64, i32> {
 /// The buffers named by an iovec array, each bounds-checked.
 fn iovecs(mem: &Memory, iovs: i32, iovs_len: i32) -> Result<Vec<(u32, usize)>, i32> {
     let (p, _) = range_n(mem, iovs, iovs_len, IOVEC_SIZE)?;
-    let mut v = Vec::with_capacity(iovs_len as usize);
+    let mut v = host::try_vec(iovs_len as usize).map_err(|_| errno::NOMEM)?;
     for i in 0..iovs_len as u32 {
         let at = p
             .checked_add(i.checked_mul(IOVEC_SIZE as u32).ok_or(errno::FAULT)?)
@@ -433,6 +437,9 @@ impl HostCall<'_> {
             match self.k.channel_mut(chan).ok_or(errno::BADF)?.try_recv() {
                 Ok(msg) => {
                     let now = timer::now_ns();
+                    // The message's copy was charged to the budget at
+                    // `send` (`Message::cost_of`).
+                    self.k.budget.release(msg.cost());
                     for cap in msg.caps {
                         self.k.release(cap, now);
                     }
@@ -552,7 +559,7 @@ impl HostCall<'_> {
         let now = timer::now_ns();
         let started = self.wasi().poll_started.unwrap_or(now);
         // (userdata, deadline) per subscription.
-        let mut list: Vec<(u64, u64)> = Vec::with_capacity(n as usize);
+        let mut list: Vec<(u64, u64)> = host::try_vec(n as usize).map_err(|_| errno::NOMEM)?;
         for i in 0..n as u32 {
             let at = sp + i * SUBSCRIPTION_SIZE as u32;
             let userdata = read_u64(mem, at)?;

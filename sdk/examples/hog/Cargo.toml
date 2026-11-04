@@ -1,0 +1,16 @@
+[package]
+name = "hog"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Kalium boot-test example service: hog"
+
+[lib]
+crate-type = ["cdylib"]
+test = false
+doctest = false
+bench = false
+
+[dependencies]
+kalium-sdk.workspace = true

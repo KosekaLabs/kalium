@@ -491,6 +491,13 @@ pub struct Lineage {
 }
 
 impl Lineage {
+    /// Heap one live node takes in its tree: what a capability in flight
+    /// (queued in a message, so in no table) keeps allocated beyond the
+    /// `Capability` itself. The kernel charges it per queued capability
+    /// (`kalium_ipc::Message::cost_of`); capabilities in tables are bounded
+    /// by the tables' size.
+    pub const NODE_BYTES: usize = core::mem::size_of::<Option<Node>>();
+
     /// An empty tree.
     pub const fn new() -> Lineage {
         Lineage {
@@ -551,6 +558,15 @@ impl Lineage {
             },
             None => {
                 let i = u32::try_from(self.nodes.len()).map_err(|_| CapError::NoMem)?;
+                // Fallible growth: a lineage grows on a host call
+                // (`cap_derive`), which must report `ENOMEM` rather than
+                // abort the kernel when the heap is short. The free list
+                // is kept able to hold every node so that a later
+                // release, which cannot fail, never has to grow it.
+                let free_room = (self.nodes.len() + 1).saturating_sub(self.free.len());
+                if self.nodes.try_reserve(1).is_err() || self.free.try_reserve(free_room).is_err() {
+                    return Err(CapError::NoMem);
+                }
                 self.nodes.push(Some(node));
                 i
             }
@@ -944,6 +960,14 @@ impl CapTable {
                 // live < limit <= MAX + 1 and no free slots means
                 // slots.len() == live, so this index is representable.
                 let i = CapIndex::try_from(self.slots.len())?;
+                // Fallible growth, as for `Lineage`: `insert` runs on host
+                // calls and reports `ENOMEM` instead of aborting the kernel;
+                // the free list is kept able to hold every slot so that
+                // `drop_slot`/`take` never need to grow it.
+                let free_room = (self.slots.len() + 1).saturating_sub(self.free.len());
+                if self.slots.try_reserve(1).is_err() || self.free.try_reserve(free_room).is_err() {
+                    return Err(CapError::NoMem);
+                }
                 self.slots.push(Some(cap));
                 i
             }

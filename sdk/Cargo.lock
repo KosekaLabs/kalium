@@ -24,6 +24,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "hog"
+version = "0.1.0"
+dependencies = [
+ "kalium-sdk",
+]
+
+[[package]]
 name = "init"
 version = "0.1.0"
 dependencies = [

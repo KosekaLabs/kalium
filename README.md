@@ -57,6 +57,11 @@ reported by the kernel while everything else continues; hands its `Spawn`
 capability to `greedy`, a hostile service that spawns and forgets instances
 until the kernel's instance limit refuses it. `init` observes each exit
 through `instance_wait`, and the kernel exits QEMU with the result.
+Every byte the kernel allocates for an instance is charged to it, per
+instance (memory objects, snapshots, channels) and against one kernel-wide
+budget that keeps a headroom for the kernel itself, so a hoarding service
+(`hog` in the boot image) is stopped with `ENOMEM` and never by an
+allocation failure in the kernel (`docs/running.md`, "Resource quotas").
 Capabilities can be revoked (`cap_revoke` invalidates everything derived
 from one, wherever it went) and instances can be shelved: `init` takes a
 snapshot of a service that has finished an expensive initialisation

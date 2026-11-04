@@ -11,6 +11,7 @@
 //! entry one instance stores must name the same function when another
 //! instance calls through it.
 
+use crate::budget::BudgetRef;
 use crate::error::Trap;
 use crate::exec::Value;
 use crate::memory::limits_match;
@@ -33,7 +34,13 @@ pub type TableRef = Rc<RefCell<Table>>;
 pub const MAX_TABLE_ELEMENTS: u32 = 1 << 20;
 
 /// A bounds-checked table of references.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// Like a [`Memory`](crate::Memory), a table may be charged to a
+/// [`Budget`](crate::Budget) ([`set_budget`](Table::set_budget)): the bytes
+/// of its entries count against the budget, a `grow` the budget refuses
+/// fails like one the allocator refuses, and the charge is released when
+/// the table is dropped.
+#[derive(Debug, PartialEq)]
 pub struct Table {
     elem: RefType,
     entries: Vec<Value>,
@@ -42,9 +49,61 @@ pub struct Table {
     max: u32,
     /// The `max` of the table's declared type, which import matching sees.
     declared_max: Option<u32>,
+    /// The budget the table is charged to, and how many bytes it holds of
+    /// it.
+    budget: Option<BudgetRef>,
+    charged: usize,
 }
 
+impl Clone for Table {
+    /// A copy of the entries and limits that is charged to no budget (the
+    /// original keeps its charge).
+    fn clone(&self) -> Table {
+        Table {
+            elem: self.elem,
+            entries: self.entries.clone(),
+            max: self.max,
+            declared_max: self.declared_max,
+            budget: None,
+            charged: 0,
+        }
+    }
+}
+
+impl Drop for Table {
+    fn drop(&mut self) {
+        if let Some(b) = &self.budget {
+            b.release(self.charged);
+        }
+    }
+}
+
+/// Bytes an entry of a table costs.
+const ENTRY_BYTES: usize = core::mem::size_of::<Value>();
+
 impl Table {
+    /// Charges the bytes of the table's entries to `budget`, and every
+    /// later growth to it, until the table is dropped (which releases the
+    /// charge) or `set_budget` is called again (which moves it). Returns
+    /// `false`, leaving the table charged to its previous budget if any,
+    /// when the current size does not fit `budget`.
+    pub fn set_budget(&mut self, budget: &BudgetRef) -> bool {
+        let bytes = self.entries.len().saturating_mul(ENTRY_BYTES);
+        if !budget.reserve(bytes) {
+            return false;
+        }
+        if let Some(old) = self.budget.take() {
+            old.release(self.charged);
+        }
+        self.charged = bytes;
+        self.budget = Some(budget.clone());
+        true
+    }
+
+    /// The budget the table is charged to, if any.
+    pub fn budget(&self) -> Option<&BudgetRef> {
+        self.budget.as_ref()
+    }
     /// Create a table of `ty.limits.min` null entries that may grow to the
     /// smaller of `ty.limits.max` and `limit`. Returns `None` if the minimum
     /// exceeds that bound or the allocation fails.
@@ -61,6 +120,8 @@ impl Table {
             entries,
             max,
             declared_max: ty.limits.max,
+            budget: None,
+            charged: 0,
         })
     }
 
@@ -83,6 +144,8 @@ impl Table {
             entries,
             max,
             declared_max: ty.limits.max,
+            budget: None,
+            charged: 0,
         })
     }
 
@@ -149,16 +212,29 @@ impl Table {
     }
 
     /// `table.grow`: grow by `delta` entries initialized to `init`. Returns
-    /// the old size, or `None` if the bound would be exceeded or the
-    /// allocation fails (the caller turns that into `-1`).
+    /// the old size, or `None` if the bound would be exceeded, the budget
+    /// refuses the growth or the allocation fails (the caller turns that
+    /// into `-1`).
     pub fn grow(&mut self, delta: u32, init: Value) -> Option<u32> {
         let old = self.size();
         let new = old.checked_add(delta)?;
         if new > self.max {
             return None;
         }
-        self.entries.try_reserve_exact(delta as usize).ok()?;
+        let added = (delta as usize).checked_mul(ENTRY_BYTES)?;
+        if self.budget.as_ref().is_some_and(|b| !b.reserve(added)) {
+            return None;
+        }
+        if self.entries.try_reserve_exact(delta as usize).is_err() {
+            if let Some(b) = &self.budget {
+                b.release(added);
+            }
+            return None;
+        }
         self.entries.resize(new as usize, init);
+        if self.budget.is_some() {
+            self.charged += added;
+        }
         Some(old)
     }
 

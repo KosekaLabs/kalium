@@ -551,6 +551,26 @@ pub mod limits {
     /// depth 0 and `cap_derive` fails with `ENOMEM` on one at this depth.
     /// It bounds the lineage walk a capability check makes.
     pub const MAX_DERIVE_DEPTH: u32 = 16;
+
+    /// Per-instance quota on memory objects, in bytes: the sizes of the
+    /// objects an instance created with `memobj_create` that still exist,
+    /// summed. `memobj_create` fails with `ENOMEM` once a new object would
+    /// take the creator past it (the object size limit
+    /// [`MAX_MEMOBJ_SIZE`] still applies first, as `ETOOBIG`). An object is
+    /// charged to its creator until it is freed (last capability gone) or
+    /// the creator exits; see `docs/prototype-plan.md`, "Resource quotas".
+    pub const MAX_MEMOBJ_BYTES_PER_INSTANCE: u64 = 32 * 1024 * 1024;
+    /// Per-instance quota on snapshots, in bytes (as `Snapshot::to_bytes`
+    /// would encode them): the snapshots an instance took with
+    /// `instance_snapshot` that still exist, summed. `instance_snapshot`
+    /// fails with `ENOMEM` beyond it. Charged like a memory object.
+    pub const MAX_SNAPSHOT_BYTES_PER_INSTANCE: u64 = 32 * 1024 * 1024;
+    /// Per-instance quota on channels: the channels an instance created
+    /// with `channel_create` that still exist. `channel_create` fails with
+    /// `ENOMEM` beyond it. With [`CHANNEL_QUEUE_DEPTH`] and
+    /// [`MAX_MESSAGE_LEN`] this bounds what the queues of an instance's
+    /// channels can hold (4 MiB of payload).
+    pub const MAX_CHANNELS_PER_INSTANCE: usize = 64;
 }
 
 /// The WASI preview1 compatibility layer (`docs/prototype-plan.md`, "WASI
@@ -875,6 +895,21 @@ mod tests {
         assert_eq!(limits::MAX_MEMOBJ_SIZE, 16 << 20);
         assert_eq!(limits::MAX_INSTANCES, 32);
         assert_eq!(limits::MAX_DERIVE_DEPTH, 16);
+        assert_eq!(limits::MAX_MEMOBJ_BYTES_PER_INSTANCE, 32 << 20);
+        assert_eq!(limits::MAX_SNAPSHOT_BYTES_PER_INSTANCE, 32 << 20);
+        assert_eq!(limits::MAX_CHANNELS_PER_INSTANCE, 64);
+        // The quotas hold whole objects of the largest size and bound the
+        // queued payload of an instance's channels to 4 MiB.
+        assert_eq!(
+            limits::MAX_MEMOBJ_BYTES_PER_INSTANCE % limits::MAX_MEMOBJ_SIZE,
+            0
+        );
+        assert_eq!(
+            limits::MAX_CHANNELS_PER_INSTANCE
+                * limits::CHANNEL_QUEUE_DEPTH
+                * limits::MAX_MESSAGE_LEN,
+            4 << 20
+        );
         assert_eq!(sched::CLASS_FAIR, 0);
         assert_eq!(sched::CLASS_REAL_TIME, 1);
         assert_eq!(entry::START, 0);

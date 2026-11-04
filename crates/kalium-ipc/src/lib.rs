@@ -58,6 +58,10 @@ pub enum IpcError {
     /// The queue is empty but a sender still exists, so a message may yet
     /// arrive (`EAGAIN`). A blocking `recv` parks on this.
     Empty,
+    /// The queue could not grow to take the message: the heap is short
+    /// (`ENOMEM`). The message is handed back by
+    /// [`Channel::send_or_return`] like any other refusal.
+    NoMem,
 }
 
 impl IpcError {
@@ -68,6 +72,7 @@ impl IpcError {
             IpcError::TooBig => errno::ETOOBIG,
             IpcError::Closed => errno::ECLOSED,
             IpcError::Empty => errno::EAGAIN,
+            IpcError::NoMem => errno::ENOMEM,
         }
     }
 
@@ -87,6 +92,7 @@ impl fmt::Display for IpcError {
             IpcError::TooBig => "message too big",
             IpcError::Closed => "peer closed",
             IpcError::Empty => "queue empty",
+            IpcError::NoMem => "out of memory",
         };
         write!(f, "{} ({})", what, self.errno_name())
     }
@@ -132,7 +138,35 @@ impl Message {
     pub fn is_empty(&self) -> bool {
         self.bytes.is_empty()
     }
+
+    /// Bytes of the kernel's heap the queued copy of a message of `len`
+    /// payload bytes carrying `ncaps` capabilities takes: the queue slot
+    /// (the `Message` itself), the payload, and for every capability its
+    /// copy plus the lineage node it keeps alive while it is in no table
+    /// ([`CAP_IN_FLIGHT_BYTES`]). This is what the kernel charges to its
+    /// instance budget at `send` and releases at `recv` or when the channel
+    /// is destroyed, so that a message with no payload but capabilities is
+    /// not free: without the structural part, a queue full of zero-byte
+    /// messages carrying four capabilities each parks megabytes of
+    /// uncharged heap kernel-wide. Saturating.
+    pub const fn cost_of(len: usize, ncaps: usize) -> usize {
+        core::mem::size_of::<Message>()
+            .saturating_add(len)
+            .saturating_add(ncaps.saturating_mul(CAP_IN_FLIGHT_BYTES))
+    }
+
+    /// [`cost_of`](Message::cost_of) for this message's payload length and
+    /// capability count.
+    pub fn cost(&self) -> usize {
+        Message::cost_of(self.bytes.len(), self.caps.len())
+    }
 }
+
+/// Heap one capability in flight takes beyond the message that carries it:
+/// its [`Capability`] in the message's list and the lineage node it keeps
+/// alive ([`kalium_cap::Lineage::NODE_BYTES`]).
+pub const CAP_IN_FLIGHT_BYTES: usize =
+    core::mem::size_of::<Capability>() + kalium_cap::Lineage::NODE_BYTES;
 
 // ---------------------------------------------------------------------------
 // Channel
@@ -222,6 +256,11 @@ impl Channel {
     pub fn send_or_return(&mut self, msg: Message) -> Result<(), (IpcError, Message)> {
         if let Err(err) = self.can_send(msg.bytes.len(), msg.caps.len()) {
             return Err((err, msg));
+        }
+        // The queue is bounded by `depth`, but its buffer still grows on
+        // demand; growth happens on a host call and must fail cleanly.
+        if self.queue.try_reserve(1).is_err() {
+            return Err((IpcError::NoMem, msg));
         }
         self.queue.push_back(msg);
         Ok(())
@@ -465,12 +504,45 @@ mod tests {
         assert_eq!(IpcError::Empty.errno(), errno::EAGAIN);
         assert_eq!(IpcError::TooBig.errno(), errno::ETOOBIG);
         assert_eq!(IpcError::Closed.errno(), errno::ECLOSED);
+        assert_eq!(IpcError::NoMem.errno(), errno::ENOMEM);
+        assert_eq!(IpcError::NoMem.errno_name(), "ENOMEM");
         assert_eq!(IpcError::Full.errno_name(), "EAGAIN");
         assert_eq!(IpcError::Closed.errno_name(), "ECLOSED");
         assert_eq!(
             std::format!("{}", IpcError::TooBig),
             "message too big (ETOOBIG)"
         );
+    }
+
+    /// A zero-byte message carrying capabilities is not free: its cost is
+    /// the queue slot plus every capability's copy and lineage node, and
+    /// the payload adds exactly its length. (Regression: the kernel once
+    /// charged only the payload length, so such messages parked uncharged
+    /// heap and ate the kernel's headroom.)
+    #[test]
+    fn cost_charges_slot_payload_and_capabilities() {
+        let slot = core::mem::size_of::<Message>();
+        let per_cap = core::mem::size_of::<Capability>() + kalium_cap::Lineage::NODE_BYTES;
+        assert_eq!(CAP_IN_FLIGHT_BYTES, per_cap);
+        assert!(slot > 0 && per_cap > core::mem::size_of::<Capability>());
+        assert_eq!(Message::cost_of(0, 0), slot);
+        assert_eq!(Message::cost_of(0, 4), slot + 4 * per_cap);
+        assert!(Message::cost_of(0, 4) > 4 * core::mem::size_of::<Capability>());
+        assert_eq!(Message::cost_of(4096, 1), slot + 4096 + per_cap);
+        // The method agrees with the function for the message's own shape.
+        let m = Message::with_caps(vec![0; 10], vec![cap(1), cap(2), cap(3)]);
+        assert_eq!(m.cost(), Message::cost_of(10, 3));
+        assert_eq!(Message::new(Vec::new()).cost(), slot);
+        // Saturates instead of overflowing.
+        assert_eq!(Message::cost_of(usize::MAX, usize::MAX), usize::MAX);
+        // The largest message the ABI allows costs its payload plus a
+        // bounded structural part; the cost never shrinks with more caps.
+        let max = Message::cost_of(limits::MAX_MESSAGE_LEN, limits::MAX_MESSAGE_CAPS);
+        assert!(max > limits::MAX_MESSAGE_LEN);
+        assert!(max < limits::MAX_MESSAGE_LEN + 1024);
+        for n in 0..limits::MAX_MESSAGE_CAPS {
+            assert!(Message::cost_of(0, n + 1) > Message::cost_of(0, n));
+        }
     }
 
     #[test]

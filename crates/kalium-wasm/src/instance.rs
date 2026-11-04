@@ -652,7 +652,10 @@ impl Instance {
                         .ok_or_else(|| {
                             bad_snapshot("table sizes exceed the instance's table element limit")
                         })?;
-                    let mut relocated = Vec::with_capacity(entries.len());
+                    let mut relocated = Vec::new();
+                    relocated
+                        .try_reserve_exact(entries.len())
+                        .map_err(|_| Error::OutOfMemory)?;
                     for &v in entries {
                         relocated.push(addrs.relocate(v)?);
                     }
@@ -813,6 +816,13 @@ impl Instance {
     /// instance (a foreign address) is also [`Error::Unsupported`], and a
     /// memory or table the host has mutably borrowed is
     /// [`Error::Trap`]`(`[`Trap::Host`]`)`.
+    ///
+    /// Every copy the snapshot makes (the memory, the globals, each
+    /// table's entries, the segment flags) is allocated fallibly: a short
+    /// heap is [`Error::OutOfMemory`], never an allocation failure. The
+    /// sizes are the instance's to choose (a table may hold the element
+    /// limit, 1 MiB of entries), and the embedder charges the snapshot to
+    /// its budget only once it exists.
     pub fn snapshot(&self) -> Result<Snapshot, Error> {
         if imports_objects(&self.module) {
             return Err(unsupported(
@@ -834,25 +844,44 @@ impl Instance {
             .map_err(|_| Error::OutOfMemory)?;
         bytes.extend_from_slice(memory.as_slice());
         drop(memory);
-        let mut globals = Vec::with_capacity(self.globals.len());
+        let mut globals = Vec::new();
+        globals
+            .try_reserve_exact(self.globals.len())
+            .map_err(|_| Error::OutOfMemory)?;
         for g in &self.globals {
             globals.push(self.unrelocate(g.get())?);
         }
-        let mut tables = Vec::with_capacity(self.tables.len());
+        let mut tables = Vec::new();
+        tables
+            .try_reserve_exact(self.tables.len())
+            .map_err(|_| Error::OutOfMemory)?;
         for t in &self.tables {
             let t = t.try_borrow().map_err(|_| busy())?;
-            let mut entries = Vec::with_capacity(t.entries().len());
+            let mut entries = Vec::new();
+            entries
+                .try_reserve_exact(t.entries().len())
+                .map_err(|_| Error::OutOfMemory)?;
             for &v in t.entries() {
                 entries.push(self.unrelocate(v)?);
             }
             tables.push(entries);
         }
+        let mut data_dropped = Vec::new();
+        data_dropped
+            .try_reserve_exact(self.data_dropped.len())
+            .map_err(|_| Error::OutOfMemory)?;
+        data_dropped.extend_from_slice(&self.data_dropped);
+        let mut elem_dropped = Vec::new();
+        elem_dropped
+            .try_reserve_exact(self.elems.len())
+            .map_err(|_| Error::OutOfMemory)?;
+        elem_dropped.extend(self.elems.iter().map(Vec::is_empty));
         Ok(Snapshot {
             memory: bytes,
             globals,
             tables,
-            data_dropped: self.data_dropped.clone(),
-            elem_dropped: self.elems.iter().map(Vec::is_empty).collect(),
+            data_dropped,
+            elem_dropped,
         })
     }
 

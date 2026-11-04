@@ -18,6 +18,7 @@
 //! | [`instance`] | `Instance`, `Limits`, the `Host` trait, host call types, `Extern`/`ExternType` |
 //! | [`snapshot`] | `Snapshot`: the state of an instance's own objects, restorable into a new instance |
 //! | [`memory`] | `Memory`: bounds-checked linear memory, shared as `MemoryRef` |
+//! | [`budget`] | `Budget`: a byte budget memories, tables and the embedder charge, shared as `BudgetRef` |
 //! | [`table`] | `Table`: bounds-checked tables of references, shared as `TableRef` |
 //! | [`global`] | `global::Global`: typed value cells, shared as `GlobalRef` |
 //!
@@ -60,6 +61,7 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+pub mod budget;
 mod code;
 pub mod decode;
 pub mod error;
@@ -74,6 +76,7 @@ pub mod table;
 pub mod types;
 pub mod validate;
 
+pub use budget::{Budget, BudgetRef};
 pub use error::{Error, Trap};
 pub use exec::{ExecResult, Execution, Value};
 // `global::Global` (the runtime cell) stays behind its module path: the

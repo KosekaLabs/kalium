@@ -69,6 +69,52 @@
 //! exited instance cannot be snapshotted (`ECLOSED`); a runnable one is
 //! refused with `EBUSY` and the caller retries once it has parked.
 //!
+//! # Quotas and the instance budget
+//!
+//! Every byte the kernel allocates on behalf of an instance is accounted
+//! for, in two layers, so that a hostile service gets `ENOMEM` from a
+//! quota long before the heap is short, and the kernel's own small
+//! allocations (registry entries, capability tables, wait queues, the
+//! compiled programs of the boot image) always find room:
+//!
+//! - **Per instance** ([`Account`]): the memory objects an instance
+//!   created ([`kalium_abi::limits::MAX_MEMOBJ_BYTES_PER_INSTANCE`]), the
+//!   snapshots it took ([`kalium_abi::limits::MAX_SNAPSHOT_BYTES_PER_INSTANCE`])
+//!   and the channels it created ([`kalium_abi::limits::MAX_CHANNELS_PER_INSTANCE`]),
+//!   charged to the creator ([`Kernel::charge`]) and released when the
+//!   object is freed (its last capability gone, wherever it went) or the
+//!   creator exits, whichever comes first ([`Kernel::finish_instance`]
+//!   disowns the objects that outlive their creator). Linear memory is
+//!   bounded per instance by the page limit, tables by the element limit,
+//!   the queues of an instance's channels by the channel count times the
+//!   queue depth times the message size, and instances by
+//!   `MAX_INSTANCES`.
+//! - **Kernel-wide** ([`Kernel::budget`], a [`kalium_wasm::Budget`]): the
+//!   heap size minus [`HEAP_HEADROOM`] is all that instance-driven
+//!   allocations may take between them: linear memories and tables
+//!   (charged by kalium-wasm itself, on creation and on every
+//!   `memory.grow`/`table.grow`, released when the object is dropped),
+//!   the value stack and frames an execution may grow to (reserved at
+//!   creation, [`instance_state_bytes`]), memory objects, snapshots and
+//!   the kernel's copy of every queued message: its queue slot, its
+//!   payload and the capabilities it carries with the lineage nodes they
+//!   keep alive (`kalium_ipc::Message::cost_of`; charged at `send`,
+//!   released at `recv` or when the channel is destroyed, so a zero-byte
+//!   message carrying capabilities is charged too). Over budget is
+//!   `ENOMEM` (or a `memory.grow` that returns -1), never an allocation
+//!   failure.
+//!
+//! The headroom is for everything that is not charged: bounded, small
+//! allocations that happen on host calls (a registry entry, a lineage
+//! node of a capability in a table, a capability table slot, a parked
+//! thread, a channel queue's buffer of at most the queue depth of empty
+//! slots) and the boot image's compiled programs (about 2.5 MiB for the
+//! twelve modules of the plan, decoded on first use). Those paths
+//! allocate fallibly where the
+//! standard library allows it (`try_reserve`, mapped to `ENOMEM`); the
+//! allocator returns null on failure so that works, and the Rust
+//! allocation error handler stays the last resort for a kernel bug.
+//!
 //! # Instances and threads
 //!
 //! An instance is one Wasm instance plus one thread; its index in
@@ -97,8 +143,8 @@ use kalium_ipc::{Channel, WaitQueue};
 use kalium_mm::MemObject;
 use kalium_sched::{Class, Scheduler, ThreadId};
 use kalium_wasm::{
-    Error as WasmError, Execution, Extern, ExternType, Instance as WasmInstance, Limits, Module,
-    Snapshot,
+    Budget, BudgetRef, Error as WasmError, Execution, Extern, ExternType, Instance as WasmInstance,
+    Limits, Module, Snapshot, PAGE_SIZE,
 };
 
 use crate::boot_image::BootModule;
@@ -106,6 +152,69 @@ use crate::host;
 
 /// Capability table size per instance.
 pub const CAP_TABLE_LIMIT: usize = 256;
+
+/// Heap the instance budget leaves to the kernel's own allocations (see
+/// the module docs, "Quotas and the instance budget"): the boot image's
+/// compiled programs (measured at about 2.5 MiB for the plan's modules,
+/// the largest 1.4 MiB) plus the small per-object and per-instance
+/// bookkeeping, with margin. Everything an instance can make grow without
+/// bound is charged to the budget instead, queued messages included
+/// (slot, payload and capabilities, not just the payload: 32 instances
+/// times 64 channels times 16 messages of 4 capabilities would otherwise
+/// park about 5 MiB of uncharged heap in the headroom).
+pub const HEAP_HEADROOM: usize = 8 << 20;
+
+/// Bytes of the instance budget reserved for one instance's execution
+/// state, which the interpreter grows on demand up to the limits: the
+/// value stack (`u64` per value) and the call frames.
+pub fn instance_state_bytes(limits: &Limits) -> usize {
+    const FRAME_BYTES: usize = 16;
+    limits
+        .max_stack_values
+        .saturating_mul(8)
+        .saturating_add(limits.max_call_depth.saturating_mul(FRAME_BYTES))
+}
+
+/// What an instance has been charged for (module docs, "Quotas and the
+/// instance budget").
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Account {
+    /// Sizes of the memory objects it created that still exist.
+    pub memobj_bytes: u64,
+    /// Encoded sizes of the snapshots it took that still exist.
+    pub snapshot_bytes: u64,
+    /// Channels it created that still exist.
+    pub channels: usize,
+    /// Bytes of the kernel-wide budget reserved for its execution state.
+    pub reserved: usize,
+}
+
+/// Which per-instance quota an object counts against.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Quota {
+    MemObj,
+    Snapshot,
+    Channel,
+}
+
+/// What an object costs: the instance it is charged to (until that
+/// instance exits) and the bytes it holds of the kernel-wide budget
+/// (until the object is freed).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Cost {
+    pub(crate) owner: Option<usize>,
+    pub(crate) bytes: usize,
+}
+
+/// The quota an object of this kind counts against, if any.
+fn quota_of(object: &Object) -> Option<Quota> {
+    match object {
+        Object::MemObj(_) => Some(Quota::MemObj),
+        Object::Snapshot { .. } => Some(Quota::Snapshot),
+        Object::Channel { .. } => Some(Quota::Channel),
+        Object::Console | Object::Spawn | Object::Instance { .. } => None,
+    }
+}
 
 /// Name of the entry point every service exports.
 pub const ENTRY_EXPORT: &str = kalium_abi::entry::START_EXPORT;
@@ -142,6 +251,8 @@ struct Entry {
     refs: usize,
     /// The derivation tree of the capabilities on the object.
     lineage: Lineage,
+    /// What the object is charged for (module docs, "Quotas").
+    cost: Cost,
 }
 
 impl Entry {
@@ -255,6 +366,8 @@ pub struct Inst {
     pub wasi: crate::wasi::State,
     /// Instructions the interpreter has executed for this instance.
     pub instructions: u64,
+    /// What it has been charged for (module docs, "Quotas").
+    pub account: Account,
 }
 
 /// Why `spawn` failed to create an instance.
@@ -304,13 +417,29 @@ pub struct Kernel {
     pub console: ObjectId,
     pub spawner: ObjectId,
     pub limits: Limits,
+    /// The kernel-wide budget for instance-driven allocations (module
+    /// docs, "Quotas and the instance budget").
+    pub budget: BudgetRef,
     /// Set by anything that made a thread runnable or added one; the run
     /// loop checks whether the running thread should give way.
     pub reschedule: bool,
+    /// Queued messages freed by the destruction of their channel so far,
+    /// and the budget bytes they released (`Message::cost`); an instance's
+    /// exit reports what the channels it held took with it.
+    drained: Drained,
+}
+
+/// Running totals of the queued messages freed with their channels.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Drained {
+    messages: usize,
+    bytes: usize,
 }
 
 impl Kernel {
-    pub fn new(modules: &'static [BootModule], limits: Limits) -> Kernel {
+    /// A kernel whose instances may take `instance_bytes` of the heap
+    /// between them.
+    pub fn new(modules: &'static [BootModule], limits: Limits, instance_bytes: usize) -> Kernel {
         let mut k = Kernel {
             modules,
             decoded: (0..modules.len()).map(|_| None).collect(),
@@ -321,7 +450,9 @@ impl Kernel {
             console: ObjectId(0),
             spawner: ObjectId(0),
             limits,
+            budget: Budget::new(instance_bytes).into_shared(),
             reschedule: false,
+            drained: Drained::default(),
         };
         k.console = k.new_object(Object::Console, 1);
         k.spawner = k.new_object(Object::Spawn, 1);
@@ -332,6 +463,31 @@ impl Kernel {
 
     /// Registers an object with `pins` references that no capability holds.
     pub fn new_object(&mut self, object: Object, pins: usize) -> ObjectId {
+        self.new_object_with(object, pins, Cost::default())
+    }
+
+    /// [`new_object`](Kernel::new_object) for an object that has been
+    /// charged to `owner` with [`charge`](Kernel::charge): the charge
+    /// (`bytes` of the budget, and the object's quota) is released when
+    /// the object is freed.
+    pub fn new_owned_object(
+        &mut self,
+        object: Object,
+        pins: usize,
+        owner: usize,
+        bytes: usize,
+    ) -> ObjectId {
+        self.new_object_with(
+            object,
+            pins,
+            Cost {
+                owner: Some(owner),
+                bytes,
+            },
+        )
+    }
+
+    fn new_object_with(&mut self, object: Object, pins: usize, cost: Cost) -> ObjectId {
         let id = self.next_object;
         self.next_object += 1;
         self.objects.insert(
@@ -340,9 +496,79 @@ impl Kernel {
                 object,
                 refs: pins,
                 lineage: Lineage::new(),
+                cost,
             },
         );
         ObjectId(id)
+    }
+
+    // -- quotas ---------------------------------------------------------------
+
+    /// Whether [`charge`](Kernel::charge) would succeed.
+    pub fn can_charge(&self, owner: usize, quota: Quota, bytes: usize) -> bool {
+        let Some(inst) = self.instances.get(owner) else {
+            return false;
+        };
+        let a = &inst.account;
+        let within = match quota {
+            Quota::MemObj => a
+                .memobj_bytes
+                .checked_add(bytes as u64)
+                .is_some_and(|t| t <= kalium_abi::limits::MAX_MEMOBJ_BYTES_PER_INSTANCE),
+            Quota::Snapshot => a
+                .snapshot_bytes
+                .checked_add(bytes as u64)
+                .is_some_and(|t| t <= kalium_abi::limits::MAX_SNAPSHOT_BYTES_PER_INSTANCE),
+            Quota::Channel => a.channels < kalium_abi::limits::MAX_CHANNELS_PER_INSTANCE,
+        };
+        within && self.budget.available() >= bytes
+    }
+
+    /// Charges an object of `bytes` to instance `owner`'s `quota` and to
+    /// the kernel-wide budget: `ENOMEM` if either is exceeded, and nothing
+    /// is charged then. The caller registers the object with
+    /// [`new_owned_object`](Kernel::new_owned_object) (which releases the
+    /// charge when the object goes) or gives the charge back with
+    /// [`refund`](Kernel::refund) if it does not get that far.
+    pub fn charge(&mut self, owner: usize, quota: Quota, bytes: usize) -> Result<(), i32> {
+        if !self.can_charge(owner, quota, bytes) || !self.budget.reserve(bytes) {
+            return Err(kalium_abi::errno::ENOMEM);
+        }
+        let a = &mut self.instances[owner].account;
+        match quota {
+            Quota::MemObj => a.memobj_bytes += bytes as u64,
+            Quota::Snapshot => a.snapshot_bytes += bytes as u64,
+            Quota::Channel => a.channels += 1,
+        }
+        Ok(())
+    }
+
+    /// Gives back a charge whose object was never registered.
+    pub fn refund(&mut self, owner: usize, quota: Quota, bytes: usize) {
+        self.uncharge(
+            Cost {
+                owner: Some(owner),
+                bytes,
+            },
+            quota,
+        );
+    }
+
+    /// Releases an object's charge: its bytes from the budget, and its
+    /// quota from the owner if the owner has not exited since.
+    fn uncharge(&mut self, cost: Cost, quota: Quota) {
+        self.budget.release(cost.bytes);
+        let Some(inst) = cost.owner.and_then(|o| self.instances.get_mut(o)) else {
+            return;
+        };
+        let a = &mut inst.account;
+        match quota {
+            Quota::MemObj => a.memobj_bytes = a.memobj_bytes.saturating_sub(cost.bytes as u64),
+            Quota::Snapshot => {
+                a.snapshot_bytes = a.snapshot_bytes.saturating_sub(cost.bytes as u64)
+            }
+            Quota::Channel => a.channels = a.channels.saturating_sub(1),
+        }
     }
 
     pub fn object(&self, id: ObjectId) -> Option<&Object> {
@@ -421,8 +647,18 @@ impl Kernel {
             }
             if gone {
                 if let Some(entry) = self.objects.remove(&id.0) {
+                    if let Some(quota) = quota_of(&entry.object) {
+                        self.uncharge(entry.cost, quota);
+                    }
                     if let Object::Channel { mut channel, .. } = entry.object {
                         for msg in channel.drain() {
+                            // The message's copy was charged at `send`
+                            // (`Message::cost_of`): the slot, the payload
+                            // and the capabilities, released together.
+                            let cost = msg.cost();
+                            self.budget.release(cost);
+                            self.drained.messages = self.drained.messages.saturating_add(1);
+                            self.drained.bytes = self.drained.bytes.saturating_add(cost);
                             pending.extend(msg.caps.into_iter().map(Ref::Cap));
                         }
                     }
@@ -707,6 +943,39 @@ impl Kernel {
             .map(|r| r.wasm.snapshot())
     }
 
+    /// Charges a freshly built instance to the budget: its memory and
+    /// tables (which then charge their own growth) and `state` for its
+    /// execution state. `false` if it does not fit; what was charged is
+    /// released when the instance is dropped (the memory and tables) or
+    /// here (the state).
+    fn charge_instance(&mut self, wasm: &WasmInstance, state: usize) -> bool {
+        if !wasm.memory_ref().borrow_mut().set_budget(&self.budget) {
+            return false;
+        }
+        for i in 0..wasm.num_tables() {
+            let fits = u32::try_from(i)
+                .ok()
+                .and_then(|i| wasm.table_ref(i))
+                .is_some_and(|t| t.borrow_mut().set_budget(&self.budget));
+            if !fits {
+                return false;
+            }
+        }
+        self.budget.reserve(state)
+    }
+
+    /// The size of instance `target`'s linear memory: what a snapshot of
+    /// it costs, before the snapshot is taken. `None` if it has no Wasm
+    /// state or its memory is borrowed.
+    pub fn memory_size_of(&self, target: usize) -> Option<usize> {
+        let run = self.instances.get(target)?.run.as_ref()?;
+        run.wasm
+            .memory_ref()
+            .try_borrow()
+            .ok()
+            .map(|m| m.size_bytes())
+    }
+
     fn create(
         &mut self,
         module: usize,
@@ -724,6 +993,20 @@ impl Kernel {
             Err(e) => return Err((e, caps)),
         };
         let name = self.modules[module].name;
+        // The budget must have room for what instantiation allocates
+        // (checked again, exactly, once the objects exist) before the
+        // memory is allocated and zeroed for nothing.
+        let state = instance_state_bytes(&self.limits);
+        let initial = match source {
+            Source::Fresh => decoded
+                .memories
+                .first()
+                .map_or(0, |m| (m.limits.min as usize).saturating_mul(PAGE_SIZE)),
+            Source::Snapshot(snapshot, _) => snapshot.memory().len(),
+        };
+        if self.budget.available() < state.saturating_add(initial) {
+            return Err((SpawnError::NoMem, caps));
+        }
         let has_spawn = caps.holds_kind(ObjectKind::Spawn);
         let mut resolve =
             |m: &str, n: &str, ty: &kalium_wasm::FuncType| host::resolve(m, n, ty, has_spawn);
@@ -751,7 +1034,8 @@ impl Kernel {
             }
         };
         let wasm = match built {
-            Ok(w) => w,
+            Ok(w) if self.charge_instance(&w, state) => w,
+            Ok(_) => return Err((SpawnError::NoMem, caps)),
             Err(e) => {
                 let err = match e {
                     WasmError::OutOfMemory => SpawnError::NoMem,
@@ -799,6 +1083,7 @@ impl Kernel {
                     "kalium: module {} ({}) has no `{}` export of type [] -> []",
                     module, name, entry_name
                 );
+                self.budget.release(state);
                 return Err((SpawnError::Link, caps));
             }
         };
@@ -812,9 +1097,15 @@ impl Kernel {
             Ok(Some(e)) => (e, Phase::Start),
             Ok(None) => match Execution::new(&wasm, entry, &[]) {
                 Ok(e) => (e, Phase::Main),
-                Err(_) => return Err((SpawnError::Link, caps)),
+                Err(_) => {
+                    self.budget.release(state);
+                    return Err((SpawnError::Link, caps));
+                }
             },
-            Err(_) => return Err((SpawnError::Link, caps)),
+            Err(_) => {
+                self.budget.release(state);
+                return Err((SpawnError::Link, caps));
+            }
         };
 
         let object = self.new_object(
@@ -838,6 +1129,10 @@ impl Kernel {
             parked_on: Vec::new(),
             wasi: crate::wasi::State::default(),
             instructions: 0,
+            account: Account {
+                reserved: state,
+                ..Account::default()
+            },
         };
         if id == self.instances.len() {
             self.instances.push(inst);
@@ -861,9 +1156,20 @@ impl Kernel {
             return;
         }
         inst.exited = Some(code);
+        // Dropping the Wasm state releases what its memory and tables
+        // hold of the budget; the execution state's reservation goes with
+        // it, and the objects the instance created outlive its quotas.
         inst.run = None;
         inst.sleep_until = None;
         inst.yield_pending = false;
+        let reserved = core::mem::take(&mut inst.account).reserved;
+        self.budget.release(reserved);
+        for e in self.objects.values_mut() {
+            if e.cost.owner == Some(instance) {
+                e.cost.owner = None;
+            }
+        }
+        let inst = &mut self.instances[instance];
         let name = inst.name;
         let object = inst.object;
         let instructions = inst.instructions;
@@ -885,8 +1191,22 @@ impl Kernel {
         if self.sched.current() != Some(tid) {
             self.sched.remove(tid);
         }
+        let before = self.drained;
         for cap in caps {
             self.release(cap, now);
+        }
+        // Channels that died with the instance: what their queues still
+        // held goes back to the budget here (the boot-test scenario checks
+        // the figure against `Message::cost_of` for `hog`).
+        let drained = Drained {
+            messages: self.drained.messages.saturating_sub(before.messages),
+            bytes: self.drained.bytes.saturating_sub(before.bytes),
+        };
+        if drained.messages > 0 {
+            println!(
+                "kalium: instance {} ({}) exit drained {} queued messages, {} budget bytes",
+                instance, name, drained.messages, drained.bytes
+            );
         }
         let waiters = match self.object_mut(object) {
             Some(Object::Instance { exit, waiters, .. }) => {
