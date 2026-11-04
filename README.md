@@ -58,8 +58,9 @@ capability to `greedy`, a hostile service that spawns and forgets instances
 until the kernel's instance limit refuses it. `init` observes each exit
 through `instance_wait`, and the kernel exits QEMU with the result.
 
-The interpreter runs at roughly 12 million Wasm instructions per second under
-QEMU TCG on a laptop-class host. Ahead-of-time compilation, MMU-backed
+The interpreter runs at roughly 11 to 16 million Wasm instructions per second
+under QEMU TCG on a laptop-class host, and 300 to 450 million natively
+(`cargo run -p kalium-wasm --release --example bench`). Ahead-of-time compilation, MMU-backed
 instance memory, SMP and devices are future milestones.
 
 To build and run (needs the toolchain from `rust-toolchain.toml` and
@@ -70,6 +71,10 @@ cargo xtask wasm    # build the SDK example services to target/wasm/
 cargo xtask build   # wasm, then the kernel for aarch64-unknown-none
 cargo xtask run     # build, then boot in QEMU on the terminal
 cargo xtask test    # host tests, build, boot in QEMU and check the scenario
+cargo xtask boot-test  # HAL-only boot: UART, MMU, timer ticks, exit
+cargo xtask selftest   # HAL self-test: W^X faults, stack guard, FP state, device tree
+cargo xtask clippy     # lints for host crates, kernel and SDK
+cargo xtask fmt-check  # formatting for both workspaces
 ```
 
 [docs/running.md](docs/running.md) has the QEMU command line, the expected

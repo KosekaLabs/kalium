@@ -32,9 +32,15 @@ pub enum Error {
     /// A configured resource limit was exceeded (too many locals, too large
     /// a minimum memory, ...). `msg` names the limit.
     Limit { msg: &'static str },
-    /// An import could not be resolved at instantiation. `import` is the
-    /// index into `Module::imports()`.
+    /// An import could not be resolved at instantiation (the resolver did
+    /// not know it: "unknown import"). `import` is the index into
+    /// `Module::imports()`.
     Link { import: u32 },
+    /// An import resolved to an object of the wrong kind or type
+    /// ("incompatible import type"): a table whose limits do not cover the
+    /// imported ones, a global of another type or mutability, a function
+    /// of another signature. `import` is the index into `Module::imports()`.
+    IncompatibleImport { import: u32 },
     /// `Execution::new` was asked for a function index that does not exist.
     NoSuchFunction { func: u32 },
     /// `Execution::new` was given arguments that do not match the function's
@@ -57,6 +63,7 @@ impl Error {
             Error::Invalid { msg, .. } => msg,
             Error::Limit { msg } => msg,
             Error::Link { .. } => "unknown import",
+            Error::IncompatibleImport { .. } => "incompatible import type",
             Error::NoSuchFunction { .. } => "unknown function",
             Error::ArgumentMismatch => "argument type mismatch",
             Error::OutOfMemory => "out of memory",
@@ -87,6 +94,9 @@ impl fmt::Display for Error {
             }
             Error::Limit { msg } => write!(f, "limit exceeded: {msg}"),
             Error::Link { import } => write!(f, "unresolved import #{import}"),
+            Error::IncompatibleImport { import } => {
+                write!(f, "incompatible import type for import #{import}")
+            }
             Error::NoSuchFunction { func } => write!(f, "no such function: {func}"),
             Error::ArgumentMismatch => write!(f, "argument type mismatch"),
             Error::OutOfMemory => write!(f, "out of memory"),

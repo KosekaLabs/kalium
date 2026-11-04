@@ -16,6 +16,13 @@
 //!
 //! `KALIUM_BENCH_SCALE=<percent>` scales the iteration counts (default 100)
 //! for quick runs; `KALIUM_BENCH_ONLY=<name>` runs one workload.
+//!
+//! Run-to-run noise on a shared machine is around 10%, more than most
+//! single optimizations buy. To compare two versions, keep both binaries
+//! (`target/release/examples/bench`) and alternate them several times on one
+//! workload with `KALIUM_BENCH_ONLY`, taking the best of each; for a
+//! noise-free signal, count executed instructions with
+//! `valgrind --tool=cachegrind --cache-sim=no` at `KALIUM_BENCH_SCALE=4`.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -292,12 +299,9 @@ fn main() {
         for _ in 0..reps {
             let (result, elapsed, instrs) = timed_run(&mut inst, &w.args, u64::MAX);
             match (&result, &w.expect) {
-                (ExecResult::Done(got), Some(want)) => assert_eq!(
-                    got.as_slice(),
-                    &[*want],
-                    "{}: wrong result",
-                    w.name
-                ),
+                (ExecResult::Done(got), Some(want)) => {
+                    assert_eq!(got.as_slice(), &[*want], "{}: wrong result", w.name)
+                }
                 (ExecResult::Done(_), None) => {}
                 (other, _) => panic!("{}: {other:?}", w.name),
             }
@@ -324,7 +328,10 @@ fn main() {
             loop_unbounded = Some((d, instrs));
         }
     }
-    println!("total best-of-{reps} time: {:.1} ms", total.as_secs_f64() * 1e3);
+    println!(
+        "total best-of-{reps} time: {:.1} ms",
+        total.as_secs_f64() * 1e3
+    );
 
     if let Some((unbounded, instrs)) = loop_unbounded {
         let w = workloads(scale)

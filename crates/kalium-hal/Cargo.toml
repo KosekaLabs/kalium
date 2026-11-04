@@ -5,6 +5,12 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# Hardening self-test run from `kmain`: provokes faults against the W^X
+# memory map and the stack guard and checks the exception handler's report.
+# `cargo xtask selftest`.
+hal-selftest = []
+
 [dependencies]
 
 [dev-dependencies]

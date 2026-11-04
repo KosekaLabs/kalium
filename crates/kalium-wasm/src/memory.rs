@@ -1,13 +1,28 @@
-//! Linear memory (owned by the interpreter step, F).
+//! Linear memory.
 //!
 //! A minimal but complete implementation: a `Vec<u8>` grown in 64 KiB pages
-//! with every access bounds-checked. The interpreter may replace or extend
-//! it; the public methods below are the ones the plan names, and the kernel's
-//! host functions use them through `HostCtx`.
+//! with every access bounds-checked. The kernel's host functions use it
+//! through [`crate::HostCtx`].
+//!
+//! A memory is shared between the instances that import it through a
+//! [`MemoryRef`] (`Rc<RefCell<Memory>>`): growing it through any importer
+//! is visible to all of them, because there is only one object. See
+//! [`crate::instance`] for why `Rc`/`RefCell` are the right tools in this
+//! kernel.
 
 use crate::error::Trap;
-use crate::types::{MAX_PAGES, PAGE_SIZE};
+use crate::types::{MemType, ResizableLimits, MAX_PAGES, PAGE_SIZE};
+use alloc::rc::Rc;
 use alloc::vec::Vec;
+use core::cell::RefCell;
+
+/// A shared handle to a linear memory: what an instance holds for each
+/// memory in its index space, what it exports and what it imports. The
+/// interpreter borrows it mutably for the duration of an interpreter loop
+/// and releases it around every host call, so a host function may borrow
+/// the memory itself (through [`crate::HostCtx`]) and may run another
+/// instance that shares it.
+pub type MemoryRef = Rc<RefCell<Memory>>;
 
 /// A bounds-checked linear memory.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -16,22 +31,71 @@ pub struct Memory {
     /// Upper bound in pages (the smaller of the type's max and the instance
     /// limit).
     max_pages: u32,
+    /// The `max` of the memory's declared type, which import matching sees
+    /// (`None` for a memory declared without one, however small the
+    /// runtime cap `max_pages` is).
+    declared_max: Option<u32>,
 }
 
 impl Memory {
-    /// Create a memory of `min_pages` pages that may grow to `max_pages`.
-    /// Returns `None` if `min_pages > max_pages` or the allocation would be
-    /// larger than 4 GiB.
+    /// Create a memory of `min_pages` pages that may grow to `max_pages`:
+    /// a memory of type `(memory min_pages max_pages)`. Returns `None` if
+    /// `min_pages > max_pages` or the allocation would be larger than
+    /// 4 GiB.
     pub fn new(min_pages: u32, max_pages: u32) -> Option<Memory> {
-        let max_pages = max_pages.min(MAX_PAGES);
-        if min_pages > max_pages {
+        Memory::with_type(
+            MemType {
+                limits: ResizableLimits {
+                    min: min_pages,
+                    max: Some(max_pages),
+                },
+            },
+            max_pages,
+        )
+    }
+
+    /// Create a memory of type `ty` that may grow to the smaller of the
+    /// type's max and `limit` pages (the instance's
+    /// [`crate::Limits::max_memory_pages`]). Returns `None` if the type's
+    /// minimum exceeds that bound or the allocation fails.
+    pub fn with_type(ty: MemType, limit: u32) -> Option<Memory> {
+        let max_pages = ty.limits.max.map_or(limit, |m| m.min(limit)).min(MAX_PAGES);
+        if ty.limits.min > max_pages {
             return None;
         }
-        let len = (min_pages as usize).checked_mul(PAGE_SIZE)?;
+        let len = (ty.limits.min as usize).checked_mul(PAGE_SIZE)?;
         let mut bytes = Vec::new();
         bytes.try_reserve_exact(len).ok()?;
         bytes.resize(len, 0);
-        Some(Memory { bytes, max_pages })
+        Some(Memory {
+            bytes,
+            max_pages,
+            declared_max: ty.limits.max,
+        })
+    }
+
+    /// Wrap the memory in a shared handle.
+    pub fn into_shared(self) -> MemoryRef {
+        Rc::new(RefCell::new(self))
+    }
+
+    /// The memory's current type: its size in pages as the minimum and the
+    /// declared maximum. This is what an import of the memory is matched
+    /// against (`import.min <= size`, and `import.max`, if given, requires
+    /// a declared maximum that is no larger).
+    pub fn ty(&self) -> MemType {
+        MemType {
+            limits: ResizableLimits {
+                min: self.size_pages(),
+                max: self.declared_max,
+            },
+        }
+    }
+
+    /// Whether this memory can be imported as `import` (import matching
+    /// per the spec, limits subtyping).
+    pub fn matches(&self, import: &MemType) -> bool {
+        limits_match(&self.ty().limits, &import.limits)
     }
 
     /// Current size in bytes.
@@ -44,7 +108,8 @@ impl Memory {
         (self.bytes.len() / PAGE_SIZE) as u32
     }
 
-    /// Maximum size in pages.
+    /// Maximum size in pages the memory can grow to (the runtime cap, not
+    /// necessarily the declared maximum).
     pub fn max_pages(&self) -> u32 {
         self.max_pages
     }
@@ -74,6 +139,45 @@ impl Memory {
             return Err(Trap::OutOfBounds);
         }
         Ok(start..end)
+    }
+
+    /// The interpreter's load: the `N` bytes at `addr + offset` (the
+    /// effective address of a Wasm memory instruction, which may exceed
+    /// `u32::MAX` and then always traps). Inlined so that the constant `N`
+    /// folds into a single bounds check.
+    #[inline(always)]
+    pub(crate) fn load<const N: usize>(&self, addr: u32, offset: u32) -> Result<[u8; N], Trap> {
+        // Both operands are < 2^32, so the sum cannot overflow a u64.
+        let start = addr as u64 + offset as u64;
+        let end = start + N as u64;
+        if end > self.bytes.len() as u64 {
+            return Err(Trap::OutOfBounds);
+        }
+        // `end <= len <= usize::MAX`, so the casts are lossless.
+        let src = self
+            .bytes
+            .get(start as usize..end as usize)
+            .ok_or(Trap::OutOfBounds)?;
+        let mut out = [0u8; N];
+        out.copy_from_slice(src);
+        Ok(out)
+    }
+
+    /// The interpreter's store: write `data` at `addr + offset`. See
+    /// [`Memory::load`].
+    #[inline(always)]
+    pub(crate) fn store(&mut self, addr: u32, offset: u32, data: &[u8]) -> Result<(), Trap> {
+        let start = addr as u64 + offset as u64;
+        let end = start + data.len() as u64;
+        if end > self.bytes.len() as u64 {
+            return Err(Trap::OutOfBounds);
+        }
+        let dst = self
+            .bytes
+            .get_mut(start as usize..end as usize)
+            .ok_or(Trap::OutOfBounds)?;
+        dst.copy_from_slice(data);
+        Ok(())
     }
 
     /// Copy `buf.len()` bytes starting at `off` into `buf`.
@@ -125,9 +229,83 @@ impl Memory {
     }
 }
 
+/// Import matching for limits (`limits <= limits'` in the spec): the
+/// actual minimum is at least the imported one, and if the import has a
+/// maximum, the actual type has one that is no larger.
+pub(crate) fn limits_match(actual: &ResizableLimits, import: &ResizableLimits) -> bool {
+    actual.min >= import.min
+        && match import.max {
+            None => true,
+            Some(m) => actual.max.is_some_and(|a| a <= m),
+        }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn types_and_import_matching() {
+        let lim = |min, max| ResizableLimits { min, max };
+        let m = Memory::new(1, 3).unwrap();
+        assert_eq!(m.ty().limits, lim(1, Some(3)));
+        // Declared without a maximum: the runtime cap does not show up in
+        // the type, so an import that wants a maximum does not match.
+        let mut m = Memory::with_type(
+            MemType {
+                limits: lim(2, None),
+            },
+            4,
+        )
+        .unwrap();
+        assert_eq!(m.max_pages(), 4);
+        assert_eq!(m.ty().limits, lim(2, None));
+        assert!(m.matches(&MemType {
+            limits: lim(0, None)
+        }));
+        assert!(m.matches(&MemType {
+            limits: lim(2, None)
+        }));
+        assert!(!m.matches(&MemType {
+            limits: lim(3, None)
+        }));
+        assert!(!m.matches(&MemType {
+            limits: lim(0, Some(4))
+        }));
+        // Growth is reflected in the type's minimum.
+        assert_eq!(m.grow(1), Some(2));
+        assert!(m.matches(&MemType {
+            limits: lim(3, None)
+        }));
+        let m = Memory::with_type(
+            MemType {
+                limits: lim(1, Some(2)),
+            },
+            65536,
+        )
+        .unwrap();
+        assert!(m.matches(&MemType {
+            limits: lim(1, Some(2))
+        }));
+        assert!(m.matches(&MemType {
+            limits: lim(1, Some(3))
+        }));
+        assert!(!m.matches(&MemType {
+            limits: lim(1, Some(1))
+        }));
+        assert!(Memory::with_type(
+            MemType {
+                limits: lim(3, Some(2))
+            },
+            65536
+        )
+        .is_none());
+        // Shared handles see each other's growth.
+        let a = Memory::new(1, 3).unwrap().into_shared();
+        let b = a.clone();
+        assert_eq!(a.borrow_mut().grow(1), Some(1));
+        assert_eq!(b.borrow().size_pages(), 2);
+    }
 
     #[test]
     fn new_and_grow() {
@@ -176,5 +354,29 @@ mod tests {
             m.copy_within(0, PAGE_SIZE as u32 - 2, 4),
             Err(Trap::OutOfBounds)
         );
+    }
+
+    #[test]
+    fn interpreter_load_store() {
+        let mut m = Memory::new(1, 1).unwrap();
+        m.store(4, 4, &[1, 2, 3, 4]).unwrap();
+        assert_eq!(m.load::<4>(0, 8), Ok([1, 2, 3, 4]));
+        assert_eq!(m.load::<2>(9, 0), Ok([2, 3]));
+        assert_eq!(m.load::<1>(PAGE_SIZE as u32 - 1, 0), Ok([0]));
+        assert_eq!(m.load::<1>(PAGE_SIZE as u32, 0), Err(Trap::OutOfBounds));
+        assert_eq!(m.load::<4>(PAGE_SIZE as u32 - 3, 0), Err(Trap::OutOfBounds));
+        // The effective address does not wrap around.
+        assert_eq!(m.load::<4>(u32::MAX, 1), Err(Trap::OutOfBounds));
+        assert_eq!(m.load::<4>(1, u32::MAX), Err(Trap::OutOfBounds));
+        assert_eq!(m.store(u32::MAX, u32::MAX, &[0]), Err(Trap::OutOfBounds));
+        assert_eq!(
+            m.store(PAGE_SIZE as u32 - 1, 0, &[7, 8]),
+            Err(Trap::OutOfBounds)
+        );
+        m.store(PAGE_SIZE as u32 - 1, 0, &[7]).unwrap();
+        assert_eq!(m.load::<1>(PAGE_SIZE as u32 - 1, 0), Ok([7]));
+        // Zero-length accesses at the end are fine, one past it is not.
+        assert_eq!(m.load::<0>(PAGE_SIZE as u32, 0), Ok([]));
+        assert_eq!(m.load::<0>(PAGE_SIZE as u32 + 1, 0), Err(Trap::OutOfBounds));
     }
 }

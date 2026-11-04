@@ -14,11 +14,30 @@
 //! | [`error`] | `Error` (decode/validate/instantiate) and `Trap` (runtime) |
 //! | [`validate`] | the validator |
 //! | [`exec`] | `Value`, `Execution`, `ExecResult`: the resumable interpreter |
-//! | [`instance`] | `Instance`, `Limits`, the `Host` trait and host call types |
-//! | [`memory`] | `Memory`: bounds-checked linear memory |
-//! | [`table`] | `Table`: bounds-checked tables of references |
+//! | [`instance`] | `Instance`, `Limits`, the `Host` trait, host call types, `Extern`/`ExternType` |
+//! | [`memory`] | `Memory`: bounds-checked linear memory, shared as `MemoryRef` |
+//! | [`table`] | `Table`: bounds-checked tables of references, shared as `TableRef` |
+//! | [`global`] | `global::Global`: typed value cells, shared as `GlobalRef` |
 //!
 //! The commonly used types are re-exported at the crate root.
+//!
+//! # Linking
+//!
+//! [`Instance::new`] resolves function imports only (what the kernel needs
+//! in M1). [`Instance::instantiate`] resolves every kind of import: the
+//! resolver returns an [`Extern`] (a host function with its type, or a
+//! shared [`TableRef`], [`MemoryRef`] or [`GlobalRef`] obtained from another
+//! instance's [`Instance::export_table`], [`Instance::export_memory`] or
+//! [`Instance::export_global`], or created by the host), and the instance
+//! checks it against the import type ([`Error::IncompatibleImport`]).
+//! Imported objects are *shared*: one memory, table or global cell seen by
+//! every importer, with `memory.grow`/`table.grow` visible to all of them.
+//! Function references are store-wide *function addresses*
+//! ([`Instance::func_addr`]); a `call_indirect` through the address of a
+//! function of another instance is routed to the embedder through
+//! [`Host::call_foreign`]. See [`instance`] for the design, including why
+//! the shared handles are `Rc`/`RefCell` (the kernel is single-threaded, and
+//! the types make that invariant compiler-checked).
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -32,6 +51,7 @@ extern crate std;
 pub mod decode;
 pub mod error;
 pub mod exec;
+pub mod global;
 pub mod instance;
 pub mod instr;
 pub mod memory;
@@ -42,14 +62,17 @@ pub mod validate;
 
 pub use error::{Error, Trap};
 pub use exec::{ExecResult, Execution, Value};
-pub use instance::{Host, HostCtx, HostFuncId, HostOutcome, Instance, Limits};
+// `global::Global` (the runtime cell) stays behind its module path: the
+// root `Global` is the module section's global definition.
+pub use global::GlobalRef;
+pub use instance::{Extern, ExternType, Host, HostCtx, HostFuncId, HostOutcome, Instance, Limits};
 pub use instr::{BlockType, BrTable, ConstExpr, FuncBody, Instr, MemArg};
-pub use memory::Memory;
+pub use memory::{Memory, MemoryRef};
 pub use module::{
     Data, DataMode, ElemItems, ElemMode, Element, Export, ExportDesc, Global, Import, ImportDesc,
     Module,
 };
-pub use table::{Table, MAX_TABLE_ELEMENTS};
+pub use table::{Table, TableRef, MAX_TABLE_ELEMENTS};
 pub use types::{
     FuncType, GlobalType, MemType, RefType, ResizableLimits, TableType, ValType, MAX_PAGES,
     PAGE_SIZE,

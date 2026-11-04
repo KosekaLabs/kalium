@@ -8,6 +8,8 @@ pub mod exit;
 pub mod gic;
 pub mod mmu;
 mod panic;
+#[cfg(feature = "hal-selftest")]
+pub mod selftest;
 pub mod timer;
 
 /// A minimal IRQ-safe cell for single-core kernel state that is written from

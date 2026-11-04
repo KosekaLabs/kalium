@@ -825,7 +825,10 @@ impl Host for HostCall<'_> {
         args: &[Value],
         results: &mut [Value],
     ) -> Result<HostOutcome, Trap> {
-        let mem: &mut Memory = ctx.memory;
+        // The interpreter has released its borrow of the memory for the
+        // duration of the call (kalium-wasm's `HostCtx` contract).
+        let mut mem = ctx.memory.borrow_mut();
+        let mem: &mut Memory = &mut mem;
         let a = Args(args);
         let step = match func.0 {
             CONSOLE_WRITE => self.console_write(mem, a.i32(0)?, a.i32(1)?, a.i32(2)?),

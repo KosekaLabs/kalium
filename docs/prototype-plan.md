@@ -175,8 +175,28 @@ scheduler can preempt it at any back-edge or call. Host calls are restartable:
 if the host returns `Block`, the interpreter leaves the arguments on the stack
 and rewinds to the call instruction, so resuming re-issues the call.
 
+Memories, tables and globals are *shared objects*: an instance holds a
+handle (`MemoryRef`, `TableRef`, `GlobalRef`; `Rc<RefCell<_>>`, the kernel
+being single-threaded) for each one in its index spaces, whether it defined
+or imported it, and exporting one hands out a clone of the handle, so two
+instances that import the same object see one memory, one table or one
+cell. The interpreter borrows the memory for the duration of an interpreter
+loop and releases the borrow around every host call, so a host function
+borrows it itself through `HostCtx` (`ctx.memory.borrow_mut()`), may grow
+it, and may run another instance that shares it.
+
+A `funcref` (`Value::FuncRef`) is a store-wide *function address*, not a
+function index: each instance owns the address range
+`func_base..func_base + num_funcs` (`Instance::func_addr(index)` =
+`func_base + index` for a defined function; an imported function keeps the
+address of the function it resolved to), and the embedder keeps the ranges
+of instances that may share tables disjoint. A `call_indirect` through the
+address of a function of another instance is routed to the embedder through
+`Host::call_foreign`. With `Instance::new` the range starts at 0, so
+function addresses equal function indices.
+
 ```rust
-pub enum Value { I32(i32), I64(i64), F32(f32), F64(f64), FuncRef(Option<u32>), ExternRef(Option<u32>) }
+pub enum Value { I32(i32), I64(i64), F32(f32), F64(f64), FuncRef(Option<u32> /* function address */), ExternRef(Option<u32>) }
 pub struct Module { /* decoded + validated */ }
 impl Module {
     /// Decode and validate. Never panics on malformed input.
@@ -190,25 +210,62 @@ pub enum HostOutcome { Continue, Block, Exit(i32) }
 pub trait Host {
     /// Called with the args; on Continue, `results` must be filled.
     fn call(&mut self, ctx: &mut HostCtx<'_>, func: HostFuncId, args: &[Value], results: &mut [Value]) -> Result<HostOutcome, Trap>;
+    /// `call_indirect` through a function address of another instance (shared tables). The embedder
+    /// checks the type (`Trap::IndirectCallTypeMismatch`) and runs it. Default: `Err(Trap::Host)`.
+    fn call_foreign(&mut self, ctx: &mut HostCtx<'_>, addr: u32, ty: &FuncType, args: &[Value], results: &mut [Value]) -> Result<HostOutcome, Trap>;
 }
-/// What a host function may touch: the calling instance's linear memory.
-pub struct HostCtx<'a> { pub memory: &'a mut Memory /* ... */ }
+/// What a host function may touch: the calling instance's linear memory, as its shared handle.
+/// The interpreter has released its own borrow for the duration of the call.
+pub struct HostCtx<'a> { pub memory: &'a MemoryRef }
+pub type MemoryRef = Rc<RefCell<Memory>>; pub type TableRef = Rc<RefCell<Table>>; pub type GlobalRef = Rc<global::Global>;
 impl Memory { pub fn read(&self, off: u32, buf: &mut [u8]) -> Result<(), Trap>; pub fn write(&mut self, off: u32, data: &[u8]) -> Result<(), Trap>; pub fn size_bytes(&self) -> usize; }
-pub struct Instance { /* module ref, memory, tables, globals, resolved imports */ }
+/// The type of an import, as the resolver sees it.
+pub enum ExternType<'a> { Func(&'a FuncType), Table(TableType), Memory(MemType), Global(GlobalType) }
+/// What an import resolves to; checked against the import's type (`Error::IncompatibleImport`).
+pub enum Extern {
+    /// A host function called through `Host::call`; `addr` is its function address in the exporting
+    /// instance when it is another instance's function (so `ref.func` of the import names it), `None`
+    /// for a host function. An `addr` inside the importer's own range is `Error::IncompatibleImport`.
+    Func { id: HostFuncId, ty: FuncType, addr: Option<u32> },
+    Table(TableRef), Memory(MemoryRef), Global(GlobalRef),
+}
+pub struct Instance { /* module ref, memory, tables, globals, resolved imports, function address range */ }
 impl Instance {
-    /// Resolve each function import through `resolve`; Err(()) is a link error.
+    /// Functions-only front end (the kernel's): resolve each function import through `resolve`;
+    /// Err(()) is a link error (`Error::Link`), as is any table, memory or global import.
+    /// Function addresses start at 0.
     pub fn new(module: Arc<Module>, resolve: &mut dyn FnMut(&str, &str, &FuncType) -> Result<HostFuncId, ()>, limits: &Limits) -> Result<Instance, Error>;
+    /// General instantiation: resolve every import (`None` is `Error::Link`, a wrong kind or type
+    /// `Error::IncompatibleImport`), then apply the active segments (`allocate` + `init_segments`).
+    pub fn instantiate(module: Arc<Module>, resolve: &mut dyn FnMut(&str, &str, &ExternType<'_>) -> Option<Extern>, limits: &Limits, func_base: u32) -> Result<Instance, Error>;
+    /// The two halves of `instantiate`, for an embedder that must keep an instance whose segments
+    /// trapped (its functions may already sit in shared tables).
+    pub fn allocate(module: Arc<Module>, resolve: &mut dyn FnMut(&str, &str, &ExternType<'_>) -> Option<Extern>, limits: &Limits, func_base: u32) -> Result<Instance, Error>;
+    pub fn init_segments(&mut self) -> Result<(), Trap>;
     /// Runs the start function (if any) to completion is NOT done here; see `Execution::start`.
     pub fn export_func(&self, name: &str) -> Option<u32>;
+    pub fn export_table(&self, name: &str) -> Option<TableRef>;
+    pub fn export_memory(&self, name: &str) -> Option<MemoryRef>;
+    pub fn export_global(&self, name: &str) -> Option<GlobalRef>;
+    pub fn memory_ref(&self) -> &MemoryRef;
+    /// Function index -> function address, and back (`None` for a foreign address).
+    pub fn func_addr(&self, func: u32) -> Option<u32>;
+    pub fn local_func(&self, addr: u32) -> Option<u32>;
 }
 pub struct Execution { /* stack, frames, pc, state */ }
 impl Execution {
     pub fn new(inst: &Instance, func: u32, args: &[Value]) -> Result<Execution, Error>;
+    pub fn start(inst: &Instance) -> Result<Option<Execution>, Error>;
     pub fn run(&mut self, inst: &mut Instance, host: &mut dyn Host, fuel: u64) -> ExecResult;
 }
 pub enum ExecResult { Done(Vec<Value>), OutOfFuel, Blocked, Exited(i32), Trap(Trap) }
+pub enum Error { Malformed { .. }, Unsupported { .. }, Invalid { .. }, Limit { msg }, Link { import: u32 }, IncompatibleImport { import: u32 }, NoSuchFunction { func }, ArgumentMismatch, OutOfMemory, Trap(Trap) }
 pub struct Limits { pub max_memory_pages: u32, pub max_stack_values: usize, pub max_call_depth: usize, pub max_table_elements: u32 /* total over all tables */ }
 ```
+
+The kernel maps `Error::Link` to `ENOENT` for the spawner (see the host ABI
+above); it uses `Instance::new`, so in M1 a module that imports a table,
+memory or global is a link error as well.
 
 Fuel: 1 unit per instruction is fine; `run` returns `OutOfFuel` promptly after
 the budget is spent. Memory grows via `Vec<u8>` in M1 with the page limit
@@ -219,20 +276,39 @@ the `.wast` files are vendored under `crates/kalium-wasm/tests/spec/`.
 
 ### kalium-hal (aarch64 only)
 
-- `boot.S` / `global_asm!`: `_start` parks all but core 0, sets the stack,
-  zeroes `.bss`, drops from EL2 to EL1 if entered at EL2, calls `kmain`.
-- `link.ld` in `kernel/` (load address `0x4008_0000` for QEMU `virt` with
-  `-kernel`). Sections: text, rodata, data, bss, a 1 MiB boot stack, heap
-  symbols `__heap_start`/`__heap_end` covering RAM up to the end of a
-  configurable size (default 128 MiB from `0x4000_0000`).
-- MMU: identity map with 2 MiB blocks (or 1 GiB where convenient): RAM as
-  normal write-back cacheable, the first 1 GiB (MMIO) as device memory.
-  Enabled before any atomic or allocator use.
+- `boot.S` / `global_asm!`: `_start` parks all but core 0, drops from EL2 to
+  EL1 if entered at EL2, sets `SP_EL1` to the exception stack and `SP_EL0`
+  to the boot stack and runs the kernel on `SP_EL0` (so every exception
+  lands on its own stack), zeroes `.bss`, keeps `x0` and calls `kmain`.
+- `link.ld` in `kernel/` (load address `0x4020_0000`: 2 MiB above RAM so
+  that QEMU `-kernel` installs the device tree at `0x4000_0000`). Sections
+  on 4 KiB boundaries with their limits exported (`__text_*`, `__rodata_*`,
+  `__data_*`): text, rodata, data, bss, a 16 KiB unmapped guard, the 1 MiB
+  boot stack, a 16 KiB unmapped guard, a 64 KiB exception stack; heap
+  symbols `__heap_start`/`__heap_end`, the latter the fallback RAM end
+  (default 128 MiB from `0x4000_0000`) when no device tree is found.
+- Device tree: a minimal, bounds-checked FDT reader (`fdt.rs`, no external
+  crate, never panics on a malformed blob) finds the `/memory` node and
+  sizes the heap from it; `x0` is honoured when it points at a blob, else
+  the start of RAM is checked.
+- MMU: identity map, W^X. The kernel image through level-3 tables with 4 KiB
+  pages (`.text` RO+X, `.rodata` RO+XN, `.data`/`.bss`/stacks RW+XN, guards
+  unmapped), the device tree area RO+XN, the rest of RAM up to the device
+  tree's size (rounded down to 4 KiB) as normal write-back cacheable RW+XN
+  2 MiB blocks with a partial last block mapped by 4 KiB pages, so that the
+  mapping and the heap end exactly at the end of RAM and nothing without
+  backing memory is mapped; the first 1 GiB (MMIO) as device memory XN,
+  everything else unmapped; `SCTLR_EL1.WXN` set. Enabled before any atomic
+  or allocator use.
 - PL011 UART at `0x0900_0000`: `fn putc(u8)`, `fn write_str`, and a `print!`/
   `println!` macro pair behind a spinlock.
 - Exception vectors for EL1 (sync, IRQ, FIQ, SError from the current EL and
-  from lower EL) with full register save; sync exceptions print ESR/ELR/FAR
-  and panic. IRQ dispatches through the GIC.
+  from lower EL) with full register save including FP/SIMD (`q0`–`q31`,
+  `FPCR`, `FPSR`); sync exceptions and SErrors print the decoded class
+  (data/instruction abort, permission/translation fault, level, read/write),
+  FAR, ELR, both stack pointers and the registers, then `exit(2)` so a kernel
+  fault is distinguishable from a panic or scenario failure (1). `svc` from
+  EL1 is a no-op. IRQ dispatches through the GIC.
 - GICv2 (`dist 0x0800_0000`, `cpu 0x0801_0000`): enable, route, ack, EOI.
 - Generic timer: `fn now_ns() -> u64` from `CNTPCT_EL0`/`CNTFRQ_EL0`,
   `fn set_timer(ns_from_now)`, IRQ 30 (PPI) wired to a handler the scheduler
@@ -244,7 +320,16 @@ the `.wast` files are vendored under `crates/kalium-wasm/tests/spec/`.
 - `fn wait_for_interrupt()` (`wfi`), `fn enable_irqs()`, `fn disable_irqs()`.
 
 Verified by: the kernel binary booting on QEMU, printing, taking 10 timer
-ticks and exiting with code 0 (`cargo xtask run -- --boot-only`).
+ticks and exiting with code 0 (`cargo xtask boot-test`), and the
+`hal-selftest` feature (`cargo xtask selftest`): `AT`-based checks of every
+region's attributes (including that the mapping ends exactly at the end of
+RAM), deliberate faults (write to `.rodata`/`.text`, execute from
+`.data`/stack/heap, read at the end of RAM, stack overflow into the guard)
+each caught and decoded by the exception handler, and the exception
+round-trip cost; run with the plan's `-m 256M` and again with a RAM size
+that is not a multiple of 2 MiB (`-m 129M`), so the page-mapped tail of RAM
+is exercised. The reader's unit tests run on the host
+(`cargo test -p kalium-hal`).
 
 ### kalium-mm
 
@@ -362,9 +447,12 @@ scenario in the definition of done. Built by `cargo xtask wasm` into
 ### xtask
 
 `cargo xtask wasm` (build SDK examples), `build` (wasm, then kernel for
-aarch64 in release), `run` (build, then QEMU), `test` (host tests, then
-build, then QEMU in boot-test mode with a timeout, asserting the expected
-lines and exit code), `clippy`, `fmt-check`. QEMU command:
+aarch64 in release; `--boot-only`, `--selftest` select the kernel features),
+`run` (build, then QEMU), `boot-test`, `selftest` (HAL checks, see above;
+boots twice, at `-m 256M` and `-m 129M`),
+`test` (host tests, then selftest, then build, then QEMU in boot-test mode
+with a timeout, asserting the expected lines and exit code; exit code 2 is
+reported as a kernel fault), `clippy`, `fmt-check`. QEMU command:
 
 ```
 qemu-system-aarch64 -M virt,gic-version=2 -cpu cortex-a72 -m 256M -nographic \

@@ -33,11 +33,14 @@
 //! (a send, a channel closing, an instance exiting, the timer for a
 //! sleeper) the call is re-issued and re-evaluated from scratch.
 //!
-//! # Boot-only mode
+//! # Boot-only mode and the HAL self-test
 //!
 //! With the `boot-only` cargo feature the kernel is the HAL boot test only:
 //! bring the hardware up, take ten 1 ms timer ticks, exit 0. `cargo xtask
-//! boot-test` builds and checks that.
+//! boot-test` builds and checks that. With `hal-selftest` the kernel runs
+//! `kalium_hal::selftest::run` right after the heap is up (in either mode)
+//! and exits 1 if it fails; `cargo xtask selftest` builds and checks that
+//! together with `boot-only`.
 #![no_std]
 #![no_main]
 
@@ -76,9 +79,9 @@ mod imp {
     fn init_heap() -> usize {
         let heap = kalium_hal::heap_region();
         let size = heap.end - heap.start;
-        // SAFETY: the linker script reserves `[__heap_start, __heap_end)`
-        // for the heap; nothing else uses it, and the MMU maps it as normal
-        // memory.
+        // SAFETY: `[__heap_start, end of RAM)` is reserved for the heap by
+        // the linker script and the HAL's RAM sizing; nothing else uses it,
+        // and the MMU maps it as normal read-write memory.
         if let Err(e) = unsafe { HEAP.init(heap.start, size) } {
             panic!("heap init failed: {e:?}");
         }
@@ -88,16 +91,48 @@ mod imp {
     fn print_banner() {
         println!("kalium: boot");
         println!("kalium: timer frequency {} Hz", timer::frequency_hz());
+        let ram = kalium_hal::ram_info();
+        match ram.source {
+            kalium_hal::RamSource::DeviceTree => println!(
+                "kalium: entered at EL{}, dtb at {:#x} ({} bytes), RAM {:#x}..{:#x} ({} MiB) from the device tree",
+                kalium_hal::boot_el(),
+                ram.dtb,
+                ram.dtb_size,
+                ram.start,
+                ram.end,
+                ram.size() >> 20
+            ),
+            kalium_hal::RamSource::LinkerDefault => println!(
+                "kalium: entered at EL{}, no device tree (x0 = {:#x}): assuming RAM {:#x}..{:#x} ({} MiB), the linker default",
+                kalium_hal::boot_el(),
+                kalium_hal::boot::boot_x0(),
+                ram.start,
+                ram.end,
+                ram.size() >> 20
+            ),
+        }
         let heap = kalium_hal::heap_region();
+        let image = kalium_hal::kernel_image_range();
         println!(
-            "kalium: entered at EL{}, dtb at {:#x}, heap {:#x}..{:#x} ({} MiB)",
-            kalium_hal::boot_el(),
-            kalium_hal::dtb_address(),
+            "kalium: image {:#x}..{:#x} (W^X: text RX, rodata RO, data/stacks RW, guards unmapped), heap {:#x}..{:#x} ({} MiB)",
+            image.start,
+            image.end,
             heap.start,
             heap.end,
             (heap.end - heap.start) >> 20
         );
     }
+
+    /// Run the HAL hardening self-test; exit 1 if it fails.
+    #[cfg(feature = "hal-selftest")]
+    fn selftest() {
+        if !kalium_hal::selftest::run() {
+            kalium_hal::exit(1);
+        }
+    }
+
+    #[cfg(not(feature = "hal-selftest"))]
+    fn selftest() {}
 
     #[cfg(feature = "boot-only")]
     mod boot_only {
@@ -215,6 +250,7 @@ mod imp {
         init_hal();
         print_banner();
         let heap_bytes = init_heap();
+        selftest();
         #[cfg(feature = "boot-only")]
         {
             let _ = heap_bytes;

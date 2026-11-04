@@ -6,9 +6,11 @@
 //!
 //! - `(module ...)` must decode, validate, instantiate and run its start
 //!   function; it becomes the current module and may be named with `$id`;
-//! - `(register "name" $id?)` makes a module's function exports importable
-//!   by later modules (cross-instance calls go through the `Host` trait,
-//!   exactly as the kernel would route them);
+//! - `(register "name" $id?)` makes a module's exports importable by later
+//!   modules: functions as cross-instance calls through the `Host` trait
+//!   (exactly as the kernel would route them), tables, memories and
+//!   globals as the shared objects themselves, so that an importer and the
+//!   exporter see one table, one memory, one global;
 //! - `(invoke ...)` must complete without trapping;
 //! - `(assert_return (invoke ...) results)` and `(assert_return (get ...))`
 //!   must produce exactly the expected values (NaN patterns included);
@@ -16,23 +18,29 @@
 //!   `(assert_trap (module ...) msg)` must fail instantiation with it;
 //! - `(assert_exhaustion ...)` must trap with the call-depth or value-stack
 //!   limit;
-//! - `(assert_unlinkable (module ...))` must fail to instantiate;
+//! - `(assert_unlinkable (module ...) msg)` must fail to link with the
+//!   spec's message ("unknown import" or "incompatible import type");
 //! - `(assert_malformed ...)` and `(assert_invalid ...)` must be rejected
 //!   (`tests/spec_validate.rs` also checks the messages).
 //!
-//! The `spectest` host module provides the `print*` functions. Its table,
-//! memory and global exports cannot be provided because M1 supports function
-//! imports only: a module importing a table, memory or global is *skipped*,
-//! as are the directives that target it, any module importing from it, and
-//! any invocation of an instance whose table or memory the skipped module
-//! would have shared (its state would differ from what the script expects).
-//! Every skip is counted and the files in which skips may happen are listed
-//! explicitly in [`FILES_WITH_SKIPS`]; a skip anywhere else fails the test,
-//! so a regression cannot hide behind a skip.
+//! The `spectest` host module is provided in full: the `print*` host
+//! functions, `table` (10 20 funcref), `memory` (1 2) and the four
+//! `global_*` globals, created by the host and shared with every module
+//! that imports them (as the kernel will share memory objects with
+//! instances). A `call_indirect` through a table entry another instance
+//! stored (a *foreign* function address, see `kalium_wasm::instance`) is
+//! served through `Host::call_foreign`, which finds the owning instance by
+//! its address range.
+//!
+//! Every directive is executed: there is no skip mechanism, and the test
+//! asserts that the number of directives equals the number of recorded
+//! outcomes (passes and failures), so nothing can fall through silently.
 
+use kalium_wasm::global::Global;
 use kalium_wasm::{
-    Error, ExecResult, Execution, ExportDesc, FuncType, Host, HostCtx, HostFuncId, HostOutcome,
-    Instance, Limits, Module, Trap, ValType, Value,
+    Error, ExecResult, Execution, ExportDesc, Extern, ExternType, FuncType, GlobalRef, GlobalType,
+    Host, HostCtx, HostFuncId, HostOutcome, Instance, Limits, MemType, Memory, MemoryRef, Module,
+    RefType, ResizableLimits, Table, TableRef, TableType, Trap, ValType, Value, MAX_TABLE_ELEMENTS,
 };
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -44,32 +52,6 @@ use wast::parser::{self, ParseBuffer};
 use wast::token::{Id, Index, Span};
 use wast::{QuoteWat, Wast, WastArg, WastDirective, WastExecute, WastInvoke, WastRet, Wat};
 
-/// Files in which modules are skipped because they import a table, memory or
-/// global (from `spectest` or from a registered module), with the reason.
-/// Everything else must run completely.
-const FILES_WITH_SKIPS: &[(&str, &str)] = &[
-    ("data.wast", "imports spectest memory/globals"),
-    (
-        "elem.wast",
-        "imports spectest table/globals and shares tables",
-    ),
-    ("global.wast", "imports spectest globals"),
-    ("imports.wast", "imports spectest table/memory/globals"),
-    (
-        "linking.wast",
-        "shares tables, memories and globals between modules",
-    ),
-    (
-        "memory_grow.wast",
-        "imports a grown memory from a registered module",
-    ),
-    ("table.wast", "imports spectest table"),
-    (
-        "table_grow.wast",
-        "imports a grown table from a registered module",
-    ),
-];
-
 /// Generous limits: the suite grows memories to 803 pages and recurses until
 /// `assert_exhaustion` fires.
 const LIMITS: Limits = Limits {
@@ -79,18 +61,14 @@ const LIMITS: Limits = Limits {
     max_table_elements: 1 << 20,
 };
 
+/// Size of each instance's function address range: instance `i` of the
+/// store owns addresses `i * FUNC_ADDR_SPACE ..`, so an address maps back to
+/// its instance by division. No spec module has a million functions.
+const FUNC_ADDR_SPACE: u32 = 1 << 20;
+
 // ---------------------------------------------------------------------------
 // The store: instances, names and the host
 // ---------------------------------------------------------------------------
-
-/// What a module directive produced.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Slot {
-    /// A live instance (index into `Store::instances`).
-    Live(usize),
-    /// Skipped: it needs a non-function import.
-    Skipped,
-}
 
 /// A resolved host function.
 #[derive(Clone, Copy, Debug)]
@@ -101,35 +79,11 @@ enum HostFn {
     Cross { instance: usize, func: u32 },
 }
 
-#[derive(Default)]
-struct Store {
-    /// `None` while that instance is running (it is lent to the interpreter).
-    instances: Vec<Option<Instance>>,
-    /// Per instance: the instances it imports functions from.
-    deps: Vec<Vec<usize>>,
-    /// Per instance: whether a skipped module would have shared (and
-    /// modified) its table or memory, so its state is not what the script
-    /// expects any more.
-    tainted: Vec<bool>,
-    /// `$id` of a module directive -> what it produced.
-    by_id: HashMap<String, Slot>,
-    /// `(register "name")` -> what it refers to.
-    registered: HashMap<String, Slot>,
-    current: Option<Slot>,
-    host_funcs: Vec<HostFn>,
-}
-
-/// Why a module could not be instantiated.
-enum NotInstantiated {
-    /// Needs a non-function import: skipped, not a failure. `shares_with`
-    /// are the live instances whose table/memory/global it would have
-    /// imported.
-    Skipped {
-        why: String,
-        shares_with: Vec<usize>,
-    },
-    /// A real error (decode, validate, link, trap, ...).
-    Failed(Error),
+/// The host-provided objects of the `spectest` module.
+struct SpecTest {
+    table: TableRef,
+    memory: MemoryRef,
+    globals: Vec<(&'static str, GlobalRef)>,
 }
 
 fn spectest_type(name: &str) -> Option<FuncType> {
@@ -147,8 +101,95 @@ fn spectest_type(name: &str) -> Option<FuncType> {
     Some(FuncType::new(params, results))
 }
 
+impl SpecTest {
+    fn new() -> SpecTest {
+        let table = Table::new(
+            TableType {
+                elem: RefType::FuncRef,
+                limits: ResizableLimits {
+                    min: 10,
+                    max: Some(20),
+                },
+            },
+            MAX_TABLE_ELEMENTS,
+        )
+        .expect("spectest table")
+        .into_shared();
+        let memory = Memory::with_type(
+            MemType {
+                limits: ResizableLimits {
+                    min: 1,
+                    max: Some(2),
+                },
+            },
+            LIMITS.max_memory_pages,
+        )
+        .expect("spectest memory")
+        .into_shared();
+        let global = |name, value: Value| {
+            let ty = GlobalType {
+                ty: value.ty(),
+                mutable: false,
+            };
+            (name, Global::new(ty, value).expect("typed").into_shared())
+        };
+        SpecTest {
+            table,
+            memory,
+            globals: vec![
+                global("global_i32", Value::I32(666)),
+                global("global_i64", Value::I64(666)),
+                global("global_f32", Value::F32(666.6)),
+                global("global_f64", Value::F64(666.6)),
+            ],
+        }
+    }
+
+    /// Resolve `spectest.name`; `None` for an unknown name.
+    fn lookup(&self, name: &str, host_funcs: &mut Vec<HostFn>) -> Option<Extern> {
+        if name == "table" {
+            return Some(Extern::Table(self.table.clone()));
+        }
+        if name == "memory" {
+            return Some(Extern::Memory(self.memory.clone()));
+        }
+        if let Some((_, g)) = self.globals.iter().find(|(n, _)| *n == name) {
+            return Some(Extern::Global(g.clone()));
+        }
+        let ty = spectest_type(name)?;
+        let id = HostFuncId(host_funcs.len() as u32);
+        host_funcs.push(HostFn::Print);
+        Some(Extern::Func { id, ty, addr: None })
+    }
+}
+
+struct Store {
+    /// Every instance created in this script, in creation order (the index
+    /// is the instance's function address range). `None` while that
+    /// instance is running (it is lent to the interpreter).
+    instances: Vec<Option<Instance>>,
+    /// `$id` of a module directive -> instance.
+    by_id: HashMap<String, usize>,
+    /// `(register "name")` -> instance.
+    registered: HashMap<String, usize>,
+    current: Option<usize>,
+    host_funcs: Vec<HostFn>,
+    spectest: SpecTest,
+}
+
 impl Store {
-    fn slot_of(&self, id: Option<Id<'_>>) -> Result<Slot, String> {
+    fn new() -> Store {
+        Store {
+            instances: Vec::new(),
+            by_id: HashMap::new(),
+            registered: HashMap::new(),
+            current: None,
+            host_funcs: Vec::new(),
+            spectest: SpecTest::new(),
+        }
+    }
+
+    fn instance_of(&self, id: Option<Id<'_>>) -> Result<usize, String> {
         match id {
             Some(id) => self
                 .by_id
@@ -159,128 +200,70 @@ impl Store {
         }
     }
 
-    /// Decode, validate, instantiate and run the start function.
-    fn instantiate(&mut self, bytes: &[u8]) -> Result<usize, NotInstantiated> {
-        let module = Module::new(bytes).map_err(NotInstantiated::Failed)?;
-        let module = Arc::new(module);
-
-        // Non-function imports cannot be provided in M1.
-        let mut shares_with = Vec::new();
-        let mut why = None;
-        for imp in module.imports() {
-            let kind = match imp.desc {
-                kalium_wasm::ImportDesc::Func(_) => continue,
-                kalium_wasm::ImportDesc::Table(_) => "table",
-                kalium_wasm::ImportDesc::Memory(_) => "memory",
-                kalium_wasm::ImportDesc::Global(_) => "global",
-            };
-            if let Some(Slot::Live(idx)) = self.registered.get(imp.module.as_str()) {
-                shares_with.push(*idx);
-            }
-            why.get_or_insert_with(|| {
-                format!("imports {kind} \"{}\".\"{}\"", imp.module, imp.name)
-            });
-        }
-        if let Some(why) = why {
-            return Err(NotInstantiated::Skipped { why, shares_with });
-        }
-
-        let mut depends_on_skipped = None;
-        let mut deps = Vec::new();
+    /// Decode, validate, instantiate and run the start function. The
+    /// instance is kept in the store even when a segment or the start
+    /// function traps: it exists, and its active segments may already have
+    /// put its functions into shared tables (linking.wast relies on that).
+    fn instantiate(&mut self, bytes: &[u8]) -> Result<usize, Error> {
+        let module = Arc::new(Module::new(bytes)?);
+        let idx = self.instances.len();
+        let base = u32::try_from(idx)
+            .ok()
+            .and_then(|i| i.checked_mul(FUNC_ADDR_SPACE))
+            .expect("fewer than 4096 instances per script");
         let instance = {
             let instances = &self.instances;
             let registered = &self.registered;
             let host_funcs = &mut self.host_funcs;
-            let mut resolve = |m: &str, n: &str, ty: &FuncType| -> Result<HostFuncId, ()> {
-                let hf = if m == "spectest" {
-                    if spectest_type(n).as_ref() != Some(ty) {
-                        return Err(());
-                    }
-                    HostFn::Print
-                } else {
-                    match registered.get(m) {
-                        Some(Slot::Live(idx)) => {
-                            let target = instances[*idx].as_ref().ok_or(())?;
-                            let func = target.export_func(n).ok_or(())?;
-                            if target.module().func_type_of(func) != Some(ty) {
-                                return Err(());
-                            }
-                            deps.push(*idx);
-                            HostFn::Cross {
-                                instance: *idx,
-                                func,
-                            }
+            let spectest = &self.spectest;
+            let mut resolve = |m: &str, n: &str, _ty: &ExternType<'_>| -> Option<Extern> {
+                if m == "spectest" {
+                    return spectest.lookup(n, host_funcs);
+                }
+                let target_idx = *registered.get(m)?;
+                let target = instances[target_idx].as_ref()?;
+                Some(match target.module().export(n)?.desc {
+                    ExportDesc::Func(func) => {
+                        let id = HostFuncId(host_funcs.len() as u32);
+                        host_funcs.push(HostFn::Cross {
+                            instance: target_idx,
+                            func,
+                        });
+                        Extern::Func {
+                            id,
+                            ty: target.func_type(func)?.clone(),
+                            addr: target.func_addr(func),
                         }
-                        Some(Slot::Skipped) => {
-                            depends_on_skipped =
-                                Some(format!("imports from skipped module \"{m}\""));
-                            return Err(());
-                        }
-                        None => return Err(()),
                     }
-                };
-                let id = HostFuncId(host_funcs.len() as u32);
-                host_funcs.push(hf);
-                Ok(id)
-            };
-            Instance::new(module, &mut resolve, &LIMITS)
-        };
-        let mut instance = match instance {
-            Ok(i) => i,
-            Err(Error::Link { .. }) if depends_on_skipped.is_some() => {
-                return Err(NotInstantiated::Skipped {
-                    why: depends_on_skipped.unwrap_or_default(),
-                    shares_with: Vec::new(),
+                    ExportDesc::Table(t) => Extern::Table(target.table_ref(t)?.clone()),
+                    ExportDesc::Memory(_) => Extern::Memory(target.memory_ref().clone()),
+                    ExportDesc::Global(g) => Extern::Global(target.global_ref(g)?.clone()),
                 })
-            }
-            Err(e) => return Err(NotInstantiated::Failed(e)),
+            };
+            Instance::allocate(module, &mut resolve, &LIMITS, base)?
         };
+        self.instances.push(Some(instance));
+        let inst = self.instances[idx].as_mut().expect("just stored");
+        inst.init_segments().map_err(Error::Trap)?;
 
         // The start function.
-        if let Some(mut start) = Execution::start(&instance).map_err(NotInstantiated::Failed)? {
-            match start.run(&mut instance, self, u64::MAX) {
+        let start = Execution::start(inst)?;
+        if let Some(mut start) = start {
+            let mut inst = self.instances[idx].take().expect("just stored");
+            let r = start.run(&mut inst, self, u64::MAX);
+            self.instances[idx] = Some(inst);
+            match r {
                 ExecResult::Done(_) => {}
-                ExecResult::Trap(t) => return Err(NotInstantiated::Failed(Error::Trap(t))),
-                other => {
-                    return Err(NotInstantiated::Failed(Error::Trap(match other {
-                        ExecResult::OutOfFuel => Trap::OutOfFuel,
-                        _ => Trap::Host,
-                    })))
-                }
+                ExecResult::Trap(t) => return Err(Error::Trap(t)),
+                ExecResult::OutOfFuel => return Err(Error::Trap(Trap::OutOfFuel)),
+                ExecResult::Blocked | ExecResult::Exited(_) => return Err(Error::Trap(Trap::Host)),
             }
         }
-
-        let idx = self.instances.len();
-        self.instances.push(Some(instance));
-        self.deps.push(deps);
-        self.tainted.push(false);
         Ok(idx)
     }
 
-    /// Whether the instance, or an instance it imports functions from, has
-    /// state a skipped module would have modified.
-    fn is_tainted(&self, idx: usize) -> bool {
-        let mut seen = vec![false; self.instances.len()];
-        let mut todo = vec![idx];
-        while let Some(i) = todo.pop() {
-            if seen[i] {
-                continue;
-            }
-            seen[i] = true;
-            if self.tainted[i] {
-                return true;
-            }
-            todo.extend(self.deps[i].iter().copied());
-        }
-        false
-    }
-
-    /// Invoke an export of the given (or current) module.
-    fn invoke(&mut self, slot: Slot, name: &str, args: &[Value]) -> Result<ExecResult, String> {
-        let idx = match slot {
-            Slot::Live(idx) => idx,
-            Slot::Skipped => return Err("module was skipped".to_owned()),
-        };
+    /// Invoke an export of an instance.
+    fn invoke(&mut self, idx: usize, name: &str, args: &[Value]) -> Result<ExecResult, String> {
         let mut inst = self.instances[idx]
             .take()
             .ok_or_else(|| "instance is already running".to_owned())?;
@@ -297,19 +280,48 @@ impl Store {
     }
 
     /// Read an exported global.
-    fn get_global(&self, slot: Slot, name: &str) -> Result<Value, String> {
-        let idx = match slot {
-            Slot::Live(idx) => idx,
-            Slot::Skipped => return Err("module was skipped".to_owned()),
-        };
+    fn get_global(&self, idx: usize, name: &str) -> Result<Value, String> {
         let inst = self.instances[idx]
             .as_ref()
             .ok_or_else(|| "instance is already running".to_owned())?;
-        match inst.module().export(name).map(|e| e.desc) {
-            Some(ExportDesc::Global(g)) => inst
-                .global(g)
-                .ok_or_else(|| format!("global {g} out of range")),
-            _ => Err(format!("no exported global \"{name}\"")),
+        inst.export_global(name)
+            .map(|g| g.get())
+            .ok_or_else(|| format!("no exported global \"{name}\""))
+    }
+
+    /// Run function `func` of instance `instance` to completion on behalf of
+    /// a host call, filling `results`. The instance is lent to the nested
+    /// interpreter for the duration of the call; an instance that is
+    /// already running (a cross call back into the caller) cannot be
+    /// re-entered and reports `Trap::Host`.
+    fn run_in(
+        &mut self,
+        instance: usize,
+        func: u32,
+        args: &[Value],
+        results: &mut [Value],
+    ) -> Result<HostOutcome, Trap> {
+        let mut target = self
+            .instances
+            .get_mut(instance)
+            .and_then(Option::take)
+            .ok_or(Trap::Host)?;
+        let r = Execution::new(&target, func, args)
+            .map(|mut exec| exec.run(&mut target, self, u64::MAX));
+        self.instances[instance] = Some(target);
+        match r {
+            Ok(ExecResult::Done(vals)) => {
+                if vals.len() != results.len() {
+                    return Err(Trap::Host);
+                }
+                results.copy_from_slice(&vals);
+                Ok(HostOutcome::Continue)
+            }
+            Ok(ExecResult::Trap(t)) => Err(t),
+            Ok(ExecResult::Exited(_) | ExecResult::Blocked | ExecResult::OutOfFuel) => {
+                Err(Trap::Host)
+            }
+            Err(_) => Err(Trap::Host),
         }
     }
 }
@@ -324,33 +336,31 @@ impl Host for Store {
     ) -> Result<HostOutcome, Trap> {
         match *self.host_funcs.get(func.0 as usize).ok_or(Trap::Host)? {
             HostFn::Print => Ok(HostOutcome::Continue),
-            HostFn::Cross { instance, func } => {
-                // Nested execution on the other instance; it is lent to the
-                // interpreter for the duration of the call.
-                let mut target = self
-                    .instances
-                    .get_mut(instance)
-                    .and_then(Option::take)
-                    .ok_or(Trap::Host)?;
-                let r = Execution::new(&target, func, args)
-                    .map(|mut exec| exec.run(&mut target, self, u64::MAX));
-                self.instances[instance] = Some(target);
-                match r {
-                    Ok(ExecResult::Done(vals)) => {
-                        if vals.len() != results.len() {
-                            return Err(Trap::Host);
-                        }
-                        results.copy_from_slice(&vals);
-                        Ok(HostOutcome::Continue)
-                    }
-                    Ok(ExecResult::Trap(t)) => Err(t),
-                    Ok(ExecResult::Exited(_) | ExecResult::Blocked | ExecResult::OutOfFuel) => {
-                        Err(Trap::Host)
-                    }
-                    Err(_) => Err(Trap::Host),
-                }
-            }
+            HostFn::Cross { instance, func } => self.run_in(instance, func, args, results),
         }
+    }
+
+    /// `call_indirect` through a function of another instance: the address
+    /// range names the instance, the offset its function.
+    fn call_foreign(
+        &mut self,
+        _ctx: &mut HostCtx<'_>,
+        addr: u32,
+        ty: &FuncType,
+        args: &[Value],
+        results: &mut [Value],
+    ) -> Result<HostOutcome, Trap> {
+        let instance = (addr / FUNC_ADDR_SPACE) as usize;
+        let func = addr % FUNC_ADDR_SPACE;
+        let target = self
+            .instances
+            .get(instance)
+            .and_then(Option::as_ref)
+            .ok_or(Trap::Host)?;
+        if target.func_type(func) != Some(ty) {
+            return Err(Trap::IndirectCallTypeMismatch);
+        }
+        self.run_in(instance, func, args, results)
     }
 }
 
@@ -470,39 +480,62 @@ fn describe(values: &[Value]) -> String {
     s
 }
 
-fn trap_message_matches(expected: &str, trap: Trap) -> bool {
-    let ours = trap.message();
+/// Whether our message for a trap or link error matches the script's (the
+/// reference interpreter's messages are sometimes longer, sometimes
+/// shorter than ours).
+fn message_matches(expected: &str, ours: &str) -> bool {
     ours.starts_with(expected) || expected.starts_with(ours)
+}
+
+fn trap_message_matches(expected: &str, trap: Trap) -> bool {
+    message_matches(expected, trap.message())
 }
 
 // ---------------------------------------------------------------------------
 // The per-file runner
 // ---------------------------------------------------------------------------
 
+/// Outcome counters. Every directive ends in exactly one of these or in a
+/// failure; `directives` counts them all, so the two sides must balance.
 #[derive(Default, Clone, Copy)]
 struct Stats {
+    directives: usize,
     modules: usize,
+    definitions: usize,
+    registers: usize,
     invocations: usize,
     returns: usize,
     traps: usize,
     exhaustions: usize,
     unlinkable: usize,
     rejected: usize,
-    skipped_modules: usize,
-    skipped_directives: usize,
 }
 
 impl Stats {
     fn add(&mut self, o: &Stats) {
+        self.directives += o.directives;
         self.modules += o.modules;
+        self.definitions += o.definitions;
+        self.registers += o.registers;
         self.invocations += o.invocations;
         self.returns += o.returns;
         self.traps += o.traps;
         self.exhaustions += o.exhaustions;
         self.unlinkable += o.unlinkable;
         self.rejected += o.rejected;
-        self.skipped_modules += o.skipped_modules;
-        self.skipped_directives += o.skipped_directives;
+    }
+
+    /// Directives that ended in a recorded pass.
+    fn passes(&self) -> usize {
+        self.modules
+            + self.definitions
+            + self.registers
+            + self.invocations
+            + self.returns
+            + self.traps
+            + self.exhaustions
+            + self.unlinkable
+            + self.rejected
     }
 }
 
@@ -512,7 +545,6 @@ struct Runner<'a> {
     store: Store,
     stats: Stats,
     failures: Vec<String>,
-    skips: Vec<String>,
 }
 
 /// `names.wast` deliberately uses confusable unicode in export names, which
@@ -547,60 +579,40 @@ impl Runner<'_> {
             .push(format!("{}:{}: {msg}", self.file, self.line(span)));
     }
 
-    fn skip(&mut self, span: Span, msg: String) {
-        self.stats.skipped_directives += 1;
-        self.skips
-            .push(format!("{}:{}: {msg}", self.file, self.line(span)));
-    }
-
     /// A `module` directive: instantiate and make current.
     fn module(&mut self, span: Span, bytes: &[u8], id: Option<Id<'_>>) {
-        let slot = match self.store.instantiate(bytes) {
+        let idx = match self.store.instantiate(bytes) {
             Ok(idx) => {
                 self.stats.modules += 1;
-                Slot::Live(idx)
+                idx
             }
-            Err(NotInstantiated::Skipped { why, shares_with }) => {
-                self.stats.skipped_modules += 1;
-                self.skips.push(format!(
-                    "{}:{}: module skipped: {why}",
-                    self.file,
-                    self.line(span)
-                ));
-                for idx in shares_with {
-                    self.store.tainted[idx] = true;
-                }
-                Slot::Skipped
-            }
-            Err(NotInstantiated::Failed(e)) => {
+            Err(e) => {
                 self.fail(span, format!("module failed to instantiate: {e}"));
                 return;
             }
         };
         if let Some(id) = id {
-            self.store.by_id.insert(id.name().to_owned(), slot);
+            self.store.by_id.insert(id.name().to_owned(), idx);
         }
-        self.store.current = Some(slot);
+        self.store.current = Some(idx);
     }
 
     fn args(&self, invoke: &WastInvoke<'_>) -> Result<Vec<Value>, String> {
         invoke.args.iter().map(arg_value).collect()
     }
 
-    /// Run an invocation; `Ok(None)` when the target module was skipped or
-    /// its state depends on a skipped module.
-    fn exec_invoke(&mut self, invoke: &WastInvoke<'_>) -> Result<Option<ExecResult>, String> {
-        let slot = self.store.slot_of(invoke.module)?;
-        match slot {
-            Slot::Skipped => return Ok(None),
-            Slot::Live(idx) if self.store.is_tainted(idx) => return Ok(None),
-            Slot::Live(_) => {}
-        }
+    /// Run an invocation.
+    fn exec_invoke(&mut self, invoke: &WastInvoke<'_>) -> Result<ExecResult, String> {
+        let idx = self.store.instance_of(invoke.module)?;
         let args = self.args(invoke)?;
-        self.store.invoke(slot, invoke.name, &args).map(Some)
+        self.store.invoke(idx, invoke.name, &args)
     }
 
     fn directive(&mut self, directive: WastDirective<'_>) {
+        // A thread is a container; its directives are counted one by one.
+        if !matches!(directive, WastDirective::Thread(_)) {
+            self.stats.directives += 1;
+        }
         match directive {
             WastDirective::Module(mut m) => {
                 let span = m.span();
@@ -614,11 +626,10 @@ impl Runner<'_> {
                 // Define without instantiating: it must at least validate.
                 let span = m.span();
                 match m.encode() {
-                    Ok(bytes) => {
-                        if let Err(e) = Module::new(&bytes) {
-                            self.fail(span, format!("module definition rejected: {e}"));
-                        }
-                    }
+                    Ok(bytes) => match Module::new(&bytes) {
+                        Ok(_) => self.stats.definitions += 1,
+                        Err(e) => self.fail(span, format!("module definition rejected: {e}")),
+                    },
                     Err(e) => self.fail(span, format!("wast could not encode module: {e}")),
                 }
             }
@@ -628,20 +639,20 @@ impl Runner<'_> {
                     "module instance directives are not supported".to_owned(),
                 );
             }
-            WastDirective::Register { span, name, module } => match self.store.slot_of(module) {
-                Ok(slot) => {
-                    self.store.registered.insert(name.to_owned(), slot);
+            WastDirective::Register { span, name, module } => {
+                match self.store.instance_of(module) {
+                    Ok(idx) => {
+                        self.store.registered.insert(name.to_owned(), idx);
+                        self.stats.registers += 1;
+                    }
+                    Err(e) => self.fail(span, format!("register: {e}")),
                 }
-                Err(e) => self.fail(span, format!("register: {e}")),
-            },
+            }
             WastDirective::Invoke(invoke) => {
                 let span = invoke.span;
                 match self.exec_invoke(&invoke) {
-                    Ok(Some(ExecResult::Done(_))) => self.stats.invocations += 1,
-                    Ok(Some(other)) => {
-                        self.fail(span, format!("invoke \"{}\": {other:?}", invoke.name))
-                    }
-                    Ok(None) => self.skip(span, format!("invoke \"{}\"", invoke.name)),
+                    Ok(ExecResult::Done(_)) => self.stats.invocations += 1,
+                    Ok(other) => self.fail(span, format!("invoke \"{}\": {other:?}", invoke.name)),
                     Err(e) => self.fail(span, format!("invoke \"{}\": {e}", invoke.name)),
                 }
             }
@@ -660,17 +671,16 @@ impl Runner<'_> {
                 call,
                 message,
             } => match self.exec_invoke(&call) {
-                Ok(Some(ExecResult::Trap(Trap::CallDepth | Trap::StackOverflow))) => {
+                Ok(ExecResult::Trap(Trap::CallDepth | Trap::StackOverflow)) => {
                     self.stats.exhaustions += 1
                 }
-                Ok(Some(other)) => self.fail(
+                Ok(other) => self.fail(
                     span,
                     format!(
                         "assert_exhaustion \"{message}\" on \"{}\": got {other:?}",
                         call.name
                     ),
                 ),
-                Ok(None) => self.skip(span, format!("assert_exhaustion \"{}\"", call.name)),
                 Err(e) => self.fail(span, format!("assert_exhaustion: {e}")),
             },
             WastDirective::AssertUnlinkable {
@@ -683,17 +693,20 @@ impl Runner<'_> {
                         span,
                         format!("assert_unlinkable \"{message}\": module instantiated"),
                     ),
-                    Err(NotInstantiated::Failed(Error::Link { .. })) => self.stats.unlinkable += 1,
-                    Err(NotInstantiated::Skipped { why, .. }) => {
-                        // Rejected for the right reason, by a different check.
-                        self.stats.unlinkable += 1;
-                        self.skips.push(format!(
-                            "{}:{}: assert_unlinkable module rejected as unsupported ({why})",
-                            self.file,
-                            self.line(span)
-                        ));
+                    Err(e @ (Error::Link { .. } | Error::IncompatibleImport { .. })) => {
+                        if message_matches(message, e.message()) {
+                            self.stats.unlinkable += 1;
+                        } else {
+                            self.fail(
+                                span,
+                                format!(
+                                    "assert_unlinkable \"{message}\": linking failed with \"{}\"",
+                                    e.message()
+                                ),
+                            );
+                        }
                     }
-                    Err(NotInstantiated::Failed(e)) => self.fail(
+                    Err(e) => self.fail(
                         span,
                         format!("assert_unlinkable \"{message}\": wrong error: {e}"),
                     ),
@@ -705,14 +718,15 @@ impl Runner<'_> {
             }
             | WastDirective::AssertInvalid {
                 span, mut module, ..
-            } => {
-                if let Ok(bytes) = module.encode() {
-                    match Module::new(&bytes) {
-                        Ok(_) => self.fail(span, "malformed/invalid module accepted".to_owned()),
-                        Err(_) => self.stats.rejected += 1,
-                    }
-                }
-            }
+            } => match module.encode() {
+                Ok(bytes) => match Module::new(&bytes) {
+                    Ok(_) => self.fail(span, "malformed/invalid module accepted".to_owned()),
+                    Err(_) => self.stats.rejected += 1,
+                },
+                // A quoted module the text parser itself refuses is
+                // malformed, as the directive says.
+                Err(_) => self.stats.rejected += 1,
+            },
             WastDirective::Thread(thread) => {
                 for d in thread.directives {
                     self.directive(d);
@@ -732,27 +746,21 @@ impl Runner<'_> {
     fn assert_return(&mut self, span: Span, exec: WastExecute<'_>, results: &[WastRet<'_>]) {
         let (got, what) = match exec {
             WastExecute::Invoke(invoke) => match self.exec_invoke(&invoke) {
-                Ok(Some(ExecResult::Done(v))) => (v, format!("invoke \"{}\"", invoke.name)),
-                Ok(Some(other)) => {
+                Ok(ExecResult::Done(v)) => (v, format!("invoke \"{}\"", invoke.name)),
+                Ok(other) => {
                     return self.fail(
                         span,
                         format!("assert_return on \"{}\": got {other:?}", invoke.name),
                     )
                 }
-                Ok(None) => return self.skip(span, format!("assert_return \"{}\"", invoke.name)),
                 Err(e) => return self.fail(span, format!("assert_return: {e}")),
             },
             WastExecute::Get { module, global, .. } => {
-                let slot = match self.store.slot_of(module) {
+                let idx = match self.store.instance_of(module) {
                     Ok(s) => s,
                     Err(e) => return self.fail(span, format!("get: {e}")),
                 };
-                if slot == Slot::Skipped
-                    || matches!(slot, Slot::Live(idx) if self.store.is_tainted(idx))
-                {
-                    return self.skip(span, format!("get \"{global}\""));
-                }
-                match self.store.get_global(slot, global) {
+                match self.store.get_global(idx, global) {
                     Ok(v) => (vec![v], format!("get \"{global}\"")),
                     Err(e) => return self.fail(span, format!("get: {e}")),
                 }
@@ -795,7 +803,7 @@ impl Runner<'_> {
     fn assert_trap(&mut self, span: Span, exec: WastExecute<'_>, message: &str) {
         match exec {
             WastExecute::Invoke(invoke) => match self.exec_invoke(&invoke) {
-                Ok(Some(ExecResult::Trap(t))) => {
+                Ok(ExecResult::Trap(t)) => {
                     if trap_message_matches(message, t) {
                         self.stats.traps += 1;
                     } else {
@@ -809,14 +817,13 @@ impl Runner<'_> {
                         );
                     }
                 }
-                Ok(Some(other)) => self.fail(
+                Ok(other) => self.fail(
                     span,
                     format!(
                         "assert_trap \"{message}\" on \"{}\": got {other:?}",
                         invoke.name
                     ),
                 ),
-                Ok(None) => self.skip(span, format!("assert_trap \"{}\"", invoke.name)),
                 Err(e) => self.fail(span, format!("assert_trap: {e}")),
             },
             WastExecute::Wat(mut module) => {
@@ -831,17 +838,15 @@ impl Runner<'_> {
                         // unexpectedly instantiated; so do we, for the
                         // directives that follow.
                         if let Some(id) = id {
-                            self.store
-                                .by_id
-                                .insert(id.name().to_owned(), Slot::Live(idx));
+                            self.store.by_id.insert(id.name().to_owned(), idx);
                         }
-                        self.store.current = Some(Slot::Live(idx));
+                        self.store.current = Some(idx);
                         self.fail(
                             span,
                             format!("assert_trap \"{message}\": module instantiated"),
                         );
                     }
-                    Err(NotInstantiated::Failed(Error::Trap(t))) => {
+                    Err(Error::Trap(t)) => {
                         if trap_message_matches(message, t) {
                             self.stats.traps += 1;
                         } else {
@@ -854,22 +859,10 @@ impl Runner<'_> {
                             );
                         }
                     }
-                    Err(NotInstantiated::Failed(e)) => self.fail(
+                    Err(e) => self.fail(
                         span,
                         format!("assert_trap \"{message}\": instantiation failed with {e}"),
                     ),
-                    Err(NotInstantiated::Skipped { why, shares_with }) => {
-                        self.stats.skipped_modules += 1;
-                        self.skips.push(format!(
-                            "{}:{}: assert_trap module skipped: {why}",
-                            self.file,
-                            self.line(span)
-                        ));
-                        // It would have applied its segments before trapping.
-                        for idx in shares_with {
-                            self.store.tainted[idx] = true;
-                        }
-                    }
                 }
             }
             WastExecute::Get { global, .. } => {
@@ -897,7 +890,6 @@ struct FileReport {
     file: String,
     stats: Stats,
     failures: Vec<String>,
-    skips: Vec<String>,
 }
 
 fn run_file(path: &Path) -> FileReport {
@@ -913,20 +905,18 @@ fn run_file(path: &Path) -> FileReport {
     let mut runner = Runner {
         file: &file,
         text: &text,
-        store: Store::default(),
+        store: Store::new(),
         stats: Stats::default(),
         failures: Vec::new(),
-        skips: Vec::new(),
     };
     for directive in wast.directives {
         runner.directive(directive);
     }
-    let (stats, failures, skips) = (runner.stats, runner.failures, runner.skips);
+    let (stats, failures) = (runner.stats, runner.failures);
     FileReport {
         file,
         stats,
         failures,
-        skips,
     }
 }
 
@@ -942,47 +932,53 @@ fn spec_suite_executes() {
     let mut total = Stats::default();
     let mut report = String::new();
     let mut failures: Vec<String> = Vec::new();
-    let mut unexpected_skips: Vec<String> = Vec::new();
+    let mut unbalanced: Vec<String> = Vec::new();
     let mut passed_files = 0usize;
     for path in &files {
         let r = run_file(path);
         total.add(&r.stats);
         let s = &r.stats;
-        let status = if !r.failures.is_empty() {
-            "FAIL"
-        } else if r.stats.skipped_modules > 0 {
-            "partial"
-        } else {
+        let status = if r.failures.is_empty() {
             passed_files += 1;
             "ok"
+        } else {
+            "FAIL"
         };
         let _ = writeln!(
             report,
-            "{status:8} {:32} {:4} modules {:5} returns {:4} traps {:3} skipped modules {:4} skipped directives",
-            r.file, s.modules, s.returns, s.traps, s.skipped_modules, s.skipped_directives
+            "{status:4} {:32} {:4} directives {:4} modules {:5} returns {:4} traps {:3} unlinkable",
+            r.file, s.directives, s.modules, s.returns, s.traps, s.unlinkable
         );
-        let allowed = FILES_WITH_SKIPS.iter().any(|(f, _)| *f == r.file);
-        if !allowed && (s.skipped_modules > 0 || s.skipped_directives > 0) {
-            unexpected_skips.extend(r.skips.iter().cloned());
+        // Every directive must have ended in a recorded outcome: nothing is
+        // skipped, silently or otherwise.
+        if s.directives != s.passes() + r.failures.len() {
+            unbalanced.push(format!(
+                "{}: {} directives, {} passes, {} failures",
+                r.file,
+                s.directives,
+                s.passes(),
+                r.failures.len()
+            ));
         }
         failures.extend(r.failures);
     }
     let _ = writeln!(
         report,
-        "\nspec execution: {} files ({passed_files} complete), {} modules instantiated, \
-         {} invocations, {} assert_return, {} assert_trap, {} assert_exhaustion, \
-         {} assert_unlinkable, {} malformed/invalid rejected, \
-         {} modules skipped, {} directives skipped",
+        "\nspec execution: {} files ({passed_files} complete), {} directives, {} modules \
+         instantiated, {} module definitions, {} registers, {} invocations, \
+         {} assert_return, {} assert_trap, {} assert_exhaustion, {} assert_unlinkable, \
+         {} malformed/invalid rejected, 0 skipped",
         files.len(),
+        total.directives,
         total.modules,
+        total.definitions,
+        total.registers,
         total.invocations,
         total.returns,
         total.traps,
         total.exhaustions,
         total.unlinkable,
         total.rejected,
-        total.skipped_modules,
-        total.skipped_directives
     );
     if !failures.is_empty() {
         let _ = writeln!(report, "\n{} failures:", failures.len());
@@ -993,21 +989,18 @@ fn spec_suite_executes() {
             let _ = writeln!(report, "  ... and {} more", failures.len() - 200);
         }
     }
-    if !unexpected_skips.is_empty() {
-        let _ = writeln!(
-            report,
-            "\n{} skips in files not listed in FILES_WITH_SKIPS:",
-            unexpected_skips.len()
-        );
-        for s in unexpected_skips.iter().take(50) {
-            let _ = writeln!(report, "  {s}");
+    if !unbalanced.is_empty() {
+        let _ = writeln!(report, "\nfiles with unaccounted directives:");
+        for u in &unbalanced {
+            let _ = writeln!(report, "  {u}");
         }
     }
     println!("{report}");
     assert!(
-        failures.is_empty() && unexpected_skips.is_empty(),
+        failures.is_empty() && unbalanced.is_empty(),
         "spec execution failures:\n{report}"
     );
+    assert_eq!(passed_files, files.len(), "every file must run completely");
     // Sanity: the suite really was exercised.
     assert!(
         total.returns > 15_000,
@@ -1020,19 +1013,9 @@ fn spec_suite_executes() {
         "too few assert_exhaustion: {}",
         total.exhaustions
     );
-}
-
-/// Every entry of `FILES_WITH_SKIPS` must name a vendored file that really
-/// has skips, so the list cannot rot.
-#[test]
-fn files_with_skips_are_accurate() {
-    for (file, _) in FILES_WITH_SKIPS {
-        let path = spec_dir().join(file);
-        assert!(path.exists(), "{file} is not vendored");
-        let r = run_file(&path);
-        assert!(
-            r.stats.skipped_modules > 0,
-            "{file} is listed in FILES_WITH_SKIPS but skips nothing"
-        );
-    }
+    assert!(
+        total.unlinkable >= 80,
+        "too few assert_unlinkable: {}",
+        total.unlinkable
+    );
 }

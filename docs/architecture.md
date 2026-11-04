@@ -276,9 +276,12 @@ supported.
 
 1. The platform firmware loads the kernel image and jumps to it.
 2. The HAL sets up exception vectors, the MMU with an identity map for the
-   kernel, timers, and secondary cores.
+   kernel (write-xor-execute: code read-only and executable, everything else
+   never executable, unmapped guard pages below the kernel stacks, a
+   separate exception stack), timers, and secondary cores.
 3. The memory manager takes over the physical map from the firmware's
-   description (device tree).
+   description (device tree); the prototype already sizes its heap from the
+   device tree's memory node.
 4. The Wasm runtime initializes and loads the boot image: a set of modules
    and a manifest saying which to instantiate first and with what
    capabilities.

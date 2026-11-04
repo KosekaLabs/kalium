@@ -4,11 +4,26 @@
 //! [`Value::ExternRef`]). Every access is bounds-checked and reports
 //! [`Trap::TableOutOfBounds`]; the bulk operations check both ranges before
 //! writing anything, as the spec requires.
+//!
+//! A `funcref` stored in a table is a *function address* (see
+//! [`crate::Instance::func_addr`]), not a function index: tables are shared
+//! between instances through a [`TableRef`] (`Rc<RefCell<Table>>`), and an
+//! entry one instance stores must name the same function when another
+//! instance calls through it.
 
 use crate::error::Trap;
 use crate::exec::Value;
-use crate::types::{RefType, TableType};
+use crate::memory::limits_match;
+use crate::types::{RefType, ResizableLimits, TableType};
+use alloc::rc::Rc;
 use alloc::vec::Vec;
+use core::cell::RefCell;
+
+/// A shared handle to a table: what an instance holds for each table in its
+/// index space, what it exports and what it imports. The interpreter
+/// borrows a table only for the duration of one table instruction, so a
+/// host function may borrow it freely.
+pub type TableRef = Rc<RefCell<Table>>;
 
 /// Hard cap on the number of elements of any table, whatever the type says.
 /// `table.grow` past it returns `-1`; a module declaring a larger minimum
@@ -25,6 +40,8 @@ pub struct Table {
     /// Upper bound in elements (the smaller of the type's max and
     /// [`MAX_TABLE_ELEMENTS`]).
     max: u32,
+    /// The `max` of the table's declared type, which import matching sees.
+    declared_max: Option<u32>,
 }
 
 impl Table {
@@ -43,7 +60,13 @@ impl Table {
             elem: ty.elem,
             entries,
             max,
+            declared_max: ty.limits.max,
         })
+    }
+
+    /// Wrap the table in a shared handle.
+    pub fn into_shared(self) -> TableRef {
+        Rc::new(RefCell::new(self))
     }
 
     /// The element type.
@@ -51,12 +74,31 @@ impl Table {
         self.elem
     }
 
+    /// The table's current type: its size as the minimum and the declared
+    /// maximum. This is what an import of the table is matched against.
+    pub fn ty(&self) -> TableType {
+        TableType {
+            elem: self.elem,
+            limits: ResizableLimits {
+                min: self.size(),
+                max: self.declared_max,
+            },
+        }
+    }
+
+    /// Whether this table can be imported as `import` (import matching per
+    /// the spec: same element type, limits subtyping).
+    pub fn matches(&self, import: &TableType) -> bool {
+        self.elem == import.elem && limits_match(&self.ty().limits, &import.limits)
+    }
+
     /// Current size in elements.
     pub fn size(&self) -> u32 {
         self.entries.len() as u32
     }
 
-    /// Maximum size in elements.
+    /// Maximum size in elements the table can grow to (the runtime cap, not
+    /// necessarily the declared maximum).
     pub fn max(&self) -> u32 {
         self.max
     }
@@ -170,6 +212,33 @@ mod tests {
         // The runtime cap wins over a larger type max.
         let t = Table::new(ty(0, Some(u32::MAX)), 10).unwrap();
         assert_eq!(t.max(), 10);
+    }
+
+    #[test]
+    fn types_and_import_matching() {
+        let mut t = Table::new(ty(2, None), 10).unwrap();
+        assert_eq!(t.ty(), ty(2, None));
+        assert!(t.matches(&ty(0, None)));
+        assert!(t.matches(&ty(2, None)));
+        assert!(!t.matches(&ty(3, None)));
+        // No declared maximum: the runtime cap is not a type maximum.
+        assert!(!t.matches(&ty(0, Some(10))));
+        assert!(!t.matches(&TableType {
+            elem: RefType::ExternRef,
+            limits: ResizableLimits { min: 0, max: None },
+        }));
+        assert_eq!(t.grow(1, Value::FuncRef(None)), Some(2));
+        assert_eq!(t.ty(), ty(3, None));
+        let t = Table::new(ty(10, Some(20)), MAX_TABLE_ELEMENTS).unwrap();
+        assert!(t.matches(&ty(10, Some(20))));
+        assert!(t.matches(&ty(5, Some(25))));
+        assert!(!t.matches(&ty(10, Some(19))));
+        assert!(!t.matches(&ty(11, Some(20))));
+        // Shared handles see each other's changes.
+        let a = t.into_shared();
+        let b = a.clone();
+        a.borrow_mut().set(0, Value::FuncRef(Some(7))).unwrap();
+        assert_eq!(b.borrow().get(0), Ok(Value::FuncRef(Some(7))));
     }
 
     #[test]

@@ -16,6 +16,9 @@ bench = false
 # HAL-only boot test: bring the hardware up, take ten timer ticks, exit 0.
 # No boot image is embedded and no Wasm runs. `cargo xtask boot-test`.
 boot-only = []
+# Run the HAL hardening self-test (`kalium_hal::selftest::run`) before the
+# boot-only tick loop or the scenario. `cargo xtask selftest`.
+hal-selftest = ["kalium-hal/hal-selftest"]
 
 [dependencies]
 kalium-abi.workspace = true

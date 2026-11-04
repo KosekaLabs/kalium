@@ -37,7 +37,10 @@ impl Host for LogHost {
         let ptr = args[0].as_i32().ok_or(Trap::Host)? as u32;
         let len = args[1].as_i32().ok_or(Trap::Host)? as u32;
         let mut buf = vec![0u8; len as usize];
-        ctx.memory.read(ptr, &mut buf)?;
+        ctx.memory
+            .try_borrow()
+            .map_err(|_| Trap::Host)?
+            .read(ptr, &mut buf)?;
         self.log.push(buf);
         Ok(HostOutcome::Continue)
     }

@@ -8,36 +8,119 @@
 //! [`Limits::max_call_depth`] (`Trap::CallDepth`) and the value stack by
 //! [`Limits::max_stack_values`] (`Trap::StackOverflow`).
 //!
+//! ## Value stack
+//!
+//! The stack is a `Vec<u64>` of raw bits ([`Stack`]), not of [`Value`]s:
+//! validation guarantees the type of every slot, so the interpreter stores
+//! `i32` zero-extended, `i64` as is, `f32`/`f64` as their IEEE bits and
+//! references as the index with `u64::MAX` for null ([`NULL_REF`]). Typed
+//! helpers (`push_as`/`pop_as` through the [`Bits`] trait, `bin`/`un` for
+//! operators that rewrite the top of the stack in place) are the only way
+//! the loop touches it. The logical height `sp` lives in a local of the
+//! interpreter loop; the `Vec` is only ever grown (in cold code, doubling up
+//! to the limit) so that a push is one bounds check and a store. Values are
+//! converted to [`Value`] only at the edges: host call arguments and
+//! results, globals, tables, and the final results.
+//!
+//! In debug builds the stack carries a shadow `Vec<ValType>` and every
+//! typed access checks it, reporting a mismatch as [`Trap::Invalid`] (a
+//! trap rather than an assertion, so that unvalidated modules in the fuzz
+//! tests stay panic-free). Release builds trust the validator and compile
+//! the shadow away.
+//!
+//! ## Frames and locals
+//!
 //! Locals live on the value stack. When a function is entered its arguments
 //! are already on top of the stack and become the first locals; the declared
-//! locals are pushed after them and the frame's operand stack grows above
-//! that. Returning moves the results down to the frame base.
+//! locals are pushed after them (zero / null) and the frame's operand stack
+//! grows above that. A [`Frame`] records the function, the saved pc, the
+//! stack index of local 0 (`base`), the label stack height at entry and the
+//! result count, all as `u32` (so `Limits::max_stack_values` is clamped to
+//! [`MAX_STACK`]). Returning moves the results down to `base`, truncates
+//! the stack to `base + arity` and drops the frame's labels. The loop caches
+//! the current frame's `base`, `label_base`, instruction slice and pc in
+//! locals and reloads them only when the frame changes; everything needed
+//! only on rare paths (the frame index, the `br_table` side table, the
+//! number of imports) is re-read from `self`/`inst` instead, because every
+//! extra loop-carried value costs a spill in the dispatch sequence. The
+//! frame and label stacks themselves stay as `Vec`s in `self`: measured
+//! against moving them into loop locals too, that was 15% faster.
 //!
-//! A label records the continuation pc, the number of values a branch
+//! ## Labels and branches
+//!
+//! A [`Label`] records the continuation pc, the number of values a branch
 //! carries and the stack height to unwind to. Structured instructions carry
 //! their matching `end`/`else` indices (see [`crate::instr`]), so branching
-//! is a truncate-and-jump without scanning. Branching to a `loop` label
-//! jumps to the `loop` instruction itself, which pushes its label again.
+//! is a truncate-and-jump without scanning. A `loop` label is marked as
+//! such: branching to it keeps the label and jumps to the first instruction
+//! of the body, so a back-edge costs no label push and no re-dispatch of the
+//! `loop` instruction. Labels are stored in a `Vec` that is allocated once
+//! per execution and reused; no per-instruction allocation happens anywhere
+//! on the hot path.
 //!
-//! Fuel is one unit per instruction, checked before each instruction, so
-//! [`Execution::run`] returns `OutOfFuel` promptly and can be resumed.
+//! ## Fuel
 //!
-//! Host calls see their arguments as a slice of the stack; on
+//! Fuel is exactly one unit per executed instruction, checked before each
+//! instruction (a register decrement and a never-taken branch), so
+//! [`Execution::run`] with a budget of `n` executes exactly `n`
+//! instructions before returning `OutOfFuel`, and `run(0)` executes
+//! nothing. The structural `end` of a block or function, `else` reached
+//! from a then-arm and `loop` on first entry each count as one instruction;
+//! a back-edge to a `loop` counts only the branch. The granularity is
+//! therefore exact: the scheduler never overshoots its budget. (Batching
+//! the check per back-edge was considered and rejected: the per-instruction
+//! check is two instructions out of about thirty-five per Wasm instruction
+//! and measures as noise, while the kernel's accounting stays exact.)
+//!
+//! ## Host calls
+//!
+//! Host calls see their arguments as a slice of [`Value`]s built in a
+//! buffer that is reused across calls; results come back the same way. On
 //! [`HostOutcome::Block`] nothing is popped, anything the instruction popped
 //! before the call (the table index of `call_indirect`) is pushed back, and
 //! the pc is rewound to the call instruction so that resuming re-issues the
-//! call with the stack exactly as it was.
+//! call with the stack exactly as it was. A `call_indirect` through a
+//! function address of another instance (see [`crate::instance`]) is a
+//! host call too, through [`Host::call_foreign`], with the same contract.
 //!
-//! The interpreter assumes a validated module but never trusts it: any
-//! state a valid module cannot produce (type confusion on the stack, an
-//! index out of range, ...) ends the execution with [`Trap::Invalid`]
-//! instead of panicking.
+//! ## Shared memory
+//!
+//! The instance's memory is a shared object ([`crate::MemoryRef`]). The
+//! interpreter loop never borrows it itself: its caller (`run_slices`)
+//! takes the mutable borrow and hands the loop a plain `&mut Memory`, so a
+//! load or store is one bounds check against the `Vec` inside and the loop
+//! carries no extra state. For a host call the loop saves its state and
+//! *returns* (`Flow::HostCall`); the caller drops the borrow, makes the
+//! call, takes the borrow again and re-enters the loop. The host (and any
+//! instance it runs that shares the memory) may therefore use and grow the
+//! memory, and every `run` and every re-entry starts with a fresh borrow,
+//! so a grow by another instance between two runs is seen. Leaving the
+//! loop costs a host call about a hundred extra machine instructions
+//! (+17% on the host-call benchmark, which calls every 11 instructions),
+//! but the loop no longer carries the `host` fat pointer or a memory guard,
+//! and every other workload executes 5-10% fewer instructions than before
+//! (cachegrind). The alternatives were measured and rejected: a `RefMut`
+//! live inside the loop cost +6-8% on every workload, an `Option<RefMut>`
+//! slot released around host calls +8-14%. Tables are borrowed for one
+//! instruction at a time; globals are `Cell`s and need no borrow. A borrow
+//! that fails (the host kept one across a call) ends the execution with
+//! [`Trap::Host`] rather than panicking.
+//!
+//! ## Untrusted state
+//!
+//! The interpreter assumes a validated module but never panics on one that
+//! is not: an index out of range, an empty stack where a value is expected
+//! or a frame without a body end the execution with [`Trap::Invalid`].
+//! Type confusion on the stack is detected in debug builds only (see
+//! above); in release builds it yields wrong values, never memory unsafety.
 
 use crate::error::{Error, Trap};
-use crate::instance::{Host, HostCtx, HostOutcome, Instance};
-use crate::instr::{BlockType, FuncBody, Instr, MemArg};
+use crate::instance::{Host, HostCtx, HostFuncId, HostOutcome, Instance};
+use crate::instr::{BlockType, FuncBody, Instr};
+use crate::memory::Memory;
 use crate::module::Module;
 use crate::types::{RefType, ValType};
+use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::fmt;
 
@@ -118,6 +201,31 @@ impl Value {
             _ => None,
         }
     }
+
+    /// The stack encoding of this value (see the module documentation).
+    #[inline(always)]
+    pub(crate) fn to_bits(self) -> u64 {
+        match self {
+            Value::I32(v) => v as u32 as u64,
+            Value::I64(v) => v as u64,
+            Value::F32(v) => v.to_bits() as u64,
+            Value::F64(v) => v.to_bits(),
+            Value::FuncRef(r) | Value::ExternRef(r) => ref_to_bits(r),
+        }
+    }
+
+    /// Decode a stack slot of type `ty`.
+    #[inline(always)]
+    pub(crate) fn from_bits(bits: u64, ty: ValType) -> Value {
+        match ty {
+            ValType::I32 => Value::I32(bits as u32 as i32),
+            ValType::I64 => Value::I64(bits as i64),
+            ValType::F32 => Value::F32(f32::from_bits(bits as u32)),
+            ValType::F64 => Value::F64(f64::from_bits(bits)),
+            ValType::FuncRef => Value::FuncRef(ref_from_bits(bits)),
+            ValType::ExternRef => Value::ExternRef(ref_from_bits(bits)),
+        }
+    }
 }
 
 impl From<i32> for Value {
@@ -144,63 +252,446 @@ impl From<f64> for Value {
     }
 }
 
-/// Values the typed stack helpers pop and push.
-trait StackVal: Copy {
-    fn from_value(v: Value) -> Option<Self>;
-    fn into_value(self) -> Value;
-}
+// ---------------------------------------------------------------------------
+// Stack encoding
+// ---------------------------------------------------------------------------
 
-impl StackVal for i32 {
-    fn from_value(v: Value) -> Option<i32> {
-        v.as_i32()
-    }
-    fn into_value(self) -> Value {
-        Value::I32(self)
-    }
-}
+/// The stack encoding of a null reference. Indices are `u32`, so this never
+/// collides with a non-null one.
+const NULL_REF: u64 = u64::MAX;
 
-impl StackVal for i64 {
-    fn from_value(v: Value) -> Option<i64> {
-        v.as_i64()
-    }
-    fn into_value(self) -> Value {
-        Value::I64(self)
+#[inline(always)]
+fn ref_to_bits(r: Option<u32>) -> u64 {
+    match r {
+        Some(i) => i as u64,
+        None => NULL_REF,
     }
 }
 
-impl StackVal for f32 {
-    fn from_value(v: Value) -> Option<f32> {
-        v.as_f32()
-    }
-    fn into_value(self) -> Value {
-        Value::F32(self)
-    }
-}
-
-impl StackVal for f64 {
-    fn from_value(v: Value) -> Option<f64> {
-        v.as_f64()
-    }
-    fn into_value(self) -> Value {
-        Value::F64(self)
+#[inline(always)]
+fn ref_from_bits(bits: u64) -> Option<u32> {
+    if bits == NULL_REF {
+        None
+    } else {
+        Some(bits as u32)
     }
 }
 
-impl StackVal for bool {
-    fn from_value(v: Value) -> Option<bool> {
-        v.as_i32().map(|x| x != 0)
-    }
-    fn into_value(self) -> Value {
-        Value::I32(self as i32)
+/// A reference value of type `ty`.
+fn ref_value(ty: RefType, r: Option<u32>) -> Value {
+    match ty {
+        RefType::FuncRef => Value::FuncRef(r),
+        RefType::ExternRef => Value::ExternRef(r),
     }
 }
 
-impl StackVal for Value {
-    fn from_value(v: Value) -> Option<Value> {
-        Some(v)
+/// The stack bits of a local's initial value.
+#[inline(always)]
+fn default_bits(ty: ValType) -> u64 {
+    if ty.is_ref() {
+        NULL_REF
+    } else {
+        0
     }
-    fn into_value(self) -> Value {
-        self
+}
+
+/// Numeric types the typed stack helpers move in and out of stack slots.
+trait Bits: Copy {
+    const TY: ValType;
+    fn from_bits(bits: u64) -> Self;
+    fn to_bits(self) -> u64;
+}
+
+impl Bits for i32 {
+    const TY: ValType = ValType::I32;
+    #[inline(always)]
+    fn from_bits(bits: u64) -> i32 {
+        bits as u32 as i32
+    }
+    #[inline(always)]
+    fn to_bits(self) -> u64 {
+        self as u32 as u64
+    }
+}
+
+impl Bits for i64 {
+    const TY: ValType = ValType::I64;
+    #[inline(always)]
+    fn from_bits(bits: u64) -> i64 {
+        bits as i64
+    }
+    #[inline(always)]
+    fn to_bits(self) -> u64 {
+        self as u64
+    }
+}
+
+impl Bits for f32 {
+    const TY: ValType = ValType::F32;
+    #[inline(always)]
+    fn from_bits(bits: u64) -> f32 {
+        f32::from_bits(bits as u32)
+    }
+    #[inline(always)]
+    fn to_bits(self) -> u64 {
+        f32::to_bits(self) as u64
+    }
+}
+
+impl Bits for f64 {
+    const TY: ValType = ValType::F64;
+    #[inline(always)]
+    fn from_bits(bits: u64) -> f64 {
+        f64::from_bits(bits)
+    }
+    #[inline(always)]
+    fn to_bits(self) -> u64 {
+        f64::to_bits(self)
+    }
+}
+
+/// Comparison results: an `i32` that is 0 or 1.
+impl Bits for bool {
+    const TY: ValType = ValType::I32;
+    #[inline(always)]
+    fn from_bits(bits: u64) -> bool {
+        bits as u32 != 0
+    }
+    #[inline(always)]
+    fn to_bits(self) -> u64 {
+        self as u64
+    }
+}
+
+/// The shadow type of a stack slot: a [`ValType`] in debug builds, nothing
+/// in release builds (see the module documentation).
+#[cfg(debug_assertions)]
+type Shadow = ValType;
+#[cfg(not(debug_assertions))]
+type Shadow = ();
+
+#[cfg(debug_assertions)]
+#[inline(always)]
+fn shadow(ty: ValType) -> Shadow {
+    ty
+}
+
+#[cfg(not(debug_assertions))]
+#[inline(always)]
+fn shadow(_ty: ValType) -> Shadow {}
+
+#[cfg(debug_assertions)]
+#[inline(always)]
+fn shadow_is_ref(s: Shadow) -> bool {
+    s.is_ref()
+}
+
+#[cfg(not(debug_assertions))]
+#[inline(always)]
+fn shadow_is_ref(_s: Shadow) -> bool {
+    true
+}
+
+/// Grow the stack buffer whose slot `i == buf.len()` is about to be
+/// written, doubling up to `max` entries. The buffer is moved in and out
+/// rather than borrowed so that the address of the (register-resident)
+/// stack header never escapes into this cold call.
+#[cold]
+#[inline(never)]
+fn grow_buf<T: Copy + Default>(mut buf: Vec<T>, i: usize, max: usize) -> Result<Vec<T>, Trap> {
+    if i >= max {
+        return Err(Trap::StackOverflow);
+    }
+    let new_len = buf.len().max(64).saturating_mul(2).min(max);
+    debug_assert!(new_len > i);
+    buf.try_reserve_exact(new_len - buf.len())
+        .map_err(|_| Trap::StackOverflow)?;
+    buf.resize(new_len, T::default());
+    Ok(buf)
+}
+
+/// The value stack: raw bits, grown on demand up to a limit. The logical
+/// height is passed in by the caller (`sp`), which lets the interpreter
+/// loop keep it in a register; the invariant is `sp <= buf.len()`.
+#[derive(Default)]
+struct Stack {
+    buf: Vec<u64>,
+    #[cfg(debug_assertions)]
+    tys: Vec<ValType>,
+    /// `Limits::max_stack_values`.
+    max: usize,
+}
+
+impl Stack {
+    fn new(max: usize) -> Stack {
+        Stack {
+            max,
+            ..Stack::default()
+        }
+    }
+
+    /// Make room for a value at index `sp == buf.len()`.
+    #[inline(always)]
+    fn grow(&mut self, sp: usize) -> Result<(), Trap> {
+        let buf = core::mem::take(&mut self.buf);
+        self.buf = grow_buf(buf, sp, self.max)?;
+        #[cfg(debug_assertions)]
+        {
+            self.tys.resize(self.buf.len(), ValType::I32);
+        }
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn push_raw(&mut self, sp: &mut usize, v: u64, ty: Shadow) -> Result<(), Trap> {
+        let i = *sp;
+        match self.buf.get_mut(i) {
+            Some(slot) => *slot = v,
+            None => {
+                self.grow(i)?;
+                *self.buf.get_mut(i).ok_or(Trap::Invalid)? = v;
+            }
+        }
+        #[cfg(debug_assertions)]
+        {
+            self.tys[i] = ty;
+        }
+        let _ = ty;
+        *sp = i + 1;
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn pop_raw(&mut self, sp: &mut usize) -> Result<(u64, Shadow), Trap> {
+        let i = sp.wrapping_sub(1);
+        let v = *self.buf.get(i).ok_or(Trap::Invalid)?;
+        *sp = i;
+        Ok((v, self.shadow_at(i)))
+    }
+
+    #[inline(always)]
+    fn shadow_at(&self, i: usize) -> Shadow {
+        #[cfg(debug_assertions)]
+        {
+            self.tys[i]
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            let _ = i;
+        }
+    }
+
+    /// Debug-only type check of slot `i`.
+    #[inline(always)]
+    fn check(&self, i: usize, ty: ValType) -> Result<(), Trap> {
+        #[cfg(debug_assertions)]
+        {
+            if self.tys.get(i) != Some(&ty) {
+                return Err(Trap::Invalid);
+            }
+        }
+        let _ = (i, ty);
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn push_as<T: Bits>(&mut self, sp: &mut usize, v: T) -> Result<(), Trap> {
+        self.push_raw(sp, v.to_bits(), shadow(T::TY))
+    }
+
+    #[inline(always)]
+    fn pop_as<T: Bits>(&mut self, sp: &mut usize) -> Result<T, Trap> {
+        let i = sp.wrapping_sub(1);
+        let v = *self.buf.get(i).ok_or(Trap::Invalid)?;
+        self.check(i, T::TY)?;
+        *sp = i;
+        Ok(T::from_bits(v))
+    }
+
+    /// Pop two values, `a` below `b`.
+    #[inline(always)]
+    fn pop2<A: Bits, B: Bits>(&mut self, sp: &mut usize) -> Result<(A, B), Trap> {
+        let i = sp.wrapping_sub(2);
+        let s = self.buf.get(i..i.wrapping_add(2)).ok_or(Trap::Invalid)?;
+        let (a, b) = (s[0], s[1]);
+        self.check(i, A::TY)?;
+        self.check(i + 1, B::TY)?;
+        *sp = i;
+        Ok((A::from_bits(a), B::from_bits(b)))
+    }
+
+    #[inline(always)]
+    fn push_value(&mut self, sp: &mut usize, v: Value) -> Result<(), Trap> {
+        self.push_raw(sp, v.to_bits(), shadow(v.ty()))
+    }
+
+    #[inline(always)]
+    fn push_ref(&mut self, sp: &mut usize, ty: RefType, r: Option<u32>) -> Result<(), Trap> {
+        self.push_raw(sp, ref_to_bits(r), shadow(ty.into()))
+    }
+
+    /// Pop a reference of either type.
+    #[inline(always)]
+    fn pop_ref(&mut self, sp: &mut usize) -> Result<Option<u32>, Trap> {
+        let (bits, ty) = self.pop_raw(sp)?;
+        if !shadow_is_ref(ty) {
+            return Err(Trap::Invalid);
+        }
+        Ok(ref_from_bits(bits))
+    }
+
+    /// Replace the top value `a` by `f(a)`.
+    #[inline(always)]
+    fn un<A: Bits, R: Bits>(&mut self, sp: usize, f: impl FnOnce(A) -> R) -> Result<(), Trap> {
+        self.un_try(sp, |a| Ok(f(a)))
+    }
+
+    #[inline(always)]
+    fn un_try<A: Bits, R: Bits>(
+        &mut self,
+        sp: usize,
+        f: impl FnOnce(A) -> Result<R, Trap>,
+    ) -> Result<(), Trap> {
+        let i = sp.wrapping_sub(1);
+        self.check(i, A::TY)?;
+        let slot = self.buf.get_mut(i).ok_or(Trap::Invalid)?;
+        *slot = f(A::from_bits(*slot))?.to_bits();
+        #[cfg(debug_assertions)]
+        {
+            self.tys[i] = R::TY;
+        }
+        Ok(())
+    }
+
+    /// Replace the top two values `a b` by `f(a, b)`.
+    #[inline(always)]
+    fn bin<A: Bits, B: Bits, R: Bits>(
+        &mut self,
+        sp: &mut usize,
+        f: impl FnOnce(A, B) -> R,
+    ) -> Result<(), Trap> {
+        self.bin_try(sp, |a, b| Ok(f(a, b)))
+    }
+
+    #[inline(always)]
+    fn bin_try<A: Bits, B: Bits, R: Bits>(
+        &mut self,
+        sp: &mut usize,
+        f: impl FnOnce(A, B) -> Result<R, Trap>,
+    ) -> Result<(), Trap> {
+        let i = sp.wrapping_sub(2);
+        self.check(i, A::TY)?;
+        self.check(i.wrapping_add(1), B::TY)?;
+        let s = self
+            .buf
+            .get_mut(i..i.wrapping_add(2))
+            .ok_or(Trap::Invalid)?;
+        let (a, b) = (A::from_bits(s[0]), B::from_bits(s[1]));
+        s[0] = f(a, b)?.to_bits();
+        #[cfg(debug_assertions)]
+        {
+            self.tys[i] = R::TY;
+        }
+        *sp = i + 1;
+        Ok(())
+    }
+
+    /// `local.get`: push slot `idx`.
+    #[inline(always)]
+    fn local_get(&mut self, sp: &mut usize, idx: usize) -> Result<(), Trap> {
+        let v = *self.buf.get(idx).ok_or(Trap::Invalid)?;
+        let ty = self.shadow_at(idx);
+        self.push_raw(sp, v, ty)
+    }
+
+    /// `local.set`: pop into slot `idx` (which must be below the top).
+    #[inline(always)]
+    fn local_set(&mut self, sp: &mut usize, idx: usize) -> Result<(), Trap> {
+        let (v, ty) = self.pop_raw(sp)?;
+        self.set_slot(idx, v, ty)
+    }
+
+    /// `local.tee`: copy the top into slot `idx`.
+    #[inline(always)]
+    fn local_tee(&mut self, sp: usize, idx: usize) -> Result<(), Trap> {
+        let i = sp.wrapping_sub(1);
+        let v = *self.buf.get(i).ok_or(Trap::Invalid)?;
+        let ty = self.shadow_at(i);
+        self.set_slot(idx, v, ty)
+    }
+
+    #[inline(always)]
+    fn set_slot(&mut self, idx: usize, v: u64, ty: Shadow) -> Result<(), Trap> {
+        *self.buf.get_mut(idx).ok_or(Trap::Invalid)? = v;
+        #[cfg(debug_assertions)]
+        {
+            self.tys[idx] = ty;
+        }
+        let _ = ty;
+        Ok(())
+    }
+
+    /// `select`: pop the condition and two values, push one of them.
+    #[inline(always)]
+    fn select(&mut self, sp: &mut usize) -> Result<(), Trap> {
+        let cond = self.pop_as::<i32>(sp)?;
+        let (v2, t2) = self.pop_raw(sp)?;
+        let (v1, t1) = self.pop_raw(sp)?;
+        if t1 != t2 {
+            return Err(Trap::Invalid);
+        }
+        self.push_raw(sp, if cond != 0 { v1 } else { v2 }, t1)
+    }
+
+    /// Move the top `n` values down to `height` and truncate to
+    /// `height + n` (the stack effect of a branch or a return).
+    #[inline(always)]
+    fn unwind(&mut self, sp: &mut usize, height: usize, n: usize) -> Result<(), Trap> {
+        let len = *sp;
+        match n {
+            // The common cases, with the fewest checks: no value carried,
+            // or one (a single move, no memmove).
+            0 => {
+                if height > len {
+                    return Err(Trap::Invalid);
+                }
+            }
+            1 => {
+                if height >= len {
+                    return Err(Trap::Invalid);
+                }
+                let v = *self.buf.get(len - 1).ok_or(Trap::Invalid)?;
+                *self.buf.get_mut(height).ok_or(Trap::Invalid)? = v;
+                #[cfg(debug_assertions)]
+                {
+                    self.tys[height] = self.tys[len - 1];
+                }
+            }
+            _ => {
+                if len < n || height > len - n || len > self.buf.len() {
+                    return Err(Trap::Invalid);
+                }
+                self.buf.copy_within(len - n..len, height);
+                #[cfg(debug_assertions)]
+                {
+                    self.tys.copy_within(len - n..len, height);
+                }
+            }
+        }
+        *sp = height + n;
+        Ok(())
+    }
+
+    /// The `n` values below `sp` as typed values, appended to `out`.
+    #[inline(always)]
+    fn read_values(&self, sp: usize, tys: &[ValType], out: &mut Vec<Value>) -> Result<(), Trap> {
+        let start = sp.checked_sub(tys.len()).ok_or(Trap::Invalid)?;
+        let bits = self.buf.get(start..sp).ok_or(Trap::Invalid)?;
+        for (i, (&b, &t)) in bits.iter().zip(tys).enumerate() {
+            self.check(start + i, t)?;
+            out.push(Value::from_bits(b, t));
+        }
+        Ok(())
     }
 }
 
@@ -220,8 +711,9 @@ pub enum ExecResult {
     Trap(Trap),
 }
 
-/// A call frame.
-#[derive(Clone, Copy, Debug)]
+/// A call frame (20 bytes: stack and label heights are bounded by
+/// [`MAX_STACK`], so they fit in `u32`).
+#[derive(Clone, Copy, Debug, Default)]
 struct Frame {
     /// Function index.
     func: u32,
@@ -229,23 +721,31 @@ struct Frame {
     /// point to resume at after `OutOfFuel`/`Blocked`.
     pc: u32,
     /// Stack index of local 0.
-    base: usize,
+    base: u32,
     /// Index into the label stack of this frame's first label.
-    label_base: usize,
+    label_base: u32,
     /// Number of results.
     arity: u32,
 }
 
-/// A control label.
-#[derive(Clone, Copy, Debug)]
+/// A control label (16 bytes).
+#[derive(Clone, Copy, Debug, Default)]
 struct Label {
-    /// pc to continue at when branching to this label.
+    /// pc to continue at when branching to this label: after the `end` of a
+    /// block, the first body instruction of a loop.
     cont: u32,
     /// Number of values a branch carries to the continuation.
     arity: u32,
     /// Stack height to unwind to before pushing the carried values.
-    height: usize,
+    height: u32,
+    /// A `loop` label survives branches to it.
+    is_loop: bool,
 }
+
+/// Upper bound on `Limits::max_stack_values` as applied by the interpreter:
+/// stack heights are stored as `u32` in frames and labels. (Larger limits
+/// are clamped; 4 G values is 32 GiB of stack.)
+const MAX_STACK: usize = u32::MAX as usize;
 
 #[derive(Clone, Debug)]
 enum State {
@@ -265,30 +765,60 @@ enum Flow {
     OutOfFuel,
     Blocked,
     Exited(i32),
+    /// The loop stopped at a call that the host must make (state saved,
+    /// arguments on the stack, pc after the call instruction); only
+    /// `run_loop` returns this. `restore` is what the instruction popped
+    /// before the call (the table index of `call_indirect`), to be pushed
+    /// back if the host blocks.
+    HostCall {
+        target: HostTarget,
+        restore: Option<i32>,
+    },
+}
+
+/// What a host call targets.
+#[derive(Clone, Copy)]
+enum HostTarget {
+    /// Imported function (function index space) through [`Host::call`].
+    Import(u32),
+    /// A function of another instance, by function address, through
+    /// [`Host::call_foreign`]; `ty` is the type index `call_indirect`
+    /// expects.
+    Foreign { addr: u32, ty: u32 },
 }
 
 /// A resumable execution of one function: value stack, call frames and
 /// program counter. See the module documentation.
 pub struct Execution {
-    stack: Vec<Value>,
+    /// The value stack. The interpreter loop moves it into a local for its
+    /// duration (see the module documentation).
+    stack: Stack,
+    /// Logical stack height between `run` calls.
+    sp: usize,
     frames: Vec<Frame>,
     labels: Vec<Label>,
     state: State,
-    max_stack: usize,
+    /// `Limits::max_call_depth`.
     max_depth: usize,
-    /// Reused buffer for host call results.
+    /// `Limits::max_stack_values`, which also bounds the label stack.
+    max_stack: usize,
+    /// Reused buffers for host call arguments and results.
+    host_args: Vec<Value>,
     host_results: Vec<Value>,
     /// Instructions executed so far.
     fuel_used: u64,
+    /// The entry function (function index space); its results type the
+    /// values left on the stack when the execution is done.
+    entry: u32,
     /// Set when the entry function is an import: the whole execution is one
     /// host call with the arguments on the stack (and no frame).
-    entry_import: Option<u32>,
+    entry_import: bool,
 }
 
 impl fmt::Debug for Execution {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Execution")
-            .field("stack_len", &self.stack.len())
+            .field("stack_len", &self.sp)
             .field("call_depth", &self.frames.len())
             .field("labels", &self.labels.len())
             .field("finished", &matches!(self.state, State::Finished(_)))
@@ -531,10 +1061,33 @@ trunc_trap!(
     18446744073709551616.0
 );
 
-fn effective_address(addr: u32, m: MemArg) -> Result<u32, Trap> {
-    u32::try_from(addr as u64 + m.offset as u64).map_err(|_| Trap::OutOfBounds)
+#[cold]
+#[inline(never)]
+fn div_s_trap<T: PartialEq>(b: T, zero: T) -> Trap {
+    if b == zero {
+        Trap::IntegerDivideByZero
+    } else {
+        Trap::IntegerOverflow
+    }
 }
 
+#[inline(always)]
+fn i32_div_s(a: i32, b: i32) -> Result<i32, Trap> {
+    match a.checked_div(b) {
+        Some(v) => Ok(v),
+        None => Err(div_s_trap(b, 0)),
+    }
+}
+
+#[inline(always)]
+fn i64_div_s(a: i64, b: i64) -> Result<i64, Trap> {
+    match a.checked_div(b) {
+        Some(v) => Ok(v),
+        None => Err(div_s_trap(b, 0)),
+    }
+}
+
+#[inline(always)]
 fn block_arity(module: &Module, ty: BlockType) -> Result<(usize, usize), Trap> {
     Ok(match ty {
         BlockType::Empty => (0, 0),
@@ -566,26 +1119,31 @@ impl Execution {
         }
         let limits = inst.limits();
         let mut exec = Execution {
-            stack: Vec::new(),
+            stack: Stack::new(limits.max_stack_values.min(MAX_STACK)),
+            sp: 0,
             frames: Vec::new(),
             labels: Vec::new(),
             state: State::Running,
-            max_stack: limits.max_stack_values,
-            max_depth: limits.max_call_depth,
+            max_depth: limits.max_call_depth.min(MAX_STACK),
+            max_stack: limits.max_stack_values.min(MAX_STACK),
+            host_args: Vec::new(),
             host_results: Vec::new(),
             fuel_used: 0,
-            entry_import: None,
+            entry: func,
+            entry_import: inst.is_imported_func(func),
         };
         let setup = (|| {
+            let mut stack = core::mem::take(&mut exec.stack);
+            let mut sp = 0;
             for &a in args {
-                exec.push(a)?;
+                stack.push_value(&mut sp, a)?;
             }
-            if inst.is_imported_func(func) {
-                exec.entry_import = Some(func);
-                Ok(())
-            } else {
-                exec.push_frame(inst.module(), inst, func)
+            if !exec.entry_import {
+                exec.push_frame(&mut stack, inst.module(), inst, func, &mut sp)?;
             }
+            exec.stack = stack;
+            exec.sp = sp;
+            Ok(())
         })();
         match setup {
             Ok(()) => Ok(exec),
@@ -620,7 +1178,7 @@ impl Execution {
 
     /// Current number of values on the stack (locals included).
     pub fn stack_len(&self) -> usize {
-        self.stack.len()
+        self.sp
     }
 
     /// Total fuel consumed (instructions executed) over all `run` calls.
@@ -637,22 +1195,41 @@ impl Execution {
             return r.clone();
         }
         let module = inst.module().clone();
-        let flow = match self.entry_import {
-            Some(f) => self.run_entry_import(&module, inst, host, f, fuel),
-            None => self.run_inner(&module, inst, host, fuel),
+        let flow = if self.entry_import {
+            self.run_entry_import(&module, inst, host, fuel)
+        } else {
+            self.run_inner(&module, inst, host, fuel)
         };
         let result = match flow {
             Ok(Flow::OutOfFuel) => return ExecResult::OutOfFuel,
             Ok(Flow::Blocked) => return ExecResult::Blocked,
-            Ok(Flow::Done) => ExecResult::Done(core::mem::take(&mut self.stack)),
+            Ok(Flow::HostCall { .. }) => ExecResult::Trap(Trap::Invalid),
+            Ok(Flow::Done) => match self.results(inst) {
+                Ok(values) => ExecResult::Done(values),
+                Err(trap) => ExecResult::Trap(trap),
+            },
             Ok(Flow::Exited(code)) => ExecResult::Exited(code),
             Err(trap) => ExecResult::Trap(trap),
         };
-        self.stack = Vec::new();
+        self.stack = Stack::default();
         self.frames = Vec::new();
         self.labels = Vec::new();
+        self.sp = 0;
+        self.host_args = Vec::new();
+        self.host_results = Vec::new();
         self.state = State::Finished(result.clone());
         result
+    }
+
+    /// The results left on the stack by a finished execution.
+    fn results(&self, inst: &Instance) -> Result<Vec<Value>, Trap> {
+        let ty = inst.func_type(self.entry).ok_or(Trap::Invalid)?;
+        if self.sp != ty.results.len() {
+            return Err(Trap::Invalid);
+        }
+        let mut out = Vec::with_capacity(ty.results.len());
+        self.stack.read_values(self.sp, &ty.results, &mut out)?;
+        Ok(out)
     }
 
     /// An execution whose entry function is an import: one host call with
@@ -662,86 +1239,23 @@ impl Execution {
         module: &Module,
         inst: &mut Instance,
         host: &mut dyn Host,
-        func: u32,
         fuel: u64,
     ) -> Result<Flow, Trap> {
         if fuel == 0 {
             return Ok(Flow::OutOfFuel);
         }
-        Ok(match self.host_call(module, inst, host, func)? {
+        self.fuel_used += 1;
+        let outcome = self.host_call(module, inst, host, HostTarget::Import(self.entry));
+        Ok(match outcome? {
             HostOutcome::Continue => Flow::Done,
             HostOutcome::Block => Flow::Blocked,
             HostOutcome::Exit(code) => Flow::Exited(code),
         })
     }
 
-    // ---- stack helpers --------------------------------------------------
-
-    fn push(&mut self, v: Value) -> Result<(), Trap> {
-        if self.stack.len() >= self.max_stack {
-            return Err(Trap::StackOverflow);
-        }
-        self.stack.push(v);
-        Ok(())
-    }
-
-    fn pop(&mut self) -> Result<Value, Trap> {
-        self.stack.pop().ok_or(Trap::Invalid)
-    }
-
-    fn pop_as<T: StackVal>(&mut self) -> Result<T, Trap> {
-        T::from_value(self.pop()?).ok_or(Trap::Invalid)
-    }
-
-    fn un<A: StackVal, R: StackVal>(&mut self, f: impl FnOnce(A) -> R) -> Result<(), Trap> {
-        let a = self.pop_as::<A>()?;
-        self.push(f(a).into_value())
-    }
-
-    fn un_try<A: StackVal, R: StackVal>(
-        &mut self,
-        f: impl FnOnce(A) -> Result<R, Trap>,
-    ) -> Result<(), Trap> {
-        let a = self.pop_as::<A>()?;
-        self.push(f(a)?.into_value())
-    }
-
-    fn bin<A: StackVal, B: StackVal, R: StackVal>(
-        &mut self,
-        f: impl FnOnce(A, B) -> R,
-    ) -> Result<(), Trap> {
-        let b = self.pop_as::<B>()?;
-        let a = self.pop_as::<A>()?;
-        self.push(f(a, b).into_value())
-    }
-
-    fn bin_try<A: StackVal, B: StackVal, R: StackVal>(
-        &mut self,
-        f: impl FnOnce(A, B) -> Result<R, Trap>,
-    ) -> Result<(), Trap> {
-        let b = self.pop_as::<B>()?;
-        let a = self.pop_as::<A>()?;
-        self.push(f(a, b)?.into_value())
-    }
-
-    fn load<const N: usize>(&mut self, inst: &Instance, m: MemArg) -> Result<[u8; N], Trap> {
-        let addr = self.pop_as::<i32>()? as u32;
-        let off = effective_address(addr, m)?;
-        let mut buf = [0u8; N];
-        inst.memory.read(off, &mut buf)?;
-        Ok(buf)
-    }
-
-    /// Store `bytes` at the address on the stack (the value must already have
-    /// been popped).
-    fn store(&mut self, inst: &mut Instance, m: MemArg, bytes: &[u8]) -> Result<(), Trap> {
-        let addr = self.pop_as::<i32>()? as u32;
-        let off = effective_address(addr, m)?;
-        inst.memory.write(off, bytes)
-    }
-
     // ---- frames and labels ----------------------------------------------
 
+    #[inline(always)]
     fn body_of<'m>(module: &'m Module, inst: &Instance, func: u32) -> Result<&'m FuncBody, Trap> {
         let defined = (func as usize)
             .checked_sub(inst.num_imported_funcs())
@@ -749,136 +1263,170 @@ impl Execution {
         module.code.get(defined).ok_or(Trap::Invalid)
     }
 
+    /// Save the pc of the current (innermost) frame.
+    #[inline(always)]
+    fn save_pc(&mut self, pc: usize) {
+        if let Some(f) = self.frames.last_mut() {
+            f.pc = pc as u32;
+        }
+    }
+
     /// Enter defined function `func`; its arguments are the top of the stack.
-    fn push_frame(&mut self, module: &Module, inst: &Instance, func: u32) -> Result<(), Trap> {
+    /// Returns the callee's body and the new frame.
+    #[inline(always)]
+    fn push_frame<'m>(
+        &mut self,
+        stack: &mut Stack,
+        module: &'m Module,
+        inst: &Instance,
+        func: u32,
+        sp: &mut usize,
+    ) -> Result<(&'m FuncBody, Frame), Trap> {
         if self.frames.len() >= self.max_depth {
             return Err(Trap::CallDepth);
         }
-        let ty = inst.func_type(func).ok_or(Trap::Invalid)?;
+        let (nparams, nresults) = inst.func_arity(func).ok_or(Trap::Invalid)?;
         let body = Self::body_of(module, inst, func)?;
-        let base = self
-            .stack
-            .len()
-            .checked_sub(ty.params.len())
-            .ok_or(Trap::Invalid)?;
-        let arity = ty.results.len() as u32;
+        let base = sp.checked_sub(nparams).ok_or(Trap::Invalid)?;
         for &l in &body.locals {
-            self.push(Value::default_for(l))?;
+            stack.push_raw(sp, default_bits(l), shadow(l))?;
         }
-        self.frames.push(Frame {
+        let frame = Frame {
             func,
             pc: 0,
-            base,
-            label_base: self.labels.len(),
-            arity,
-        });
-        Ok(())
+            base: base as u32,
+            label_base: self.labels.len() as u32,
+            arity: nresults as u32,
+        };
+        self.frames.push(frame);
+        Ok((body, frame))
     }
 
     /// Leave the current frame, moving its results to the frame base.
-    /// Returns the index of the caller's frame, or `None` if this was the
-    /// outermost one.
-    fn do_return(&mut self) -> Result<Option<usize>, Trap> {
+    /// Returns the caller's frame, or `None` if this was the outermost one.
+    #[inline(always)]
+    fn do_return(&mut self, stack: &mut Stack, sp: &mut usize) -> Result<Option<Frame>, Trap> {
         let frame = self.frames.pop().ok_or(Trap::Invalid)?;
-        let n = frame.arity as usize;
-        let len = self.stack.len();
-        if len < n || frame.base > len - n {
-            return Err(Trap::Invalid);
-        }
-        self.stack.copy_within(len - n..len, frame.base);
-        self.stack.truncate(frame.base + n);
-        self.labels.truncate(frame.label_base);
-        Ok(self.frames.len().checked_sub(1))
+        stack.unwind(sp, frame.base as usize, frame.arity as usize)?;
+        self.labels.truncate(frame.label_base as usize);
+        Ok(self.frames.last().copied())
     }
 
-    fn push_label(&mut self, cont: u32, arity: usize, nparams: usize) -> Result<(), Trap> {
+    #[inline(always)]
+    fn push_label(
+        &mut self,
+        cont: u32,
+        arity: usize,
+        nparams: usize,
+        is_loop: bool,
+        sp: usize,
+    ) -> Result<(), Trap> {
         if self.labels.len() >= self.max_stack {
             return Err(Trap::StackOverflow);
         }
-        let height = self.stack.len().checked_sub(nparams).ok_or(Trap::Invalid)?;
+        let height = sp.checked_sub(nparams).ok_or(Trap::Invalid)?;
         self.labels.push(Label {
             cont,
             arity: arity as u32,
-            height,
+            height: height as u32,
+            is_loop,
         });
         Ok(())
     }
 
-    /// Branch to the label `depth` levels out in frame `fi`.
-    fn branch(&mut self, fi: usize, depth: u32) -> Result<Jump, Trap> {
-        let label_base = self.frames.get(fi).ok_or(Trap::Invalid)?.label_base;
-        let in_frame = self.labels.len().saturating_sub(label_base);
+    /// Pop the innermost label (`else` reached from a then-arm).
+    #[inline(always)]
+    fn pop_label(&mut self) -> Result<(), Trap> {
+        self.labels.pop().map(|_| ()).ok_or(Trap::Invalid)
+    }
+
+    /// `end`: pop the innermost label of the frame whose labels start at
+    /// `label_base`, or report that the frame itself ends (no label left).
+    #[inline(always)]
+    fn end_label(&mut self, label_base: usize) -> bool {
+        if self.labels.len() > label_base {
+            self.labels.pop();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Branch to the label `depth` levels out in the frame whose labels
+    /// start at `label_base`.
+    #[inline(always)]
+    fn branch(
+        &mut self,
+        stack: &mut Stack,
+        label_base: usize,
+        depth: u32,
+        sp: &mut usize,
+    ) -> Result<Jump, Trap> {
+        let n_labels = self.labels.len();
+        let in_frame = n_labels.saturating_sub(label_base);
         if depth as usize >= in_frame {
             return Ok(Jump::Return);
         }
-        let li = self.labels.len() - 1 - depth as usize;
+        let li = n_labels - 1 - depth as usize;
         let label = *self.labels.get(li).ok_or(Trap::Invalid)?;
-        let n = label.arity as usize;
-        let len = self.stack.len();
-        if len < n || label.height > len - n {
-            return Err(Trap::Invalid);
-        }
-        if label.height != len - n {
-            self.stack.copy_within(len - n..len, label.height);
-            self.stack.truncate(label.height + n);
-        }
-        self.labels.truncate(li);
+        stack.unwind(sp, label.height as usize, label.arity as usize)?;
+        // A loop label stays: the branch re-enters the loop body.
+        self.labels.truncate(li + label.is_loop as usize);
         Ok(Jump::To(label.cont))
     }
 
-    /// Call imported function `func` through the host. The arguments stay
-    /// on the stack until the host returns `Continue`.
+    /// Call an imported or foreign function through the host, with the
+    /// arguments on top of `self.stack`; they stay there until the host
+    /// returns `Continue`. The interpreter loop is not running (its state is
+    /// in `self`) and nobody holds a borrow of the instance's memory.
     fn host_call(
         &mut self,
         module: &Module,
         inst: &mut Instance,
         host: &mut dyn Host,
-        func: u32,
+        target: HostTarget,
     ) -> Result<HostOutcome, Trap> {
-        let id = inst.host_func(func).ok_or(Trap::Invalid)?;
-        let ty = inst
-            .func_type_index(func)
-            .and_then(|t| module.types.get(t as usize))
-            .ok_or(Trap::Invalid)?;
-        let start = self
-            .stack
-            .len()
-            .checked_sub(ty.params.len())
-            .ok_or(Trap::Invalid)?;
-        let mut results = core::mem::take(&mut self.host_results);
-        results.clear();
-        results.extend(ty.results.iter().map(|&t| Value::default_for(t)));
-        let outcome = {
-            let mut ctx = HostCtx {
-                memory: &mut inst.memory,
-            };
-            host.call(&mut ctx, id, &self.stack[start..], &mut results)
+        let (id, ty): (Result<HostFuncId, u32>, _) = match target {
+            HostTarget::Import(func) => (
+                Ok(inst.host_func(func).ok_or(Trap::Invalid)?),
+                inst.func_type_index(func)
+                    .and_then(|t| module.types.get(t as usize))
+                    .ok_or(Trap::Invalid)?,
+            ),
+            HostTarget::Foreign { addr, ty } => (
+                Err(addr),
+                module.types.get(ty as usize).ok_or(Trap::Invalid)?,
+            ),
         };
-        let flow = match outcome {
-            Ok(HostOutcome::Continue) => {
-                let well_typed = results.len() == ty.results.len()
-                    && results.iter().zip(&ty.results).all(|(v, &t)| v.ty() == t);
-                if !well_typed {
-                    self.host_results = results;
-                    return Err(Trap::Host);
-                }
-                self.stack.truncate(start);
-                for &v in &results {
-                    if let Err(t) = self.push(v) {
-                        self.host_results = results;
-                        return Err(t);
-                    }
-                }
-                HostOutcome::Continue
-            }
-            Ok(other) => other,
-            Err(trap) => {
-                self.host_results = results;
-                return Err(trap);
-            }
+        let start = self.sp.checked_sub(ty.params.len()).ok_or(Trap::Invalid)?;
+        self.host_args.clear();
+        self.host_results.clear();
+        self.stack
+            .read_values(self.sp, &ty.params, &mut self.host_args)?;
+        self.host_results
+            .extend(ty.results.iter().map(|&t| Value::default_for(t)));
+        let mut ctx = HostCtx {
+            memory: &inst.memory,
         };
-        self.host_results = results;
-        Ok(flow)
+        let outcome = match id {
+            Ok(id) => host.call(&mut ctx, id, &self.host_args, &mut self.host_results),
+            Err(addr) => {
+                host.call_foreign(&mut ctx, addr, ty, &self.host_args, &mut self.host_results)
+            }
+        }?;
+        if outcome == HostOutcome::Continue {
+            let results = &self.host_results;
+            let well_typed = results.len() == ty.results.len()
+                && results.iter().zip(&ty.results).all(|(v, &t)| v.ty() == t);
+            if !well_typed {
+                return Err(Trap::Host);
+            }
+            self.sp = start;
+            for &v in results {
+                self.stack.push_value(&mut self.sp, v)?;
+            }
+        }
+        Ok(outcome)
     }
 
     // ---- the interpreter loop -------------------------------------------
@@ -891,37 +1439,95 @@ impl Execution {
         fuel: u64,
     ) -> Result<Flow, Trap> {
         let mut left = fuel;
-        let r = self.run_loop(module, inst, host, &mut left);
+        let r = self.run_slices(module, inst, host, &mut left);
         self.fuel_used += fuel - left;
         r
     }
 
-    #[allow(clippy::cognitive_complexity)]
-    fn run_loop(
+    /// Run the interpreter loop, making the host calls it stops at: the
+    /// memory is borrowed for each slice of the loop and released around
+    /// every host call (see the module documentation).
+    fn run_slices(
         &mut self,
         module: &Module,
         inst: &mut Instance,
         host: &mut dyn Host,
+        fuel: &mut u64,
+    ) -> Result<Flow, Trap> {
+        let memory = inst.memory.clone();
+        loop {
+            let flow = {
+                let mut mem = memory.try_borrow_mut().map_err(|_| Trap::Host)?;
+                self.run_loop(module, inst, &mut mem, fuel)?
+            };
+            let Flow::HostCall { target, restore } = flow else {
+                return Ok(flow);
+            };
+            match self.host_call(module, inst, host, target)? {
+                HostOutcome::Continue => {}
+                HostOutcome::Block => {
+                    // Rewind to the call so that resuming re-issues it with
+                    // the stack exactly as it was.
+                    if let Some(v) = restore {
+                        self.stack.push_as::<i32>(&mut self.sp, v)?;
+                    }
+                    let frame = self.frames.last_mut().ok_or(Trap::Invalid)?;
+                    frame.pc = frame.pc.checked_sub(1).ok_or(Trap::Invalid)?;
+                    return Ok(Flow::Blocked);
+                }
+                HostOutcome::Exit(code) => return Ok(Flow::Exited(code)),
+            }
+        }
+    }
+
+    #[allow(clippy::cognitive_complexity)]
+    #[inline(never)]
+    fn run_loop(
+        &mut self,
+        module: &Module,
+        inst: &mut Instance,
+        mem: &mut Memory,
         fuel_ref: &mut u64,
     ) -> Result<Flow, Trap> {
         let mut fuel = *fuel_ref;
-        let mut fi = self.frames.len().checked_sub(1).ok_or(Trap::Invalid)?;
-        let mut body = Self::body_of(module, inst, self.frames[fi].func)?;
-        let mut pc = self.frames[fi].pc as usize;
-        let mut base = self.frames[fi].base;
+        let mut sp = self.sp;
+        // The stack is a local for the duration of the loop so that its
+        // buffer pointer and length can live in registers (see the module
+        // documentation); it goes back into `self` on every exit that can
+        // be resumed. A trap ends the execution, so losing it there is fine.
+        let mut stack = core::mem::take(&mut self.stack);
+        let frame = *self.frames.last().ok_or(Trap::Invalid)?;
+        // Only the instruction slice of the current function is kept in a
+        // local; everything else about the frame that is needed rarely
+        // (`br_table` side tables, the saved pc) is re-read from
+        // `self.frames.last()` to keep the loop's register pressure low.
+        let mut code: &[Instr] = &Self::body_of(module, inst, frame.func)?.instrs;
+        let mut pc = frame.pc as usize;
+        let mut base = frame.base as usize;
+        let mut label_base = frame.label_base as usize;
 
-        // Switch to the frame `fi` after a return.
+        // Save the loop state into `self` before leaving the loop.
+        macro_rules! save {
+            () => {{
+                self.save_pc(pc);
+                self.stack = stack;
+                self.sp = sp;
+                *fuel_ref = fuel;
+            }};
+        }
+        // Switch to the caller's frame after a return.
         macro_rules! ret {
             () => {
-                match self.do_return()? {
-                    Some(caller) => {
-                        fi = caller;
-                        let frame = *self.frames.get(fi).ok_or(Trap::Invalid)?;
-                        body = Self::body_of(module, inst, frame.func)?;
+                match self.do_return(&mut stack, &mut sp)? {
+                    Some(frame) => {
+                        code = &Self::body_of(module, inst, frame.func)?.instrs;
                         pc = frame.pc as usize;
-                        base = frame.base;
+                        base = frame.base as usize;
+                        label_base = frame.label_base as usize;
                     }
                     None => {
+                        self.stack = stack;
+                        self.sp = sp;
                         *fuel_ref = fuel;
                         return Ok(Flow::Done);
                     }
@@ -940,6 +1546,17 @@ impl Execution {
         // table index of `call_indirect`): it goes back on the stack when the
         // host blocks, so that the re-issued instruction finds the stack as
         // it was and calls the same function with the same arguments.
+        // A call through the host: leave the loop with the state saved;
+        // `run_slices` makes the call and re-enters.
+        macro_rules! host_dispatch {
+            ($target:expr, $restore:expr) => {{
+                save!();
+                return Ok(Flow::HostCall {
+                    target: $target,
+                    restore: $restore,
+                });
+            }};
+        }
         macro_rules! call {
             ($f:expr) => {
                 call!($f, None)
@@ -947,54 +1564,85 @@ impl Execution {
             ($f:expr, $restore:expr) => {{
                 let f: u32 = $f;
                 if inst.is_imported_func(f) {
-                    match self.host_call(module, inst, host, f)? {
-                        HostOutcome::Continue => {}
-                        HostOutcome::Block => {
-                            // Rewind to the call so that resuming re-issues it.
-                            let restore: Option<Value> = $restore;
-                            if let Some(v) = restore {
-                                self.push(v)?;
-                            }
-                            self.frames[fi].pc = (pc - 1) as u32;
-                            *fuel_ref = fuel;
-                            return Ok(Flow::Blocked);
-                        }
-                        HostOutcome::Exit(code) => {
-                            *fuel_ref = fuel;
-                            return Ok(Flow::Exited(code));
-                        }
-                    }
+                    host_dispatch!(HostTarget::Import(f), $restore);
                 } else {
-                    self.frames[fi].pc = pc as u32;
-                    self.push_frame(module, inst, f)?;
-                    fi += 1;
-                    body = Self::body_of(module, inst, f)?;
+                    self.save_pc(pc);
+                    let (callee, frame) = self.push_frame(&mut stack, module, inst, f, &mut sp)?;
+                    code = &callee.instrs;
                     pc = 0;
-                    base = self.frames[fi].base;
+                    base = frame.base as usize;
+                    label_base = frame.label_base as usize;
                 }
             }};
         }
         macro_rules! local {
             ($idx:expr) => {
-                self.stack
-                    .get_mut(base + $idx as usize)
-                    .ok_or(Trap::Invalid)?
+                base.wrapping_add($idx as usize)
             };
         }
+        // A table, borrowed for the current instruction.
         macro_rules! table {
             ($idx:expr) => {
-                inst.tables.get_mut($idx as usize).ok_or(Trap::Invalid)?
+                inst.tables
+                    .get($idx as usize)
+                    .ok_or(Trap::Invalid)?
+                    .try_borrow_mut()
+                    .map_err(|_| Trap::Host)?
             };
+        }
+        macro_rules! pop {
+            ($t:ty) => {
+                stack.pop_as::<$t>(&mut sp)?
+            };
+        }
+        macro_rules! push {
+            ($v:expr) => {
+                stack.push_as(&mut sp, $v)?
+            };
+        }
+        macro_rules! un {
+            ($f:expr) => {
+                stack.un(sp, $f)?
+            };
+        }
+        macro_rules! un_try {
+            ($f:expr) => {
+                stack.un_try(sp, $f)?
+            };
+        }
+        macro_rules! bin {
+            ($f:expr) => {
+                stack.bin(&mut sp, $f)?
+            };
+        }
+        macro_rules! bin_try {
+            ($f:expr) => {
+                stack.bin_try(&mut sp, $f)?
+            };
+        }
+        // A load replaces the address on top of the stack by the value.
+        macro_rules! load {
+            ($n:literal, $m:expr, $conv:expr) => {{
+                let marg = $m;
+                let m = &*mem;
+                un_try!(|addr: i32| m.load::<$n>(addr as u32, marg.offset).map($conv))
+            }};
+        }
+        macro_rules! store {
+            ($t:ty, $m:expr, |$v:ident| $bytes:expr) => {{
+                let marg = $m;
+                let (addr, $v) = stack.pop2::<i32, $t>(&mut sp)?;
+                mem.store(addr as u32, marg.offset, &$bytes)?;
+            }};
         }
 
         loop {
             if fuel == 0 {
-                self.frames[fi].pc = pc as u32;
-                *fuel_ref = fuel;
+                save!();
                 return Ok(Flow::OutOfFuel);
             }
             fuel -= 1;
-            let instr = *body.instrs.get(pc).ok_or(Trap::Invalid)?;
+            let instr = *code.get(pc).ok_or(Trap::Invalid)?;
             pc += 1;
 
             match instr {
@@ -1003,19 +1651,19 @@ impl Execution {
                 Instr::Nop => {}
                 Instr::Block { ty, end } => {
                     let (np, nr) = block_arity(module, ty)?;
-                    self.push_label(end + 1, nr, np)?;
+                    self.push_label(end + 1, nr, np, false, sp)?;
                 }
                 Instr::Loop { ty, .. } => {
                     let (np, _) = block_arity(module, ty)?;
-                    self.push_label((pc - 1) as u32, np, np)?;
+                    self.push_label(pc as u32, np, np, true, sp)?;
                 }
                 Instr::If { ty, else_, end } => {
-                    let cond = self.pop_as::<i32>()?;
+                    let cond = pop!(i32);
                     let (np, nr) = block_arity(module, ty)?;
                     if cond != 0 {
-                        self.push_label(end + 1, nr, np)?;
+                        self.push_label(end + 1, nr, np, false, sp)?;
                     } else if else_ != end {
-                        self.push_label(end + 1, nr, np)?;
+                        self.push_label(end + 1, nr, np, false, sp)?;
                         pc = else_ as usize + 1;
                     } else {
                         pc = end as usize + 1;
@@ -1023,42 +1671,65 @@ impl Execution {
                 }
                 Instr::Else { end } => {
                     // Reached from the then arm: the block is complete.
-                    self.labels.pop().ok_or(Trap::Invalid)?;
+                    self.pop_label()?;
                     pc = end as usize + 1;
                 }
                 Instr::End => {
-                    if self.labels.len() > self.frames[fi].label_base {
-                        self.labels.pop();
-                    } else {
+                    if !self.end_label(label_base) {
                         ret!();
                     }
                 }
-                Instr::Br(depth) => jump!(self.branch(fi, depth)?),
+                Instr::Br(depth) => jump!(self.branch(&mut stack, label_base, depth, &mut sp)?),
                 Instr::BrIf(depth) => {
-                    if self.pop_as::<i32>()? != 0 {
-                        jump!(self.branch(fi, depth)?);
+                    if pop!(i32) != 0 {
+                        jump!(self.branch(&mut stack, label_base, depth, &mut sp)?);
                     }
                 }
                 Instr::BrTable(idx) => {
-                    let i = self.pop_as::<i32>()? as u32;
-                    let table = body.br_table(idx).ok_or(Trap::Invalid)?;
+                    let i = pop!(i32) as u32;
+                    let func = self.frames.last().ok_or(Trap::Invalid)?.func;
+                    let table = Self::body_of(module, inst, func)?
+                        .br_table(idx)
+                        .ok_or(Trap::Invalid)?;
                     let depth = table
                         .targets
                         .get(i as usize)
                         .copied()
                         .unwrap_or(table.default);
-                    jump!(self.branch(fi, depth)?);
+                    jump!(self.branch(&mut stack, label_base, depth, &mut sp)?);
                 }
                 Instr::Return => ret!(),
                 Instr::Call(f) => call!(f),
                 Instr::CallIndirect { ty, table } => {
-                    let i = self.pop_as::<i32>()? as u32;
-                    let t = inst.tables.get(table as usize).ok_or(Trap::Invalid)?;
-                    let f = match t.get(i) {
-                        Ok(Value::FuncRef(Some(f))) => f,
+                    let i = pop!(i32) as u32;
+                    let entry = inst
+                        .tables
+                        .get(table as usize)
+                        .ok_or(Trap::Invalid)?
+                        .try_borrow()
+                        .map_err(|_| Trap::Host)?
+                        .get(i);
+                    let addr = match entry {
+                        Ok(Value::FuncRef(Some(a))) => a,
                         Ok(Value::FuncRef(None)) => return Err(Trap::UninitializedElement),
                         Ok(_) => return Err(Trap::Invalid),
                         Err(_) => return Err(Trap::UndefinedElement),
+                    };
+                    // The address names a function of this instance (the
+                    // common case, one subtraction and two compares), one
+                    // of its imports, or a foreign function.
+                    let f = addr.wrapping_sub(inst.func_base);
+                    let f = if (f as usize) < inst.num_funcs()
+                        && (f as usize) >= inst.num_imported_funcs()
+                    {
+                        f
+                    } else {
+                        match inst.import_by_addr(addr) {
+                            Some(f) => f,
+                            None => {
+                                host_dispatch!(HostTarget::Foreign { addr, ty }, Some(i as i32))
+                            }
+                        }
                     };
                     let actual = inst.func_type_index(f).ok_or(Trap::Invalid)?;
                     if actual != ty {
@@ -1069,251 +1740,163 @@ impl Execution {
                         }
                     }
                     // The popped index is restored if the host blocks.
-                    call!(f, Some(Value::I32(i as i32)));
+                    call!(f, Some(i as i32));
                 }
 
                 // ---- parametric ---------------------------------------
                 Instr::Drop => {
-                    self.pop()?;
+                    stack.pop_raw(&mut sp)?;
                 }
-                Instr::Select | Instr::SelectT(_) => {
-                    let cond = self.pop_as::<i32>()?;
-                    let v2 = self.pop()?;
-                    let v1 = self.pop()?;
-                    self.push(if cond != 0 { v1 } else { v2 })?;
-                }
+                Instr::Select | Instr::SelectT(_) => stack.select(&mut sp)?,
 
                 // ---- variables ----------------------------------------
-                Instr::LocalGet(i) => {
-                    let v = *local!(i);
-                    self.push(v)?;
-                }
-                Instr::LocalSet(i) => {
-                    let v = self.pop()?;
-                    *local!(i) = v;
-                }
-                Instr::LocalTee(i) => {
-                    let v = *self.stack.last().ok_or(Trap::Invalid)?;
-                    *local!(i) = v;
-                }
+                Instr::LocalGet(i) => stack.local_get(&mut sp, local!(i))?,
+                Instr::LocalSet(i) => stack.local_set(&mut sp, local!(i))?,
+                Instr::LocalTee(i) => stack.local_tee(sp, local!(i))?,
                 Instr::GlobalGet(i) => {
-                    let v = inst.global(i).ok_or(Trap::Invalid)?;
-                    self.push(v)?;
+                    let v = inst.globals.get(i as usize).ok_or(Trap::Invalid)?.get();
+                    stack.push_value(&mut sp, v)?;
                 }
                 Instr::GlobalSet(i) => {
-                    let v = self.pop()?;
-                    *inst.globals.get_mut(i as usize).ok_or(Trap::Invalid)? = v;
+                    let (bits, ty) = stack.pop_raw(&mut sp)?;
+                    let g = inst.globals.get(i as usize).ok_or(Trap::Invalid)?;
+                    let gty = g.ty().ty;
+                    if shadow(gty) != ty {
+                        return Err(Trap::Invalid);
+                    }
+                    g.store(Value::from_bits(bits, gty));
                 }
 
                 // ---- references ---------------------------------------
-                Instr::RefNull(t) => self.push(Value::null(t))?,
+                Instr::RefNull(t) => stack.push_ref(&mut sp, t, None)?,
                 Instr::RefIsNull => {
-                    let v = self.pop()?;
-                    if !v.ty().is_ref() {
-                        return Err(Trap::Invalid);
-                    }
-                    self.push(Value::I32(v.is_null_ref() as i32))?;
+                    let r = stack.pop_ref(&mut sp)?;
+                    push!(r.is_none());
                 }
                 Instr::RefFunc(f) => {
-                    if (f as usize) >= inst.num_funcs() {
-                        return Err(Trap::Invalid);
-                    }
-                    self.push(Value::FuncRef(Some(f)))?;
+                    let addr = inst.func_addr(f).ok_or(Trap::Invalid)?;
+                    stack.push_ref(&mut sp, RefType::FuncRef, Some(addr))?;
                 }
 
                 // ---- tables -------------------------------------------
                 Instr::TableGet(t) => {
-                    let i = self.pop_as::<i32>()? as u32;
+                    let i = pop!(i32) as u32;
                     let v = table!(t).get(i)?;
-                    self.push(v)?;
+                    stack.push_value(&mut sp, v)?;
                 }
                 Instr::TableSet(t) => {
-                    let v = self.pop()?;
-                    let i = self.pop_as::<i32>()? as u32;
-                    table!(t).set(i, v)?;
+                    let r = stack.pop_ref(&mut sp)?;
+                    let i = pop!(i32) as u32;
+                    let mut tb = table!(t);
+                    let elem = tb.elem_type();
+                    tb.set(i, ref_value(elem, r))?;
                 }
                 Instr::TableSize(t) => {
                     let n = table!(t).size();
-                    self.push(Value::I32(n as i32))?;
+                    push!(n as i32);
                 }
                 Instr::TableGrow(t) => {
-                    let n = self.pop_as::<i32>()? as u32;
-                    let init = self.pop()?;
-                    let r = inst.grow_table(t, n, init)?.map_or(-1, |old| old as i32);
-                    self.push(Value::I32(r))?;
+                    let n = pop!(i32) as u32;
+                    let init = stack.pop_ref(&mut sp)?;
+                    let elem = table!(t).elem_type();
+                    let r = inst
+                        .grow_table(t, n, ref_value(elem, init))?
+                        .map_or(-1, |old| old as i32);
+                    push!(r);
                 }
                 Instr::TableFill(t) => {
-                    let n = self.pop_as::<i32>()? as u32;
-                    let v = self.pop()?;
-                    let i = self.pop_as::<i32>()? as u32;
-                    table!(t).fill(i, v, n)?;
+                    let n = pop!(i32) as u32;
+                    let v = stack.pop_ref(&mut sp)?;
+                    let i = pop!(i32) as u32;
+                    let mut tb = table!(t);
+                    let elem = tb.elem_type();
+                    tb.fill(i, ref_value(elem, v), n)?;
                 }
                 Instr::TableCopy { dst, src } => {
-                    let n = self.pop_as::<i32>()? as u32;
-                    let s = self.pop_as::<i32>()? as u32;
-                    let d = self.pop_as::<i32>()? as u32;
-                    if dst == src {
-                        table!(dst).copy_within(d, s, n)?;
+                    let n = pop!(i32) as u32;
+                    let (d, s) = stack.pop2::<i32, i32>(&mut sp)?;
+                    let (d, s) = (d as u32, s as u32);
+                    let dt = inst.tables.get(dst as usize).ok_or(Trap::Invalid)?;
+                    let st = inst.tables.get(src as usize).ok_or(Trap::Invalid)?;
+                    // Two table indices may name one shared table.
+                    if Rc::ptr_eq(dt, st) {
+                        dt.try_borrow_mut()
+                            .map_err(|_| Trap::Host)?
+                            .copy_within(d, s, n)?;
                     } else {
-                        let (di, si) = (dst as usize, src as usize);
-                        if di.max(si) >= inst.tables.len() {
-                            return Err(Trap::Invalid);
-                        }
-                        let (lo, hi) = inst.tables.split_at_mut(di.max(si));
-                        let (dt, st) = if di < si {
-                            (&mut lo[di], &hi[0])
-                        } else {
-                            (&mut hi[0], &lo[si])
-                        };
-                        dt.init(d, st.entries(), s, n)?;
+                        let st = st.try_borrow().map_err(|_| Trap::Host)?;
+                        dt.try_borrow_mut()
+                            .map_err(|_| Trap::Host)?
+                            .init(d, st.entries(), s, n)?;
                     }
                 }
                 Instr::TableInit { elem, table } => {
-                    let n = self.pop_as::<i32>()? as u32;
-                    let s = self.pop_as::<i32>()? as u32;
-                    let d = self.pop_as::<i32>()? as u32;
+                    let n = pop!(i32) as u32;
+                    let (d, s) = stack.pop2::<i32, i32>(&mut sp)?;
                     let seg = inst.elems.get(elem as usize).ok_or(Trap::Invalid)?;
-                    inst.tables
-                        .get_mut(table as usize)
-                        .ok_or(Trap::Invalid)?
-                        .init(d, seg, s, n)?;
+                    table!(table).init(d as u32, seg, s as u32, n)?;
                 }
                 Instr::ElemDrop(e) => {
                     *inst.elems.get_mut(e as usize).ok_or(Trap::Invalid)? = Vec::new();
                 }
 
                 // ---- memory -------------------------------------------
-                Instr::I32Load(m) => {
-                    let b = self.load::<4>(inst, m)?;
-                    self.push(Value::I32(i32::from_le_bytes(b)))?;
-                }
-                Instr::I64Load(m) => {
-                    let b = self.load::<8>(inst, m)?;
-                    self.push(Value::I64(i64::from_le_bytes(b)))?;
-                }
-                Instr::F32Load(m) => {
-                    let b = self.load::<4>(inst, m)?;
-                    self.push(Value::F32(f32::from_le_bytes(b)))?;
-                }
-                Instr::F64Load(m) => {
-                    let b = self.load::<8>(inst, m)?;
-                    self.push(Value::F64(f64::from_le_bytes(b)))?;
-                }
-                Instr::I32Load8S(m) => {
-                    let b = self.load::<1>(inst, m)?;
-                    self.push(Value::I32(b[0] as i8 as i32))?;
-                }
-                Instr::I32Load8U(m) => {
-                    let b = self.load::<1>(inst, m)?;
-                    self.push(Value::I32(b[0] as i32))?;
-                }
-                Instr::I32Load16S(m) => {
-                    let b = self.load::<2>(inst, m)?;
-                    self.push(Value::I32(i16::from_le_bytes(b) as i32))?;
-                }
-                Instr::I32Load16U(m) => {
-                    let b = self.load::<2>(inst, m)?;
-                    self.push(Value::I32(u16::from_le_bytes(b) as i32))?;
-                }
-                Instr::I64Load8S(m) => {
-                    let b = self.load::<1>(inst, m)?;
-                    self.push(Value::I64(b[0] as i8 as i64))?;
-                }
-                Instr::I64Load8U(m) => {
-                    let b = self.load::<1>(inst, m)?;
-                    self.push(Value::I64(b[0] as i64))?;
-                }
-                Instr::I64Load16S(m) => {
-                    let b = self.load::<2>(inst, m)?;
-                    self.push(Value::I64(i16::from_le_bytes(b) as i64))?;
-                }
-                Instr::I64Load16U(m) => {
-                    let b = self.load::<2>(inst, m)?;
-                    self.push(Value::I64(u16::from_le_bytes(b) as i64))?;
-                }
-                Instr::I64Load32S(m) => {
-                    let b = self.load::<4>(inst, m)?;
-                    self.push(Value::I64(i32::from_le_bytes(b) as i64))?;
-                }
-                Instr::I64Load32U(m) => {
-                    let b = self.load::<4>(inst, m)?;
-                    self.push(Value::I64(u32::from_le_bytes(b) as i64))?;
-                }
-                Instr::I32Store(m) => {
-                    let v = self.pop_as::<i32>()?;
-                    self.store(inst, m, &v.to_le_bytes())?;
-                }
-                Instr::I64Store(m) => {
-                    let v = self.pop_as::<i64>()?;
-                    self.store(inst, m, &v.to_le_bytes())?;
-                }
-                Instr::F32Store(m) => {
-                    let v = self.pop_as::<f32>()?;
-                    self.store(inst, m, &v.to_le_bytes())?;
-                }
-                Instr::F64Store(m) => {
-                    let v = self.pop_as::<f64>()?;
-                    self.store(inst, m, &v.to_le_bytes())?;
-                }
-                Instr::I32Store8(m) => {
-                    let v = self.pop_as::<i32>()?;
-                    self.store(inst, m, &[v as u8])?;
-                }
-                Instr::I32Store16(m) => {
-                    let v = self.pop_as::<i32>()?;
-                    self.store(inst, m, &(v as u16).to_le_bytes())?;
-                }
-                Instr::I64Store8(m) => {
-                    let v = self.pop_as::<i64>()?;
-                    self.store(inst, m, &[v as u8])?;
-                }
-                Instr::I64Store16(m) => {
-                    let v = self.pop_as::<i64>()?;
-                    self.store(inst, m, &(v as u16).to_le_bytes())?;
-                }
-                Instr::I64Store32(m) => {
-                    let v = self.pop_as::<i64>()?;
-                    self.store(inst, m, &(v as u32).to_le_bytes())?;
-                }
+                Instr::I32Load(m) => load!(4, m, i32::from_le_bytes),
+                Instr::I64Load(m) => load!(8, m, i64::from_le_bytes),
+                Instr::F32Load(m) => load!(4, m, f32::from_le_bytes),
+                Instr::F64Load(m) => load!(8, m, f64::from_le_bytes),
+                Instr::I32Load8S(m) => load!(1, m, |b| b[0] as i8 as i32),
+                Instr::I32Load8U(m) => load!(1, m, |b| b[0] as i32),
+                Instr::I32Load16S(m) => load!(2, m, |b| i16::from_le_bytes(b) as i32),
+                Instr::I32Load16U(m) => load!(2, m, |b| u16::from_le_bytes(b) as i32),
+                Instr::I64Load8S(m) => load!(1, m, |b| b[0] as i8 as i64),
+                Instr::I64Load8U(m) => load!(1, m, |b| b[0] as i64),
+                Instr::I64Load16S(m) => load!(2, m, |b| i16::from_le_bytes(b) as i64),
+                Instr::I64Load16U(m) => load!(2, m, |b| u16::from_le_bytes(b) as i64),
+                Instr::I64Load32S(m) => load!(4, m, |b| i32::from_le_bytes(b) as i64),
+                Instr::I64Load32U(m) => load!(4, m, |b| u32::from_le_bytes(b) as i64),
+                Instr::I32Store(m) => store!(i32, m, |v| v.to_le_bytes()),
+                Instr::I64Store(m) => store!(i64, m, |v| v.to_le_bytes()),
+                Instr::F32Store(m) => store!(f32, m, |v| v.to_le_bytes()),
+                Instr::F64Store(m) => store!(f64, m, |v| v.to_le_bytes()),
+                Instr::I32Store8(m) => store!(i32, m, |v| [v as u8]),
+                Instr::I32Store16(m) => store!(i32, m, |v| (v as u16).to_le_bytes()),
+                Instr::I64Store8(m) => store!(i64, m, |v| [v as u8]),
+                Instr::I64Store16(m) => store!(i64, m, |v| (v as u16).to_le_bytes()),
+                Instr::I64Store32(m) => store!(i64, m, |v| (v as u32).to_le_bytes()),
                 Instr::MemorySize => {
-                    let n = inst.memory.size_pages();
-                    self.push(Value::I32(n as i32))?;
+                    let n = mem.size_pages();
+                    push!(n as i32);
                 }
                 Instr::MemoryGrow => {
-                    let n = self.pop_as::<i32>()? as u32;
-                    let r = inst.memory.grow(n).map_or(-1, |old| old as i32);
-                    self.push(Value::I32(r))?;
+                    un!(|n: i32| mem.grow(n as u32).map_or(-1, |old| old as i32));
                 }
                 Instr::MemoryFill => {
-                    let n = self.pop_as::<i32>()? as u32;
-                    let v = self.pop_as::<i32>()? as u8;
-                    let d = self.pop_as::<i32>()? as u32;
-                    inst.memory.fill(d, v, n)?;
+                    let n = pop!(i32) as u32;
+                    let (d, v) = stack.pop2::<i32, i32>(&mut sp)?;
+                    mem.fill(d as u32, v as u8, n)?;
                 }
                 Instr::MemoryCopy => {
-                    let n = self.pop_as::<i32>()? as u32;
-                    let s = self.pop_as::<i32>()? as u32;
-                    let d = self.pop_as::<i32>()? as u32;
-                    inst.memory.copy_within(d, s, n)?;
+                    let n = pop!(i32) as u32;
+                    let (d, s) = stack.pop2::<i32, i32>(&mut sp)?;
+                    mem.copy_within(d as u32, s as u32, n)?;
                 }
                 Instr::MemoryInit(seg) => {
-                    let n = self.pop_as::<i32>()? as u32;
-                    let s = self.pop_as::<i32>()? as u32;
-                    let d = self.pop_as::<i32>()? as u32;
+                    let n = pop!(i32) as u32;
+                    let (d, s) = stack.pop2::<i32, i32>(&mut sp)?;
                     let dropped = *inst.data_dropped.get(seg as usize).ok_or(Trap::Invalid)?;
                     let data: &[u8] = if dropped {
                         &[]
                     } else {
                         &module.data.get(seg as usize).ok_or(Trap::Invalid)?.bytes
                     };
-                    let start = s as usize;
+                    let start = s as u32 as usize;
                     let end = start.checked_add(n as usize).ok_or(Trap::OutOfBounds)?;
                     if end > data.len() {
                         return Err(Trap::OutOfBounds);
                     }
                     // `write` checks the destination before touching memory.
-                    let bytes = &data[start..end];
-                    inst.memory.write(d, bytes)?;
+                    mem.write(d as u32, &data[start..end])?;
                 }
                 Instr::DataDrop(seg) => {
                     *inst
@@ -1323,220 +1906,196 @@ impl Execution {
                 }
 
                 // ---- constants ----------------------------------------
-                Instr::I32Const(v) => self.push(Value::I32(v))?,
-                Instr::I64Const(v) => self.push(Value::I64(v))?,
-                Instr::F32Const(bits) => self.push(Value::F32(f32::from_bits(bits)))?,
-                Instr::F64Const(bits) => self.push(Value::F64(f64::from_bits(bits)))?,
+                Instr::I32Const(v) => push!(v),
+                Instr::I64Const(v) => push!(v),
+                Instr::F32Const(bits) => push!(f32::from_bits(bits)),
+                Instr::F64Const(bits) => push!(f64::from_bits(bits)),
 
                 // ---- i32 ----------------------------------------------
-                Instr::I32Eqz => self.un(|a: i32| a == 0)?,
-                Instr::I32Eq => self.bin(|a: i32, b: i32| a == b)?,
-                Instr::I32Ne => self.bin(|a: i32, b: i32| a != b)?,
-                Instr::I32LtS => self.bin(|a: i32, b: i32| a < b)?,
-                Instr::I32LtU => self.bin(|a: i32, b: i32| (a as u32) < (b as u32))?,
-                Instr::I32GtS => self.bin(|a: i32, b: i32| a > b)?,
-                Instr::I32GtU => self.bin(|a: i32, b: i32| (a as u32) > (b as u32))?,
-                Instr::I32LeS => self.bin(|a: i32, b: i32| a <= b)?,
-                Instr::I32LeU => self.bin(|a: i32, b: i32| (a as u32) <= (b as u32))?,
-                Instr::I32GeS => self.bin(|a: i32, b: i32| a >= b)?,
-                Instr::I32GeU => self.bin(|a: i32, b: i32| (a as u32) >= (b as u32))?,
-                Instr::I32Clz => self.un(|a: i32| a.leading_zeros() as i32)?,
-                Instr::I32Ctz => self.un(|a: i32| a.trailing_zeros() as i32)?,
-                Instr::I32Popcnt => self.un(|a: i32| a.count_ones() as i32)?,
-                Instr::I32Add => self.bin(|a: i32, b: i32| a.wrapping_add(b))?,
-                Instr::I32Sub => self.bin(|a: i32, b: i32| a.wrapping_sub(b))?,
-                Instr::I32Mul => self.bin(|a: i32, b: i32| a.wrapping_mul(b))?,
-                Instr::I32DivS => self.bin_try(|a: i32, b: i32| {
-                    if b == 0 {
-                        Err(Trap::IntegerDivideByZero)
-                    } else if a == i32::MIN && b == -1 {
-                        Err(Trap::IntegerOverflow)
-                    } else {
-                        Ok(a.wrapping_div(b))
-                    }
-                })?,
-                Instr::I32DivU => self.bin_try(|a: i32, b: i32| {
+                Instr::I32Eqz => un!(|a: i32| a == 0),
+                Instr::I32Eq => bin!(|a: i32, b: i32| a == b),
+                Instr::I32Ne => bin!(|a: i32, b: i32| a != b),
+                Instr::I32LtS => bin!(|a: i32, b: i32| a < b),
+                Instr::I32LtU => bin!(|a: i32, b: i32| (a as u32) < (b as u32)),
+                Instr::I32GtS => bin!(|a: i32, b: i32| a > b),
+                Instr::I32GtU => bin!(|a: i32, b: i32| (a as u32) > (b as u32)),
+                Instr::I32LeS => bin!(|a: i32, b: i32| a <= b),
+                Instr::I32LeU => bin!(|a: i32, b: i32| (a as u32) <= (b as u32)),
+                Instr::I32GeS => bin!(|a: i32, b: i32| a >= b),
+                Instr::I32GeU => bin!(|a: i32, b: i32| (a as u32) >= (b as u32)),
+                Instr::I32Clz => un!(|a: i32| a.leading_zeros() as i32),
+                Instr::I32Ctz => un!(|a: i32| a.trailing_zeros() as i32),
+                Instr::I32Popcnt => un!(|a: i32| a.count_ones() as i32),
+                Instr::I32Add => bin!(|a: i32, b: i32| a.wrapping_add(b)),
+                Instr::I32Sub => bin!(|a: i32, b: i32| a.wrapping_sub(b)),
+                Instr::I32Mul => bin!(|a: i32, b: i32| a.wrapping_mul(b)),
+                Instr::I32DivS => bin_try!(i32_div_s),
+                Instr::I32DivU => bin_try!(|a: i32, b: i32| {
                     (a as u32)
                         .checked_div(b as u32)
                         .map(|v| v as i32)
                         .ok_or(Trap::IntegerDivideByZero)
-                })?,
-                Instr::I32RemS => self.bin_try(|a: i32, b: i32| {
+                }),
+                Instr::I32RemS => bin_try!(|a: i32, b: i32| {
                     if b == 0 {
                         Err(Trap::IntegerDivideByZero)
                     } else {
                         Ok(a.wrapping_rem(b))
                     }
-                })?,
-                Instr::I32RemU => self.bin_try(|a: i32, b: i32| {
+                }),
+                Instr::I32RemU => bin_try!(|a: i32, b: i32| {
                     (a as u32)
                         .checked_rem(b as u32)
                         .map(|v| v as i32)
                         .ok_or(Trap::IntegerDivideByZero)
-                })?,
-                Instr::I32And => self.bin(|a: i32, b: i32| a & b)?,
-                Instr::I32Or => self.bin(|a: i32, b: i32| a | b)?,
-                Instr::I32Xor => self.bin(|a: i32, b: i32| a ^ b)?,
-                Instr::I32Shl => self.bin(|a: i32, b: i32| a.wrapping_shl(b as u32))?,
-                Instr::I32ShrS => self.bin(|a: i32, b: i32| a.wrapping_shr(b as u32))?,
+                }),
+                Instr::I32And => bin!(|a: i32, b: i32| a & b),
+                Instr::I32Or => bin!(|a: i32, b: i32| a | b),
+                Instr::I32Xor => bin!(|a: i32, b: i32| a ^ b),
+                Instr::I32Shl => bin!(|a: i32, b: i32| a.wrapping_shl(b as u32)),
+                Instr::I32ShrS => bin!(|a: i32, b: i32| a.wrapping_shr(b as u32)),
                 Instr::I32ShrU => {
-                    self.bin(|a: i32, b: i32| (a as u32).wrapping_shr(b as u32) as i32)?
+                    bin!(|a: i32, b: i32| (a as u32).wrapping_shr(b as u32) as i32)
                 }
-                Instr::I32Rotl => self.bin(|a: i32, b: i32| a.rotate_left(b as u32 & 31))?,
-                Instr::I32Rotr => self.bin(|a: i32, b: i32| a.rotate_right(b as u32 & 31))?,
+                Instr::I32Rotl => bin!(|a: i32, b: i32| a.rotate_left(b as u32 & 31)),
+                Instr::I32Rotr => bin!(|a: i32, b: i32| a.rotate_right(b as u32 & 31)),
 
                 // ---- i64 ----------------------------------------------
-                Instr::I64Eqz => self.un(|a: i64| a == 0)?,
-                Instr::I64Eq => self.bin(|a: i64, b: i64| a == b)?,
-                Instr::I64Ne => self.bin(|a: i64, b: i64| a != b)?,
-                Instr::I64LtS => self.bin(|a: i64, b: i64| a < b)?,
-                Instr::I64LtU => self.bin(|a: i64, b: i64| (a as u64) < (b as u64))?,
-                Instr::I64GtS => self.bin(|a: i64, b: i64| a > b)?,
-                Instr::I64GtU => self.bin(|a: i64, b: i64| (a as u64) > (b as u64))?,
-                Instr::I64LeS => self.bin(|a: i64, b: i64| a <= b)?,
-                Instr::I64LeU => self.bin(|a: i64, b: i64| (a as u64) <= (b as u64))?,
-                Instr::I64GeS => self.bin(|a: i64, b: i64| a >= b)?,
-                Instr::I64GeU => self.bin(|a: i64, b: i64| (a as u64) >= (b as u64))?,
-                Instr::I64Clz => self.un(|a: i64| a.leading_zeros() as i64)?,
-                Instr::I64Ctz => self.un(|a: i64| a.trailing_zeros() as i64)?,
-                Instr::I64Popcnt => self.un(|a: i64| a.count_ones() as i64)?,
-                Instr::I64Add => self.bin(|a: i64, b: i64| a.wrapping_add(b))?,
-                Instr::I64Sub => self.bin(|a: i64, b: i64| a.wrapping_sub(b))?,
-                Instr::I64Mul => self.bin(|a: i64, b: i64| a.wrapping_mul(b))?,
-                Instr::I64DivS => self.bin_try(|a: i64, b: i64| {
-                    if b == 0 {
-                        Err(Trap::IntegerDivideByZero)
-                    } else if a == i64::MIN && b == -1 {
-                        Err(Trap::IntegerOverflow)
-                    } else {
-                        Ok(a.wrapping_div(b))
-                    }
-                })?,
-                Instr::I64DivU => self.bin_try(|a: i64, b: i64| {
+                Instr::I64Eqz => un!(|a: i64| a == 0),
+                Instr::I64Eq => bin!(|a: i64, b: i64| a == b),
+                Instr::I64Ne => bin!(|a: i64, b: i64| a != b),
+                Instr::I64LtS => bin!(|a: i64, b: i64| a < b),
+                Instr::I64LtU => bin!(|a: i64, b: i64| (a as u64) < (b as u64)),
+                Instr::I64GtS => bin!(|a: i64, b: i64| a > b),
+                Instr::I64GtU => bin!(|a: i64, b: i64| (a as u64) > (b as u64)),
+                Instr::I64LeS => bin!(|a: i64, b: i64| a <= b),
+                Instr::I64LeU => bin!(|a: i64, b: i64| (a as u64) <= (b as u64)),
+                Instr::I64GeS => bin!(|a: i64, b: i64| a >= b),
+                Instr::I64GeU => bin!(|a: i64, b: i64| (a as u64) >= (b as u64)),
+                Instr::I64Clz => un!(|a: i64| a.leading_zeros() as i64),
+                Instr::I64Ctz => un!(|a: i64| a.trailing_zeros() as i64),
+                Instr::I64Popcnt => un!(|a: i64| a.count_ones() as i64),
+                Instr::I64Add => bin!(|a: i64, b: i64| a.wrapping_add(b)),
+                Instr::I64Sub => bin!(|a: i64, b: i64| a.wrapping_sub(b)),
+                Instr::I64Mul => bin!(|a: i64, b: i64| a.wrapping_mul(b)),
+                Instr::I64DivS => bin_try!(i64_div_s),
+                Instr::I64DivU => bin_try!(|a: i64, b: i64| {
                     (a as u64)
                         .checked_div(b as u64)
                         .map(|v| v as i64)
                         .ok_or(Trap::IntegerDivideByZero)
-                })?,
-                Instr::I64RemS => self.bin_try(|a: i64, b: i64| {
+                }),
+                Instr::I64RemS => bin_try!(|a: i64, b: i64| {
                     if b == 0 {
                         Err(Trap::IntegerDivideByZero)
                     } else {
                         Ok(a.wrapping_rem(b))
                     }
-                })?,
-                Instr::I64RemU => self.bin_try(|a: i64, b: i64| {
+                }),
+                Instr::I64RemU => bin_try!(|a: i64, b: i64| {
                     (a as u64)
                         .checked_rem(b as u64)
                         .map(|v| v as i64)
                         .ok_or(Trap::IntegerDivideByZero)
-                })?,
-                Instr::I64And => self.bin(|a: i64, b: i64| a & b)?,
-                Instr::I64Or => self.bin(|a: i64, b: i64| a | b)?,
-                Instr::I64Xor => self.bin(|a: i64, b: i64| a ^ b)?,
-                Instr::I64Shl => self.bin(|a: i64, b: i64| a.wrapping_shl(b as u32))?,
-                Instr::I64ShrS => self.bin(|a: i64, b: i64| a.wrapping_shr(b as u32))?,
+                }),
+                Instr::I64And => bin!(|a: i64, b: i64| a & b),
+                Instr::I64Or => bin!(|a: i64, b: i64| a | b),
+                Instr::I64Xor => bin!(|a: i64, b: i64| a ^ b),
+                Instr::I64Shl => bin!(|a: i64, b: i64| a.wrapping_shl(b as u32)),
+                Instr::I64ShrS => bin!(|a: i64, b: i64| a.wrapping_shr(b as u32)),
                 Instr::I64ShrU => {
-                    self.bin(|a: i64, b: i64| (a as u64).wrapping_shr(b as u32) as i64)?
+                    bin!(|a: i64, b: i64| (a as u64).wrapping_shr(b as u32) as i64)
                 }
-                Instr::I64Rotl => self.bin(|a: i64, b: i64| a.rotate_left(b as u32 & 63))?,
-                Instr::I64Rotr => self.bin(|a: i64, b: i64| a.rotate_right(b as u32 & 63))?,
+                Instr::I64Rotl => bin!(|a: i64, b: i64| a.rotate_left(b as u32 & 63)),
+                Instr::I64Rotr => bin!(|a: i64, b: i64| a.rotate_right(b as u32 & 63)),
 
                 // ---- f32 ----------------------------------------------
-                Instr::F32Eq => self.bin(|a: f32, b: f32| a == b)?,
-                Instr::F32Ne => self.bin(|a: f32, b: f32| a != b)?,
-                Instr::F32Lt => self.bin(|a: f32, b: f32| a < b)?,
-                Instr::F32Gt => self.bin(|a: f32, b: f32| a > b)?,
-                Instr::F32Le => self.bin(|a: f32, b: f32| a <= b)?,
-                Instr::F32Ge => self.bin(|a: f32, b: f32| a >= b)?,
-                Instr::F32Abs => self.un(f32_abs)?,
-                Instr::F32Neg => self.un(f32_neg)?,
-                Instr::F32Ceil => self.un(|a: f32| round_f32(a, libm::ceilf))?,
-                Instr::F32Floor => self.un(|a: f32| round_f32(a, libm::floorf))?,
-                Instr::F32Trunc => self.un(|a: f32| round_f32(a, libm::truncf))?,
-                Instr::F32Nearest => self.un(|a: f32| round_f32(a, libm::rintf))?,
-                Instr::F32Sqrt => self.un(f32_sqrt)?,
-                Instr::F32Add => self.bin(|a: f32, b: f32| a + b)?,
-                Instr::F32Sub => self.bin(|a: f32, b: f32| a - b)?,
-                Instr::F32Mul => self.bin(|a: f32, b: f32| a * b)?,
-                Instr::F32Div => self.bin(|a: f32, b: f32| a / b)?,
-                Instr::F32Min => self.bin(f32_min)?,
-                Instr::F32Max => self.bin(f32_max)?,
-                Instr::F32Copysign => self.bin(f32_copysign)?,
+                Instr::F32Eq => bin!(|a: f32, b: f32| a == b),
+                Instr::F32Ne => bin!(|a: f32, b: f32| a != b),
+                Instr::F32Lt => bin!(|a: f32, b: f32| a < b),
+                Instr::F32Gt => bin!(|a: f32, b: f32| a > b),
+                Instr::F32Le => bin!(|a: f32, b: f32| a <= b),
+                Instr::F32Ge => bin!(|a: f32, b: f32| a >= b),
+                Instr::F32Abs => un!(f32_abs),
+                Instr::F32Neg => un!(f32_neg),
+                Instr::F32Ceil => un!(|a: f32| round_f32(a, libm::ceilf)),
+                Instr::F32Floor => un!(|a: f32| round_f32(a, libm::floorf)),
+                Instr::F32Trunc => un!(|a: f32| round_f32(a, libm::truncf)),
+                Instr::F32Nearest => un!(|a: f32| round_f32(a, libm::rintf)),
+                Instr::F32Sqrt => un!(f32_sqrt),
+                Instr::F32Add => bin!(|a: f32, b: f32| a + b),
+                Instr::F32Sub => bin!(|a: f32, b: f32| a - b),
+                Instr::F32Mul => bin!(|a: f32, b: f32| a * b),
+                Instr::F32Div => bin!(|a: f32, b: f32| a / b),
+                Instr::F32Min => bin!(f32_min),
+                Instr::F32Max => bin!(f32_max),
+                Instr::F32Copysign => bin!(f32_copysign),
 
                 // ---- f64 ----------------------------------------------
-                Instr::F64Eq => self.bin(|a: f64, b: f64| a == b)?,
-                Instr::F64Ne => self.bin(|a: f64, b: f64| a != b)?,
-                Instr::F64Lt => self.bin(|a: f64, b: f64| a < b)?,
-                Instr::F64Gt => self.bin(|a: f64, b: f64| a > b)?,
-                Instr::F64Le => self.bin(|a: f64, b: f64| a <= b)?,
-                Instr::F64Ge => self.bin(|a: f64, b: f64| a >= b)?,
-                Instr::F64Abs => self.un(f64_abs)?,
-                Instr::F64Neg => self.un(f64_neg)?,
-                Instr::F64Ceil => self.un(|a: f64| round_f64(a, libm::ceil))?,
-                Instr::F64Floor => self.un(|a: f64| round_f64(a, libm::floor))?,
-                Instr::F64Trunc => self.un(|a: f64| round_f64(a, libm::trunc))?,
-                Instr::F64Nearest => self.un(|a: f64| round_f64(a, libm::rint))?,
-                Instr::F64Sqrt => self.un(f64_sqrt)?,
-                Instr::F64Add => self.bin(|a: f64, b: f64| a + b)?,
-                Instr::F64Sub => self.bin(|a: f64, b: f64| a - b)?,
-                Instr::F64Mul => self.bin(|a: f64, b: f64| a * b)?,
-                Instr::F64Div => self.bin(|a: f64, b: f64| a / b)?,
-                Instr::F64Min => self.bin(f64_min)?,
-                Instr::F64Max => self.bin(f64_max)?,
-                Instr::F64Copysign => self.bin(f64_copysign)?,
+                Instr::F64Eq => bin!(|a: f64, b: f64| a == b),
+                Instr::F64Ne => bin!(|a: f64, b: f64| a != b),
+                Instr::F64Lt => bin!(|a: f64, b: f64| a < b),
+                Instr::F64Gt => bin!(|a: f64, b: f64| a > b),
+                Instr::F64Le => bin!(|a: f64, b: f64| a <= b),
+                Instr::F64Ge => bin!(|a: f64, b: f64| a >= b),
+                Instr::F64Abs => un!(f64_abs),
+                Instr::F64Neg => un!(f64_neg),
+                Instr::F64Ceil => un!(|a: f64| round_f64(a, libm::ceil)),
+                Instr::F64Floor => un!(|a: f64| round_f64(a, libm::floor)),
+                Instr::F64Trunc => un!(|a: f64| round_f64(a, libm::trunc)),
+                Instr::F64Nearest => un!(|a: f64| round_f64(a, libm::rint)),
+                Instr::F64Sqrt => un!(f64_sqrt),
+                Instr::F64Add => bin!(|a: f64, b: f64| a + b),
+                Instr::F64Sub => bin!(|a: f64, b: f64| a - b),
+                Instr::F64Mul => bin!(|a: f64, b: f64| a * b),
+                Instr::F64Div => bin!(|a: f64, b: f64| a / b),
+                Instr::F64Min => bin!(f64_min),
+                Instr::F64Max => bin!(f64_max),
+                Instr::F64Copysign => bin!(f64_copysign),
 
                 // ---- conversions --------------------------------------
-                Instr::I32WrapI64 => self.un(|a: i64| a as i32)?,
-                Instr::I32TruncF32S => self.un_try(i32_trunc_f32_s)?,
-                Instr::I32TruncF32U => {
-                    self.un_try(|a: f32| i32_trunc_f32_u(a).map(|v| v as i32))?
-                }
-                Instr::I32TruncF64S => self.un_try(i32_trunc_f64_s)?,
-                Instr::I32TruncF64U => {
-                    self.un_try(|a: f64| i32_trunc_f64_u(a).map(|v| v as i32))?
-                }
-                Instr::I64ExtendI32S => self.un(|a: i32| a as i64)?,
-                Instr::I64ExtendI32U => self.un(|a: i32| a as u32 as i64)?,
-                Instr::I64TruncF32S => self.un_try(i64_trunc_f32_s)?,
-                Instr::I64TruncF32U => {
-                    self.un_try(|a: f32| i64_trunc_f32_u(a).map(|v| v as i64))?
-                }
-                Instr::I64TruncF64S => self.un_try(i64_trunc_f64_s)?,
-                Instr::I64TruncF64U => {
-                    self.un_try(|a: f64| i64_trunc_f64_u(a).map(|v| v as i64))?
-                }
-                Instr::F32ConvertI32S => self.un(|a: i32| a as f32)?,
-                Instr::F32ConvertI32U => self.un(|a: i32| a as u32 as f32)?,
-                Instr::F32ConvertI64S => self.un(|a: i64| a as f32)?,
-                Instr::F32ConvertI64U => self.un(|a: i64| a as u64 as f32)?,
-                Instr::F32DemoteF64 => self.un(f32_demote)?,
-                Instr::F64ConvertI32S => self.un(|a: i32| a as f64)?,
-                Instr::F64ConvertI32U => self.un(|a: i32| a as u32 as f64)?,
-                Instr::F64ConvertI64S => self.un(|a: i64| a as f64)?,
-                Instr::F64ConvertI64U => self.un(|a: i64| a as u64 as f64)?,
-                Instr::F64PromoteF32 => self.un(f64_promote)?,
-                Instr::I32ReinterpretF32 => self.un(|a: f32| a.to_bits() as i32)?,
-                Instr::I64ReinterpretF64 => self.un(|a: f64| a.to_bits() as i64)?,
-                Instr::F32ReinterpretI32 => self.un(|a: i32| f32::from_bits(a as u32))?,
-                Instr::F64ReinterpretI64 => self.un(|a: i64| f64::from_bits(a as u64))?,
+                Instr::I32WrapI64 => un!(|a: i64| a as i32),
+                Instr::I32TruncF32S => un_try!(i32_trunc_f32_s),
+                Instr::I32TruncF32U => un_try!(|a: f32| i32_trunc_f32_u(a).map(|v| v as i32)),
+                Instr::I32TruncF64S => un_try!(i32_trunc_f64_s),
+                Instr::I32TruncF64U => un_try!(|a: f64| i32_trunc_f64_u(a).map(|v| v as i32)),
+                Instr::I64ExtendI32S => un!(|a: i32| a as i64),
+                Instr::I64ExtendI32U => un!(|a: i32| a as u32 as i64),
+                Instr::I64TruncF32S => un_try!(i64_trunc_f32_s),
+                Instr::I64TruncF32U => un_try!(|a: f32| i64_trunc_f32_u(a).map(|v| v as i64)),
+                Instr::I64TruncF64S => un_try!(i64_trunc_f64_s),
+                Instr::I64TruncF64U => un_try!(|a: f64| i64_trunc_f64_u(a).map(|v| v as i64)),
+                Instr::F32ConvertI32S => un!(|a: i32| a as f32),
+                Instr::F32ConvertI32U => un!(|a: i32| a as u32 as f32),
+                Instr::F32ConvertI64S => un!(|a: i64| a as f32),
+                Instr::F32ConvertI64U => un!(|a: i64| a as u64 as f32),
+                Instr::F32DemoteF64 => un!(f32_demote),
+                Instr::F64ConvertI32S => un!(|a: i32| a as f64),
+                Instr::F64ConvertI32U => un!(|a: i32| a as u32 as f64),
+                Instr::F64ConvertI64S => un!(|a: i64| a as f64),
+                Instr::F64ConvertI64U => un!(|a: i64| a as u64 as f64),
+                Instr::F64PromoteF32 => un!(f64_promote),
+                Instr::I32ReinterpretF32 => un!(|a: f32| a.to_bits() as i32),
+                Instr::I64ReinterpretF64 => un!(|a: f64| a.to_bits() as i64),
+                Instr::F32ReinterpretI32 => un!(|a: i32| f32::from_bits(a as u32)),
+                Instr::F64ReinterpretI64 => un!(|a: i64| f64::from_bits(a as u64)),
 
                 // ---- sign extension -----------------------------------
-                Instr::I32Extend8S => self.un(|a: i32| a as i8 as i32)?,
-                Instr::I32Extend16S => self.un(|a: i32| a as i16 as i32)?,
-                Instr::I64Extend8S => self.un(|a: i64| a as i8 as i64)?,
-                Instr::I64Extend16S => self.un(|a: i64| a as i16 as i64)?,
-                Instr::I64Extend32S => self.un(|a: i64| a as i32 as i64)?,
+                Instr::I32Extend8S => un!(|a: i32| a as i8 as i32),
+                Instr::I32Extend16S => un!(|a: i32| a as i16 as i32),
+                Instr::I64Extend8S => un!(|a: i64| a as i8 as i64),
+                Instr::I64Extend16S => un!(|a: i64| a as i16 as i64),
+                Instr::I64Extend32S => un!(|a: i64| a as i32 as i64),
 
                 // ---- saturating truncation (Rust `as` semantics) -------
-                Instr::I32TruncSatF32S => self.un(|a: f32| a as i32)?,
-                Instr::I32TruncSatF32U => self.un(|a: f32| a as u32 as i32)?,
-                Instr::I32TruncSatF64S => self.un(|a: f64| a as i32)?,
-                Instr::I32TruncSatF64U => self.un(|a: f64| a as u32 as i32)?,
-                Instr::I64TruncSatF32S => self.un(|a: f32| a as i64)?,
-                Instr::I64TruncSatF32U => self.un(|a: f32| a as u64 as i64)?,
-                Instr::I64TruncSatF64S => self.un(|a: f64| a as i64)?,
-                Instr::I64TruncSatF64U => self.un(|a: f64| a as u64 as i64)?,
+                Instr::I32TruncSatF32S => un!(|a: f32| a as i32),
+                Instr::I32TruncSatF32U => un!(|a: f32| a as u32 as i32),
+                Instr::I32TruncSatF64S => un!(|a: f64| a as i32),
+                Instr::I32TruncSatF64U => un!(|a: f64| a as u32 as i32),
+                Instr::I64TruncSatF32S => un!(|a: f32| a as i64),
+                Instr::I64TruncSatF32U => un!(|a: f32| a as u64 as i64),
+                Instr::I64TruncSatF64S => un!(|a: f64| a as i64),
+                Instr::I64TruncSatF64U => un!(|a: f64| a as u64 as i64),
             }
         }
     }
@@ -2208,6 +2767,8 @@ mod tests {
         ) -> Result<HostOutcome, Trap> {
             self.calls.push((func.0, args.to_vec()));
             ctx.memory
+                .try_borrow_mut()
+                .map_err(|_| Trap::Host)?
                 .write(0, &(self.calls.len() as u32).to_le_bytes())?;
             match func.0 {
                 0 => {
@@ -2620,13 +3181,14 @@ mod tests {
             &Limits::default(),
         );
         assert_eq!(r.err(), Some(Error::Link { import: 1 }));
-        // Non-function imports are unsupported in M1.
+        // The functions-only front end does not resolve other imports: a
+        // link error, like any import the resolver does not know.
         for imp in ["(table 1 funcref)", "(memory 1)", "(global i32)"] {
             let r = instantiate_with(
                 &alloc::format!(r#"(module (import "a" "b" {imp}))"#),
                 &Limits::default(),
             );
-            assert!(matches!(r, Err(Error::Unsupported { .. })), "{imp}: {r:?}");
+            assert_eq!(r.err(), Some(Error::Link { import: 0 }), "{imp}");
         }
         // Out-of-bounds active segments trap at instantiation.
         let r = instantiate_with(

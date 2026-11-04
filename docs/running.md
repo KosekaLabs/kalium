@@ -18,10 +18,11 @@ and exits QEMU through semihosting with the result as the exit code.
 | Command | What it does |
 | --- | --- |
 | `cargo xtask wasm` | Builds the SDK examples for `wasm32-unknown-unknown` and copies them to `target/wasm/<name>.wasm` in boot image order. |
-| `cargo xtask build` | `wasm`, then the kernel for `aarch64-unknown-none` (release) to `target/aarch64-unknown-none/release/kalium`. |
-| `cargo xtask run` | `build`, then boots the kernel in QEMU on the terminal. QEMU exits when `init` exits; `Ctrl-A X` quits early. |
-| `cargo xtask test` | Host tests (`cargo test` and the SDK's), `build`, boots QEMU with the console captured, checks the scenario lines and the exit code. |
+| `cargo xtask build` | `wasm`, then the kernel for `aarch64-unknown-none` (release) to `target/aarch64-unknown-none/release/kalium`. `--selftest` adds the `hal-selftest` feature (see [The HAL self-test](#the-hal-self-test)), `--boot-only` the `boot-only` feature. |
+| `cargo xtask run` | `build`, then boots the kernel in QEMU on the terminal. QEMU exits when `init` exits; `Ctrl-A X` quits early. Takes the same flags as `build`. |
+| `cargo xtask test` | Host tests (`cargo test`, the HAL's device tree reader tests and the SDK's), `selftest`, `build`, boots QEMU with the console captured, checks the scenario lines and the exit code. |
 | `cargo xtask boot-test` | HAL-only check: the kernel built with the `boot-only` feature takes ten timer ticks and exits 0. No Wasm is embedded. It overwrites `target/aarch64-unknown-none/release/kalium`; run `cargo xtask build` again for the full kernel. |
+| `cargo xtask selftest` | HAL hardening check: the kernel built with `boot-only` and `hal-selftest` runs the self-test against the memory map and the fault path, must print `kalium: selftest PASS`, then passes the boot test; once with the usual `-m 256M` and once with `-m 129M`, a RAM size that is not a multiple of 2 MiB. Overwrites the kernel binary like `boot-test`. |
 | `cargo xtask clippy` | `clippy -D warnings` on the host crates, the kernel and the SDK. |
 | `cargo xtask fmt-check` | `cargo fmt --check` on both workspaces. |
 
@@ -47,7 +48,8 @@ instance 1 after `ping` is gone.
 ```
 kalium: boot
 kalium: timer frequency 62500000 Hz
-kalium: entered at EL1, dtb at 0x0, heap 0x40200000..0x48000000 (126 MiB)
+kalium: entered at EL1, dtb at 0x40000000 (1048576 bytes), RAM 0x40000000..0x50000000 (256 MiB) from the device tree
+kalium: image 0x40200000..0x4035b000 (W^X: text RX, rodata RO, data/stacks RW, guards unmapped), heap 0x4035b000..0x50000000 (252 MiB)
 kalium: boot image: 8 modules
 kalium:   module 0: init (4258 bytes)
 kalium:   module 1: ping (1945 bytes)
@@ -57,7 +59,7 @@ kalium:   module 4: fair (310 bytes)
 kalium:   module 5: faulty (157 bytes)
 kalium:   module 6: park (215 bytes)
 kalium:   module 7: greedy (3782 bytes)
-kalium: instance limits: 252 pages, 65536 stack values, call depth 1024, 256 cap slots
+kalium: instance limits: 256 pages, 65536 stack values, call depth 1024, 256 cap slots
 kalium: created instance 0 (init)
 hello from init
 kalium: instance 0 (init) spawned instance 1 (ping, fair)
@@ -107,7 +109,18 @@ kalium: init exited 0
 QEMU's exit code is 0 when `init` exited 0 and every other instance had
 exited; otherwise 1. A kernel panic prints `kalium: panic at ...` and exits 1;
 a deadlock (every instance blocked, nothing for the timer to wake) prints
-`kalium: deadlock: ...` and exits 1.
+`kalium: deadlock: ...` and exits 1. A fault in kernel code itself (not a
+Wasm trap: a data or instruction abort in the interpreter or the HAL) prints
+`kalium: unhandled Synchronous exception (...)`, one line
+`kalium: kernel fault: <data|instruction> abort (<permission|translation|...>
+fault, level N[, read|write]) at FAR_EL1 = ..., ELR_EL1 = ...`, the stack
+pointers and the register file, and exits with code **2**; `xtask` names the
+meaning of a non-zero code in its failure message.
+
+The RAM size comes from the device tree QEMU installs at the start of RAM:
+`-m 512M` gives `RAM 0x40000000..0x60000000 (512 MiB)` and a 508 MiB heap.
+Without a device tree the kernel says so and assumes the linker script's
+128 MiB.
 
 The `kalium: instance 5 (rt) rt periods ...` line is the scheduler's own
 accounting: `met` counts periods in which the thread finished (slept) before
@@ -115,6 +128,74 @@ the period boundary, `budget-exhausted` periods in which it used its whole
 500 µs budget. The first periods after `spawn` are slow because QEMU's TCG
 translates the kernel's real-time paths on first use; the `rt` service's own
 `met` count is the one the test checks.
+
+## Kernel memory map
+
+The kernel is identity mapped with 4 KiB pages over its own image and 2 MiB
+blocks elsewhere, write-xor-execute throughout (`SCTLR_EL1.WXN` is set as
+well):
+
+| Range | Mapping |
+| --- | --- |
+| `0x0000_0000..0x4000_0000` | MMIO: device memory, read-write, never executable |
+| `0x4000_0000..0x4020_0000` | the device tree QEMU installs at the start of RAM: read-only, never executable |
+| `.text` (from `0x4020_0000`) | read-only, executable |
+| `.rodata` (incl. the boot image) | read-only, never executable |
+| `.data`, `.bss` | read-write, never executable |
+| 16 KiB guard | unmapped: a boot stack overflow faults here |
+| 1 MiB boot stack (`SP_EL0`) | read-write, never executable |
+| 16 KiB guard | unmapped: an exception stack overflow faults here |
+| 64 KiB exception stack (`SP_EL1`) | read-write, never executable |
+| heap, up to the end of RAM | read-write, never executable, 2 MiB blocks; the last block, if RAM does not end on a 2 MiB boundary, with 4 KiB pages up to the end of RAM |
+| above RAM | unmapped: a stray access is a translation fault (the mapping ends exactly at the end of RAM, rounded down to 4 KiB, so nothing without backing memory is mapped) |
+
+The kernel runs on `SP_EL0`; every exception switches to `SP_EL1`, so a
+kernel stack overflow is reported from an intact stack instead of
+double-faulting. The vectors save and restore the FP/SIMD registers
+(`q0`–`q31`, `FPCR`, `FPSR`) with the general-purpose ones, so an interrupt
+cannot clobber the interpreter's floating-point state; the round trip costs
+about 70 counter ticks (1.1 µs) under QEMU, about 10 ticks more than without
+the FP save.
+
+The image is loaded at `0x4020_0000`, 2 MiB above the start of RAM, because
+QEMU `-kernel` with an ELF image installs the device tree at the start of RAM
+only if its 1 MiB buffer fits below the lowest loaded segment (and it does
+not pass the address in `x0`, which stays 0; the HAL checks `x0` first and
+then the start of RAM).
+
+## The HAL self-test
+
+`cargo xtask selftest` boots a `boot-only` kernel with the `hal-selftest`
+feature. Before the tick loop it checks the mapping of every region with the
+`AT S1E1R/W` instructions, then provokes each kind of fault on purpose and
+verifies the exception handler's decoding: a write to `.rodata` and to
+`.text`, a jump into `.data`, into the stack and into the heap, a read at
+the end of RAM (the first unmapped byte: the mapping ends exactly where RAM
+does), and a kernel stack overflow by recursion. The handler reports what it
+caught (`kalium: selftest: handler caught ...`) and returns to the test
+harness instead of exiting. Finally it times the exception round trip. The
+whole run happens twice, with `-m 256M` and with `-m 129M`: with 129 MiB
+the last 2 MiB block of RAM is only half there, so its mapping with 4 KiB
+pages and the translation fault at `0x48100000` are checked as well.
+Abbreviated output:
+
+```
+kalium: selftest: at: .rodata: ok (0x40207000: read ok, write refused, normal write-back)
+kalium: selftest: at: stack guard: ok (0x40215000: read refused (translation fault), write refused, unmapped)
+kalium: selftest: mapping ends at RAM end: ok (RAM ends at 0x50000000, mapped to 0x50000000, heap to 0x50000000)
+kalium: selftest: at: past RAM: ok (0x50000000: read refused (translation fault), write refused, unmapped)
+kalium: selftest: at: uart: ok (0x9000000: read ok, write ok, device-nGnRnE)
+kalium: selftest: handler caught data abort (permission fault, level 3, write) at FAR_EL1 = 0x40207bf0, ELR_EL1 = 0x40205158
+kalium: selftest: write .rodata: ok (data abort (permission fault, level 3, write) at FAR_EL1 = 0x40207bf0, ELR_EL1 = 0x40205158)
+kalium: selftest: handler caught instruction abort (permission fault, level 3) at FAR_EL1 = 0x40209000, ELR_EL1 = 0x40209000
+kalium: selftest: exec .data: ok (instruction abort (permission fault, level 3) at FAR_EL1 = 0x40209000, ELR_EL1 = 0x40209000)
+kalium: selftest: handler caught data abort (translation fault, level 3, write) at FAR_EL1 = 0x40218f48, ELR_EL1 = 0x4020620c
+kalium: selftest: stack overflow: ok (data abort (translation fault, level 3, write) at FAR_EL1 = 0x40218f48, ELR_EL1 = 0x4020620c, SP_EL0 = 0x40218f40 in the guard, reported from the exception stack)
+kalium: selftest: stack restored: ok (SP = 0x40318dd0)
+kalium: selftest: exception round trip: ok (71.94 ticks (1151 ns) per svc, averaged over 20000 (62500000 Hz counter))
+kalium: selftest PASS: 22 passed, 0 failed
+kalium: 10 ticks
+```
 
 ## How the kernel runs the scenario
 

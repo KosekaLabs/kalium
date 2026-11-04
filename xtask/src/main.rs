@@ -1,4 +1,4 @@
-//! Developer tasks: `cargo xtask build|run|boot-test|wasm|test|clippy|fmt-check`.
+//! Developer tasks: `cargo xtask build|run|boot-test|selftest|wasm|test|clippy|fmt-check`.
 //! See docs/prototype-plan.md and docs/running.md.
 //!
 //! Only `std` is used here. Every subcommand is a function returning the
@@ -19,9 +19,22 @@ const QEMU: &str = "qemu-system-aarch64";
 const QEMU_TIMEOUT_SECS: u64 = 120;
 /// Exit code reported when QEMU is killed after the timeout (like coreutils).
 const EXIT_TIMEOUT: i32 = 124;
+/// The kernel's exit code for an unhandled exception in kernel code
+/// (`kalium_hal::exceptions::KERNEL_FAULT_EXIT_CODE`); panics and scenario
+/// failures exit with 1.
+const EXIT_KERNEL_FAULT: i32 = 2;
 
 /// The line the HAL boot test (`--features boot-only`) prints before exiting.
 const BOOT_TEST_MARKER: &str = "kalium: 10 ticks";
+/// The summary line the HAL self-test (`--features hal-selftest`) prints.
+const SELFTEST_PASS_MARKER: &str = "kalium: selftest PASS";
+/// QEMU's RAM size (`-m`) from the plan.
+const QEMU_MEMORY: &str = "256M";
+/// A RAM size that is not a multiple of 2 MiB, for the self-test's second
+/// run: the identity map then has to end inside a 2 MiB block (page-mapped
+/// tail), and the "past RAM" checks probe the real end of RAM rather than a
+/// block boundary.
+const SELFTEST_ODD_MEMORY: &str = "129M";
 
 /// The SDK example modules in boot-image order (`init=0, ping=1, pong=2,
 /// rt=3, fair=4, faulty=5, park=6, greedy=7`); the kernel's `build.rs`
@@ -48,15 +61,16 @@ fn main() {
     };
     let root = workspace_root();
     let code = match cmd {
-        "build" => match parse_boot_only(rest, "build") {
-            Some(boot_only) => build(&root, boot_only),
+        "build" => match parse_flags(rest, "build") {
+            Some(flags) => build(&root, flags),
             None => 2,
         },
-        "run" => match parse_boot_only(rest, "run") {
-            Some(boot_only) => run(&root, boot_only),
+        "run" => match parse_flags(rest, "run") {
+            Some(flags) => run(&root, flags),
             None => 2,
         },
         "boot-test" => boot_test(&root),
+        "selftest" => selftest(&root),
         "wasm" => wasm(&root),
         "test" => test(&root),
         "clippy" => clippy(&root),
@@ -80,12 +94,19 @@ fn usage() {
          \n\
          commands:\n\
          \x20 wasm                   build the SDK example modules into target/wasm/\n\
-         \x20 build [--boot-only]    wasm, then the kernel for {KERNEL_TARGET} (release)\n\
-         \x20 run [--boot-only]      build, then boot the kernel in QEMU\n\
+         \x20 build [--boot-only] [--selftest]\n\
+         \x20                        wasm, then the kernel for {KERNEL_TARGET} (release);\n\
+         \x20                        --selftest adds the HAL hardening self-test\n\
+         \x20 run [--boot-only] [--selftest]\n\
+         \x20                        build, then boot the kernel in QEMU\n\
          \x20 boot-test              HAL-only check: build with `boot-only`, boot, require\n\
          \x20                        `{BOOT_TEST_MARKER}` and exit code 0\n\
-         \x20 test                   host tests, wasm, build, boot in QEMU and check the\n\
-         \x20                        M1 scenario output and exit code\n\
+         \x20 selftest               HAL hardening check: build with `boot-only` and\n\
+         \x20                        `hal-selftest`, boot with -m {QEMU_MEMORY} and again with\n\
+         \x20                        -m {SELFTEST_ODD_MEMORY} (RAM not a multiple of 2 MiB), require\n\
+         \x20                        `{SELFTEST_PASS_MARKER}`, `{BOOT_TEST_MARKER}` and exit code 0\n\
+         \x20 test                   host tests, selftest, wasm, build, boot in QEMU and\n\
+         \x20                        check the M1 scenario output and exit code\n\
          \x20 clippy                 clippy with -D warnings on the host crates, the kernel\n\
          \x20                        and the SDK\n\
          \x20 fmt-check              cargo fmt --check on both workspaces\n\
@@ -94,19 +115,54 @@ fn usage() {
     );
 }
 
-/// Parses the optional `--boot-only` flag; `None` on a bad argument.
-fn parse_boot_only(args: &[String], cmd: &str) -> Option<bool> {
-    let mut boot_only = false;
+/// Which kernel to build: the cargo features of `kalium-kernel`.
+#[derive(Clone, Copy, Default)]
+struct BuildFlags {
+    /// `boot-only`: HAL boot test, no boot image embedded.
+    boot_only: bool,
+    /// `hal-selftest`: run the HAL hardening self-test after boot.
+    selftest: bool,
+}
+
+impl BuildFlags {
+    fn features(self) -> Vec<&'static str> {
+        let mut f = Vec::new();
+        if self.boot_only {
+            f.push("boot-only");
+        }
+        if self.selftest {
+            f.push("hal-selftest");
+        }
+        f
+    }
+}
+
+/// Parses the optional `--boot-only` and `--selftest` flags; `None` on a bad
+/// argument.
+fn parse_flags(args: &[String], cmd: &str) -> Option<BuildFlags> {
+    let mut flags = BuildFlags::default();
     for arg in args {
         match arg.as_str() {
-            "--boot-only" => boot_only = true,
+            "--boot-only" => flags.boot_only = true,
+            "--selftest" => flags.selftest = true,
             other => {
                 eprintln!("xtask: unknown argument to `{cmd}`: `{other}`");
                 return None;
             }
         }
     }
-    Some(boot_only)
+    Some(flags)
+}
+
+/// What a QEMU exit code means, for failure messages.
+fn describe_exit(code: Option<i32>) -> &'static str {
+    match code {
+        Some(1) => " (scenario failure or kernel panic)",
+        Some(EXIT_KERNEL_FAULT) => {
+            " (kernel fault: unhandled exception in kernel code, see the `kalium: kernel fault:` report)"
+        }
+        _ => "",
+    }
 }
 
 /// The workspace root: the parent of this crate's directory.
@@ -207,8 +263,8 @@ fn wasm_present(root: &Path) -> bool {
 
 /// `cargo build -p kalium-kernel --target aarch64-unknown-none --release`,
 /// after `wasm` unless `boot_only` (which embeds no boot image).
-fn build(root: &Path, boot_only: bool) -> i32 {
-    if !boot_only {
+fn build(root: &Path, flags: BuildFlags) -> i32 {
+    if !flags.boot_only {
         let code = wasm(root);
         if code != 0 {
             return code;
@@ -222,21 +278,27 @@ fn build(root: &Path, boot_only: bool) -> i32 {
         KERNEL_TARGET,
         "--release",
     ];
-    if boot_only {
-        args.extend(["--features", "boot-only"]);
+    let features = flags.features().join(",");
+    if !features.is_empty() {
+        args.extend(["--features", &features]);
     }
     run_cargo(
         root,
         &format!(
             "building kernel for {KERNEL_TARGET}{}",
-            if boot_only { " (boot-only)" } else { "" }
+            if features.is_empty() {
+                String::new()
+            } else {
+                format!(" ({features})")
+            }
         ),
         &args,
     )
 }
 
-/// The QEMU command line from the plan.
-fn qemu_command(root: &Path) -> Command {
+/// The QEMU command line from the plan, with `memory` as the RAM size
+/// ([`QEMU_MEMORY`] except for the self-test's second run).
+fn qemu_command(root: &Path, memory: &str) -> Command {
     let mut cmd = Command::new(QEMU);
     cmd.current_dir(root).args([
         "-M",
@@ -244,7 +306,7 @@ fn qemu_command(root: &Path) -> Command {
         "-cpu",
         "cortex-a72",
         "-m",
-        "256M",
+        memory,
         "-nographic",
         "-semihosting-config",
         "enable=on,target=native",
@@ -273,14 +335,14 @@ fn wait_with_timeout(child: &mut Child, timeout: Duration) -> io::Result<Option<
 
 /// Build, then run QEMU interactively (the console is the terminal; the
 /// kernel exits QEMU by itself when `init` exits; `Ctrl-A X` quits early).
-fn run(root: &Path, boot_only: bool) -> i32 {
-    let code = build(root, boot_only);
+fn run(root: &Path, flags: BuildFlags) -> i32 {
+    let code = build(root, flags);
     if code != 0 {
         return code;
     }
     let timeout = qemu_timeout();
     eprintln!("xtask: starting QEMU (timeout {} s)", timeout.as_secs());
-    let mut child = match qemu_command(root).spawn() {
+    let mut child = match qemu_command(root, QEMU_MEMORY).spawn() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("xtask: failed to start {QEMU}: {e}");
@@ -320,15 +382,16 @@ struct Captured {
     stdout: String,
 }
 
-/// Boots the already built kernel in QEMU with the console captured, prints
-/// the console, and returns the output and exit status (`None` on timeout).
-fn boot_captured(root: &Path, label: &str) -> Result<Captured, i32> {
+/// Boots the already built kernel in QEMU with `memory` of RAM and the
+/// console captured, prints the console, and returns the output and exit
+/// status (`None` on timeout).
+fn boot_captured(root: &Path, label: &str, memory: &str) -> Result<Captured, i32> {
     let timeout = qemu_timeout();
     eprintln!(
-        "xtask: {label}: starting QEMU (timeout {} s)",
+        "xtask: {label}: starting QEMU with -m {memory} (timeout {} s)",
         timeout.as_secs()
     );
-    let mut child = match qemu_command(root)
+    let mut child = match qemu_command(root, memory)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -391,34 +454,56 @@ fn report(label: &str, failures: &[String]) -> i32 {
     }
 }
 
-/// HAL-only check: build with `boot-only`, boot in QEMU, require the tick
-/// marker and exit code 0.
-fn boot_test(root: &Path) -> i32 {
-    let code = build(root, true);
+/// The failure, if any, in how a captured QEMU run ended.
+fn check_exit(captured: &Captured) -> Option<String> {
+    match captured.status {
+        None => Some(format!(
+            "QEMU timed out after {} s",
+            qemu_timeout().as_secs()
+        )),
+        Some(s) if s.code() != Some(0) => Some(format!(
+            "QEMU exited with {s}{}, expected code 0",
+            describe_exit(s.code())
+        )),
+        Some(_) => None,
+    }
+}
+
+/// Builds the kernel selected by `flags` (`boot_only` set), boots it with
+/// the plan's RAM size and requires the tick marker, exit code 0 and every
+/// line in `markers`.
+fn boot_only_check(root: &Path, label: &str, flags: BuildFlags, markers: &[&str]) -> i32 {
+    let code = build(root, flags);
     if code != 0 {
         return code;
     }
-    let captured = match boot_captured(root, "boot-test") {
+    boot_only_check_built(root, label, QEMU_MEMORY, markers)
+}
+
+/// Boots the already built `boot-only` kernel with `memory` of RAM and
+/// requires the tick marker, exit code 0 and every line in `markers`.
+fn boot_only_check_built(root: &Path, label: &str, memory: &str, markers: &[&str]) -> i32 {
+    let captured = match boot_captured(root, label, memory) {
         Ok(c) => c,
         Err(code) => return code,
     };
     let mut failures = Vec::new();
-    match captured.status {
-        None => failures.push(format!(
-            "QEMU timed out after {} s",
-            qemu_timeout().as_secs()
-        )),
-        Some(s) if s.code() != Some(0) => {
-            failures.push(format!("QEMU exited with {s}, expected code 0"))
+    failures.extend(check_exit(&captured));
+    for marker in [BOOT_TEST_MARKER].iter().chain(markers) {
+        if !captured
+            .stdout
+            .lines()
+            .any(|l| l.trim_end().starts_with(marker))
+        {
+            failures.push(format!("console output does not contain `{marker}`"));
         }
-        Some(_) => {}
     }
-    if !captured.stdout.contains(BOOT_TEST_MARKER) {
-        failures.push(format!(
-            "console output does not contain `{BOOT_TEST_MARKER}`"
-        ));
+    for bad in ["kalium: panic", "kalium: unhandled", ": FAIL ("] {
+        if let Some(l) = captured.stdout.lines().find(|l| l.contains(bad)) {
+            failures.push(format!("unexpected console line: `{}`", l.trim_end()));
+        }
     }
-    let code = report("boot-test", &failures);
+    let code = report(label, &failures);
     if captured.status.is_none() {
         EXIT_TIMEOUT
     } else {
@@ -426,12 +511,63 @@ fn boot_test(root: &Path) -> i32 {
     }
 }
 
-/// The full M1 check: host tests, wasm, kernel, QEMU, scenario output.
+/// HAL-only check: build with `boot-only`, boot in QEMU, require the tick
+/// marker and exit code 0.
+fn boot_test(root: &Path) -> i32 {
+    boot_only_check(
+        root,
+        "boot-test",
+        BuildFlags {
+            boot_only: true,
+            selftest: false,
+        },
+        &[],
+    )
+}
+
+/// HAL hardening check: `boot-only` plus `hal-selftest`; the self-test must
+/// print `PASS` with no failed case, then the boot test must still pass.
+/// Run twice: with the plan's RAM size and with [`SELFTEST_ODD_MEMORY`], so
+/// that the mapping of a partial last 2 MiB block of RAM (and the fault on
+/// the first byte past it) is checked as well.
+fn selftest(root: &Path) -> i32 {
+    let code = build(
+        root,
+        BuildFlags {
+            boot_only: true,
+            selftest: true,
+        },
+    );
+    if code != 0 {
+        return code;
+    }
+    for (label, memory) in [
+        ("selftest", QEMU_MEMORY),
+        ("selftest (odd RAM size)", SELFTEST_ODD_MEMORY),
+    ] {
+        let code = boot_only_check_built(root, label, memory, &[SELFTEST_PASS_MARKER]);
+        if code != 0 {
+            return code;
+        }
+    }
+    0
+}
+
+/// The full M1 check: host tests, the HAL self-test, wasm, kernel, QEMU,
+/// scenario output.
 fn test(root: &Path) -> i32 {
     let code = run_cargo(
         root,
         "running host tests (workspace default members)",
         &["test"],
+    );
+    if code != 0 {
+        return code;
+    }
+    let code = run_cargo(
+        root,
+        "running HAL host tests (device tree reader)",
+        &["test", "-p", "kalium-hal"],
     );
     if code != 0 {
         return code;
@@ -452,25 +588,22 @@ fn test(root: &Path) -> i32 {
     if code != 0 {
         return code;
     }
-    let code = build(root, false);
+    // The self-test before the full build, so the binary left behind is the
+    // full kernel.
+    let code = selftest(root);
     if code != 0 {
         return code;
     }
-    let captured = match boot_captured(root, "test") {
+    let code = build(root, BuildFlags::default());
+    if code != 0 {
+        return code;
+    }
+    let captured = match boot_captured(root, "test", QEMU_MEMORY) {
         Ok(c) => c,
         Err(code) => return code,
     };
     let mut failures = Vec::new();
-    match captured.status {
-        None => failures.push(format!(
-            "QEMU timed out after {} s",
-            qemu_timeout().as_secs()
-        )),
-        Some(s) if s.code() != Some(0) => {
-            failures.push(format!("QEMU exited with {s}, expected code 0"))
-        }
-        Some(_) => {}
-    }
+    failures.extend(check_exit(&captured));
     failures.extend(check_scenario(&captured.stdout));
     let code = report("test", &failures);
     if captured.status.is_none() {
@@ -614,6 +747,7 @@ fn check_scenario(out: &str) -> Vec<String> {
         "kalium: deadlock",
         "still running",
         "kalium: unhandled",
+        "kalium: kernel fault",
     ] {
         if let Some(l) = lines.iter().find(|l| l.contains(bad)) {
             failures.push(format!("unexpected console line: `{l}`"));
@@ -776,6 +910,19 @@ mod tests {
         assert!(check_scenario(&late_ping)[0].contains("before"));
         let panicked = format!("{GOOD}kalium: panic at x: y\n");
         assert_eq!(check_scenario(&panicked).len(), 1);
+        let faulted = format!(
+            "{GOOD}kalium: unhandled Synchronous exception (CurrentElSp0)\n\
+             kalium: kernel fault: data abort (permission fault, level 3, write) at FAR_EL1 = 0x1, ELR_EL1 = 0x2\n"
+        );
+        assert_eq!(check_scenario(&faulted).len(), 2);
+    }
+
+    #[test]
+    fn exit_codes_are_described() {
+        assert_eq!(describe_exit(Some(0)), "");
+        assert!(describe_exit(Some(1)).contains("panic"));
+        assert!(describe_exit(Some(EXIT_KERNEL_FAULT)).contains("kernel fault"));
+        assert_eq!(describe_exit(None), "");
     }
 
     #[test]
