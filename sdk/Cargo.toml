@@ -11,10 +11,17 @@ license = "Apache-2.0"
 kalium-abi = { path = "../crates/kalium-abi" }
 kalium-sdk = { path = "kalium-sdk" }
 
+# The examples are built with `cargo xtask wasm`:
+#   cargo build --release --target wasm32-unknown-unknown --manifest-path sdk/Cargo.toml
+# Small code wins over fast code for the boot image; `strip` drops the
+# `name` custom section, which the kernel does not use.
 [profile.release]
 panic = "abort"
 opt-level = "s"
 lto = true
+codegen-units = 1
+debug = false
+strip = true
 
 [profile.dev]
 panic = "abort"

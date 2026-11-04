@@ -35,8 +35,7 @@ pub enum Error {
     /// An import could not be resolved at instantiation. `import` is the
     /// index into `Module::imports()`.
     Link { import: u32 },
-    /// `Execution::new` was asked for a function index that does not exist
-    /// or is an import.
+    /// `Execution::new` was asked for a function index that does not exist.
     NoSuchFunction { func: u32 },
     /// `Execution::new` was given arguments that do not match the function's
     /// parameter types.

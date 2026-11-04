@@ -129,9 +129,7 @@ impl Table {
     /// before anything is written.
     pub fn init(&mut self, dst: u32, src: &[Value], src_off: u32, len: u32) -> Result<(), Trap> {
         let s = src_off as usize;
-        let s_end = s
-            .checked_add(len as usize)
-            .ok_or(Trap::TableOutOfBounds)?;
+        let s_end = s.checked_add(len as usize).ok_or(Trap::TableOutOfBounds)?;
         if s_end > src.len() {
             return Err(Trap::TableOutOfBounds);
         }

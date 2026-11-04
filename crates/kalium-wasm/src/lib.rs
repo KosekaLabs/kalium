@@ -45,11 +45,11 @@ pub use exec::{ExecResult, Execution, Value};
 pub use instance::{Host, HostCtx, HostFuncId, HostOutcome, Instance, Limits};
 pub use instr::{BlockType, BrTable, ConstExpr, FuncBody, Instr, MemArg};
 pub use memory::Memory;
-pub use table::{Table, MAX_TABLE_ELEMENTS};
 pub use module::{
     Data, DataMode, ElemItems, ElemMode, Element, Export, ExportDesc, Global, Import, ImportDesc,
     Module,
 };
+pub use table::{Table, MAX_TABLE_ELEMENTS};
 pub use types::{
     FuncType, GlobalType, MemType, RefType, ResizableLimits, TableType, ValType, MAX_PAGES,
     PAGE_SIZE,

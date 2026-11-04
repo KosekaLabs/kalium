@@ -1,0 +1,3 @@
+# Host test / clippy runs of the SDK workspace build here; `cargo xtask wasm`
+# uses the root target/ directory.
+/target

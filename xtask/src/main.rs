@@ -5,6 +5,7 @@
 //! process exit code; `main` only dispatches.
 
 use std::env;
+use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{self, Child, Command, ExitStatus, Stdio};
@@ -35,7 +36,8 @@ fn main() {
         "build" => build(&root),
         "run" => run(&root, rest),
         "boot-test" => boot_test(&root),
-        "wasm" | "test" | "clippy" | "fmt-check" => not_implemented(cmd),
+        "wasm" => wasm(&root),
+        "test" | "clippy" | "fmt-check" => not_implemented(cmd),
         "help" | "-h" | "--help" => {
             usage();
             0
@@ -57,7 +59,7 @@ fn usage() {
          \x20 build                 build the kernel for {KERNEL_TARGET} (release)\n\
          \x20 run [-- --boot-only]  build, then boot the kernel in QEMU (60 s timeout)\n\
          \x20 boot-test             build, boot in QEMU, require `{BOOT_TEST_MARKER}` and exit 0\n\
-         \x20 wasm                  build the SDK example modules (not implemented)\n\
+         \x20 wasm                  build the SDK example modules into target/wasm/\n\
          \x20 test                  host tests, build, boot-test (not implemented)\n\
          \x20 clippy                lint the default members (not implemented)\n\
          \x20 fmt-check             check formatting (not implemented)"
@@ -83,6 +85,70 @@ fn cargo() -> Command {
 
 fn status_code(status: ExitStatus) -> i32 {
     status.code().unwrap_or(1)
+}
+
+/// The SDK example modules in boot-image order (`init=0, ping=1, pong=2,
+/// rt=3, fair=4, faulty=5`); the kernel's `build.rs` embeds
+/// `target/wasm/<name>.wasm` in this order.
+const WASM_MODULES: [&str; 6] = ["init", "ping", "pong", "rt", "fair", "faulty"];
+const WASM_TARGET: &str = "wasm32-unknown-unknown";
+/// Where the SDK workspace builds (kept apart from the kernel's target dir
+/// so the two workspaces never share a lock or a profile).
+const WASM_BUILD_DIR: &str = "target/wasm-build";
+/// Where the modules are copied for the kernel's `build.rs`.
+const WASM_OUT_DIR: &str = "target/wasm";
+
+/// `cargo build --release --target wasm32-unknown-unknown --manifest-path
+/// sdk/Cargo.toml --target-dir target/wasm-build`, then copy each example's
+/// `.wasm` to `target/wasm/<name>.wasm`.
+fn wasm(root: &Path) -> i32 {
+    eprintln!("xtask: building SDK examples for {WASM_TARGET}");
+    let status = cargo()
+        .current_dir(root)
+        .args([
+            "build",
+            "--release",
+            "--target",
+            WASM_TARGET,
+            "--manifest-path",
+            "sdk/Cargo.toml",
+            "--target-dir",
+            WASM_BUILD_DIR,
+        ])
+        .status();
+    match status {
+        Ok(s) if s.success() => {}
+        Ok(s) => {
+            eprintln!("xtask: SDK build failed");
+            return status_code(s);
+        }
+        Err(e) => {
+            eprintln!("xtask: failed to run cargo: {e}");
+            return 1;
+        }
+    }
+
+    let out_dir = root.join(WASM_OUT_DIR);
+    if let Err(e) = fs::create_dir_all(&out_dir) {
+        eprintln!("xtask: cannot create {}: {e}", out_dir.display());
+        return 1;
+    }
+    let built = root.join(WASM_BUILD_DIR).join(WASM_TARGET).join("release");
+    for (index, name) in WASM_MODULES.iter().enumerate() {
+        let src = built.join(format!("{name}.wasm"));
+        let dst = out_dir.join(format!("{name}.wasm"));
+        if let Err(e) = fs::copy(&src, &dst) {
+            eprintln!(
+                "xtask: cannot copy {} to {}: {e}",
+                src.display(),
+                dst.display()
+            );
+            return 1;
+        }
+        let size = fs::metadata(&dst).map(|m| m.len()).unwrap_or(0);
+        println!("module {index}: {} ({size} bytes)", dst.display());
+    }
+    0
 }
 
 /// `cargo build -p kalium-kernel --target aarch64-unknown-none --release`.

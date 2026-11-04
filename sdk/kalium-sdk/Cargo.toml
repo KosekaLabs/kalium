@@ -3,6 +3,11 @@ name = "kalium-sdk"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Safe wrappers over the Kalium host ABI for services built for wasm32-unknown-unknown"
+
+[lib]
+# Host tests build a plain rlib; services link it into a `cdylib`.
+test = true
 
 [dependencies]
 kalium-abi.workspace = true

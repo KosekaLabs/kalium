@@ -276,6 +276,9 @@ pub struct Execution {
     max_depth: usize,
     /// Reused buffer for host call results.
     host_results: Vec<Value>,
+    /// Set when the entry function is an import: the whole execution is one
+    /// host call with the arguments on the stack (and no frame).
+    entry_import: Option<u32>,
 }
 
 impl fmt::Debug for Execution {
@@ -473,9 +476,23 @@ macro_rules! trunc_trap {
     };
 }
 
-trunc_trap!(i32_trunc_f32_s, f32, i32, libm::truncf, -2147483904.0, 2147483648.0);
+trunc_trap!(
+    i32_trunc_f32_s,
+    f32,
+    i32,
+    libm::truncf,
+    -2147483904.0,
+    2147483648.0
+);
 trunc_trap!(i32_trunc_f32_u, f32, u32, libm::truncf, -1.0, 4294967296.0);
-trunc_trap!(i32_trunc_f64_s, f64, i32, libm::trunc, -2147483649.0, 2147483648.0);
+trunc_trap!(
+    i32_trunc_f64_s,
+    f64,
+    i32,
+    libm::trunc,
+    -2147483649.0,
+    2147483648.0
+);
 trunc_trap!(i32_trunc_f64_u, f64, u32, libm::trunc, -1.0, 4294967296.0);
 trunc_trap!(
     i64_trunc_f32_s,
@@ -531,15 +548,15 @@ fn block_arity(module: &Module, ty: BlockType) -> Result<(usize, usize), Trap> {
 
 impl Execution {
     /// Prepare a call of function `func` (function index space) with `args`.
-    /// Fails with `Error::NoSuchFunction` (unknown index or an import) or
+    /// Fails with `Error::NoSuchFunction` (unknown index) or
     /// `Error::ArgumentMismatch`.
+    ///
+    /// `func` may be an imported function (a module may export one, or use
+    /// one as its start function): the execution then consists of that one
+    /// host call, with the same `Block`/`Exit`/trap behaviour as a call from
+    /// Wasm code.
     pub fn new(inst: &Instance, func: u32, args: &[Value]) -> Result<Execution, Error> {
-        if inst.is_imported_func(func) {
-            return Err(Error::NoSuchFunction { func });
-        }
-        let ty = inst
-            .func_type(func)
-            .ok_or(Error::NoSuchFunction { func })?;
+        let ty = inst.func_type(func).ok_or(Error::NoSuchFunction { func })?;
         if args.len() != ty.params.len() || args.iter().zip(&ty.params).any(|(a, p)| a.ty() != *p) {
             return Err(Error::ArgumentMismatch);
         }
@@ -552,12 +569,18 @@ impl Execution {
             max_stack: limits.max_stack_values,
             max_depth: limits.max_call_depth,
             host_results: Vec::new(),
+            entry_import: None,
         };
         let setup = (|| {
             for &a in args {
                 exec.push(a)?;
             }
-            exec.push_frame(inst.module(), inst, func)
+            if inst.is_imported_func(func) {
+                exec.entry_import = Some(func);
+                Ok(())
+            } else {
+                exec.push_frame(inst.module(), inst, func)
+            }
         })();
         match setup {
             Ok(()) => Ok(exec),
@@ -604,7 +627,11 @@ impl Execution {
             return r.clone();
         }
         let module = inst.module().clone();
-        let result = match self.run_inner(&module, inst, host, fuel) {
+        let flow = match self.entry_import {
+            Some(f) => self.run_entry_import(&module, inst, host, f, fuel),
+            None => self.run_inner(&module, inst, host, fuel),
+        };
+        let result = match flow {
             Ok(Flow::OutOfFuel) => return ExecResult::OutOfFuel,
             Ok(Flow::Blocked) => return ExecResult::Blocked,
             Ok(Flow::Done) => ExecResult::Done(core::mem::take(&mut self.stack)),
@@ -616,6 +643,26 @@ impl Execution {
         self.labels = Vec::new();
         self.state = State::Finished(result.clone());
         result
+    }
+
+    /// An execution whose entry function is an import: one host call with
+    /// the arguments on the stack.
+    fn run_entry_import(
+        &mut self,
+        module: &Module,
+        inst: &mut Instance,
+        host: &mut dyn Host,
+        func: u32,
+        fuel: u64,
+    ) -> Result<Flow, Trap> {
+        if fuel == 0 {
+            return Ok(Flow::OutOfFuel);
+        }
+        Ok(match self.host_call(module, inst, host, func)? {
+            HostOutcome::Continue => Flow::Done,
+            HostOutcome::Block => Flow::Blocked,
+            HostOutcome::Exit(code) => Flow::Exited(code),
+        })
     }
 
     // ---- stack helpers --------------------------------------------------
@@ -738,11 +785,7 @@ impl Execution {
         if self.labels.len() >= self.max_stack {
             return Err(Trap::StackOverflow);
         }
-        let height = self
-            .stack
-            .len()
-            .checked_sub(nparams)
-            .ok_or(Trap::Invalid)?;
+        let height = self.stack.len().checked_sub(nparams).ok_or(Trap::Invalid)?;
         self.labels.push(Label {
             cont,
             arity: arity as u32,
@@ -1229,7 +1272,10 @@ impl Execution {
                     inst.memory.write(d, bytes)?;
                 }
                 Instr::DataDrop(seg) => {
-                    *inst.data_dropped.get_mut(seg as usize).ok_or(Trap::Invalid)? = true;
+                    *inst
+                        .data_dropped
+                        .get_mut(seg as usize)
+                        .ok_or(Trap::Invalid)? = true;
                 }
 
                 // ---- constants ----------------------------------------
@@ -1399,15 +1445,23 @@ impl Execution {
                 // ---- conversions --------------------------------------
                 Instr::I32WrapI64 => self.un(|a: i64| a as i32)?,
                 Instr::I32TruncF32S => self.un_try(i32_trunc_f32_s)?,
-                Instr::I32TruncF32U => self.un_try(|a: f32| i32_trunc_f32_u(a).map(|v| v as i32))?,
+                Instr::I32TruncF32U => {
+                    self.un_try(|a: f32| i32_trunc_f32_u(a).map(|v| v as i32))?
+                }
                 Instr::I32TruncF64S => self.un_try(i32_trunc_f64_s)?,
-                Instr::I32TruncF64U => self.un_try(|a: f64| i32_trunc_f64_u(a).map(|v| v as i32))?,
+                Instr::I32TruncF64U => {
+                    self.un_try(|a: f64| i32_trunc_f64_u(a).map(|v| v as i32))?
+                }
                 Instr::I64ExtendI32S => self.un(|a: i32| a as i64)?,
                 Instr::I64ExtendI32U => self.un(|a: i32| a as u32 as i64)?,
                 Instr::I64TruncF32S => self.un_try(i64_trunc_f32_s)?,
-                Instr::I64TruncF32U => self.un_try(|a: f32| i64_trunc_f32_u(a).map(|v| v as i64))?,
+                Instr::I64TruncF32U => {
+                    self.un_try(|a: f32| i64_trunc_f32_u(a).map(|v| v as i64))?
+                }
                 Instr::I64TruncF64S => self.un_try(i64_trunc_f64_s)?,
-                Instr::I64TruncF64U => self.un_try(|a: f64| i64_trunc_f64_u(a).map(|v| v as i64))?,
+                Instr::I64TruncF64U => {
+                    self.un_try(|a: f64| i64_trunc_f64_u(a).map(|v| v as i64))?
+                }
                 Instr::F32ConvertI32S => self.un(|a: i32| a as f32)?,
                 Instr::F32ConvertI32U => self.un(|a: i32| a as u32 as f32)?,
                 Instr::F32ConvertI64S => self.un(|a: i64| a as f32)?,
@@ -1489,7 +1543,9 @@ mod tests {
     }
 
     fn call(inst: &mut Instance, name: &str, args: &[Value]) -> ExecResult {
-        let f = inst.export_func(name).unwrap_or_else(|| panic!("no export {name}"));
+        let f = inst
+            .export_func(name)
+            .unwrap_or_else(|| panic!("no export {name}"));
         let mut e = Execution::new(inst, f, args).unwrap();
         e.run(inst, &mut NoHost, u64::MAX)
     }
@@ -1568,19 +1624,37 @@ mod tests {
         assert_eq!(one(i, "add", &[i32v(i32::MAX), i32v(1)]), i32v(i32::MIN));
         assert_eq!(one(i, "mul", &[i32v(0x10000), i32v(0x10000)]), i32v(0));
         assert_eq!(one(i, "div_s", &[i32v(-7), i32v(2)]), i32v(-3));
-        assert_eq!(trap(i, "div_s", &[i32v(1), i32v(0)]), Trap::IntegerDivideByZero);
-        assert_eq!(trap(i, "div_s", &[i32v(i32::MIN), i32v(-1)]), Trap::IntegerOverflow);
+        assert_eq!(
+            trap(i, "div_s", &[i32v(1), i32v(0)]),
+            Trap::IntegerDivideByZero
+        );
+        assert_eq!(
+            trap(i, "div_s", &[i32v(i32::MIN), i32v(-1)]),
+            Trap::IntegerOverflow
+        );
         assert_eq!(one(i, "div_u", &[i32v(-1), i32v(2)]), i32v(0x7fff_ffff));
-        assert_eq!(trap(i, "div_u", &[i32v(1), i32v(0)]), Trap::IntegerDivideByZero);
+        assert_eq!(
+            trap(i, "div_u", &[i32v(1), i32v(0)]),
+            Trap::IntegerDivideByZero
+        );
         assert_eq!(one(i, "rem_s", &[i32v(i32::MIN), i32v(-1)]), i32v(0));
         assert_eq!(one(i, "rem_s", &[i32v(-7), i32v(2)]), i32v(-1));
-        assert_eq!(trap(i, "rem_s", &[i32v(1), i32v(0)]), Trap::IntegerDivideByZero);
+        assert_eq!(
+            trap(i, "rem_s", &[i32v(1), i32v(0)]),
+            Trap::IntegerDivideByZero
+        );
         assert_eq!(one(i, "rem_u", &[i32v(-1), i32v(2)]), i32v(1));
-        assert_eq!(trap(i, "rem_u", &[i32v(1), i32v(0)]), Trap::IntegerDivideByZero);
+        assert_eq!(
+            trap(i, "rem_u", &[i32v(1), i32v(0)]),
+            Trap::IntegerDivideByZero
+        );
         assert_eq!(one(i, "shl", &[i32v(1), i32v(33)]), i32v(2));
         assert_eq!(one(i, "shr_s", &[i32v(-8), i32v(1)]), i32v(-4));
         assert_eq!(one(i, "shr_u", &[i32v(-8), i32v(1)]), i32v(0x7fff_fffc));
-        assert_eq!(one(i, "rotl", &[i32v(0x8000_0001u32 as i32), i32v(33)]), i32v(3));
+        assert_eq!(
+            one(i, "rotl", &[i32v(0x8000_0001u32 as i32), i32v(33)]),
+            i32v(3)
+        );
         assert_eq!(one(i, "rotr", &[i32v(1), i32v(1)]), i32v(i32::MIN));
         assert_eq!(one(i, "clz", &[i32v(0)]), i32v(32));
         assert_eq!(one(i, "ctz", &[i32v(0)]), i32v(32));
@@ -1588,7 +1662,10 @@ mod tests {
         assert_eq!(one(i, "ext8", &[i32v(0x80)]), i32v(-128));
         assert_eq!(one(i, "ext16", &[i32v(0x8000)]), i32v(-32768));
         assert_eq!(one(i, "lt_u", &[i32v(-1), i32v(0)]), i32v(0));
-        assert_eq!(trap(i, "div_s64", &[i64v(i64::MIN), i64v(-1)]), Trap::IntegerOverflow);
+        assert_eq!(
+            trap(i, "div_s64", &[i64v(i64::MIN), i64v(-1)]),
+            Trap::IntegerOverflow
+        );
         assert_eq!(one(i, "rem_s64", &[i64v(i64::MIN), i64v(-1)]), i64v(0));
         assert_eq!(one(i, "rotl64", &[i64v(1), i64v(65)]), i64v(2));
         assert_eq!(one(i, "shr_u64", &[i64v(-1), i64v(63)]), i64v(1));
@@ -1631,11 +1708,21 @@ mod tests {
         assert_eq!(bits32(one(i, "min", &[f32v(0.0), f32v(-0.0)])), 0x8000_0000);
         assert_eq!(bits32(one(i, "max", &[f32v(-0.0), f32v(0.0)])), 0);
         assert_eq!(one(i, "min", &[f32v(1.0), f32v(2.0)]), f32v(1.0));
-        assert_eq!(one(i, "max", &[f32v(-1.0), f32v(f32::NEG_INFINITY)]), f32v(-1.0));
+        assert_eq!(
+            one(i, "max", &[f32v(-1.0), f32v(f32::NEG_INFINITY)]),
+            f32v(-1.0)
+        );
         let snan = f32::from_bits(0x7f80_0001);
         let r = bits32(one(i, "min", &[f32v(1.0), f32v(snan)]));
-        assert_eq!(r & 0x7fc0_0000, 0x7fc0_0000, "quiet NaN expected, got {r:#x}");
-        assert!(one(i, "max", &[f32v(f32::NAN), f32v(1.0)]).as_f32().unwrap().is_nan());
+        assert_eq!(
+            r & 0x7fc0_0000,
+            0x7fc0_0000,
+            "quiet NaN expected, got {r:#x}"
+        );
+        assert!(one(i, "max", &[f32v(f32::NAN), f32v(1.0)])
+            .as_f32()
+            .unwrap()
+            .is_nan());
         // nearest: ties to even, sign of zero kept.
         assert_eq!(one(i, "nearest", &[f32v(2.5)]), f32v(2.0));
         assert_eq!(one(i, "nearest", &[f32v(3.5)]), f32v(4.0));
@@ -1646,9 +1733,22 @@ mod tests {
         let r = bits32(one(i, "nearest", &[f32v(snan)]));
         assert_eq!(r, 0x7fc0_0001);
         // bit-exact sign ops, NaN payload preserved.
-        assert_eq!(bits32(one(i, "copysign", &[f32v(snan), f32v(-1.0)])), 0xff80_0001);
-        assert_eq!(bits32(one(i, "abs", &[f32v(f32::from_bits(0xff80_0001))])), 0x7f80_0001);
-        assert_eq!(bits64(one(i, "neg", &[f64v(f64::from_bits(0x7ff0_0000_0000_0001))])), 0xfff0_0000_0000_0001);
+        assert_eq!(
+            bits32(one(i, "copysign", &[f32v(snan), f32v(-1.0)])),
+            0xff80_0001
+        );
+        assert_eq!(
+            bits32(one(i, "abs", &[f32v(f32::from_bits(0xff80_0001))])),
+            0x7f80_0001
+        );
+        assert_eq!(
+            bits64(one(
+                i,
+                "neg",
+                &[f64v(f64::from_bits(0x7ff0_0000_0000_0001))]
+            )),
+            0xfff0_0000_0000_0001
+        );
         assert_eq!(bits32(one(i, "sqrt", &[f32v(-0.0)])), 0x8000_0000);
         assert!(one(i, "sqrt", &[f32v(-1.0)]).as_f32().unwrap().is_nan());
         assert_eq!(one(i, "sqrt", &[f32v(16.0)]), f32v(4.0));
@@ -1656,18 +1756,45 @@ mod tests {
         assert_eq!(one(i, "trunc_s", &[f32v(-2147483648.0)]), i32v(i32::MIN));
         assert_eq!(one(i, "trunc_s", &[f32v(2147483520.0)]), i32v(2147483520));
         assert_eq!(one(i, "trunc_s", &[f32v(-0.9)]), i32v(0));
-        assert_eq!(trap(i, "trunc_s", &[f32v(2147483648.0)]), Trap::IntegerOverflow);
-        assert_eq!(trap(i, "trunc_s", &[f32v(-2147483904.0)]), Trap::IntegerOverflow);
-        assert_eq!(trap(i, "trunc_s", &[f32v(f32::NAN)]), Trap::InvalidConversion);
-        assert_eq!(trap(i, "trunc_s", &[f32v(f32::INFINITY)]), Trap::IntegerOverflow);
+        assert_eq!(
+            trap(i, "trunc_s", &[f32v(2147483648.0)]),
+            Trap::IntegerOverflow
+        );
+        assert_eq!(
+            trap(i, "trunc_s", &[f32v(-2147483904.0)]),
+            Trap::IntegerOverflow
+        );
+        assert_eq!(
+            trap(i, "trunc_s", &[f32v(f32::NAN)]),
+            Trap::InvalidConversion
+        );
+        assert_eq!(
+            trap(i, "trunc_s", &[f32v(f32::INFINITY)]),
+            Trap::IntegerOverflow
+        );
         assert_eq!(one(i, "trunc_u", &[f64v(-0.9)]), i32v(0));
         assert_eq!(one(i, "trunc_u", &[f64v(4294967295.0)]), i32v(-1));
-        assert_eq!(trap(i, "trunc_u", &[f64v(4294967296.0)]), Trap::IntegerOverflow);
+        assert_eq!(
+            trap(i, "trunc_u", &[f64v(4294967296.0)]),
+            Trap::IntegerOverflow
+        );
         assert_eq!(trap(i, "trunc_u", &[f64v(-1.0)]), Trap::IntegerOverflow);
-        assert_eq!(one(i, "trunc64_s", &[f64v(-9223372036854775808.0)]), i64v(i64::MIN));
-        assert_eq!(trap(i, "trunc64_s", &[f64v(9223372036854775808.0)]), Trap::IntegerOverflow);
-        assert_eq!(one(i, "trunc64_u", &[f32v(18446742974197923840.0)]), i64v(-1099511627776));
-        assert_eq!(trap(i, "trunc64_u", &[f32v(18446744073709551616.0)]), Trap::IntegerOverflow);
+        assert_eq!(
+            one(i, "trunc64_s", &[f64v(-9223372036854775808.0)]),
+            i64v(i64::MIN)
+        );
+        assert_eq!(
+            trap(i, "trunc64_s", &[f64v(9223372036854775808.0)]),
+            Trap::IntegerOverflow
+        );
+        assert_eq!(
+            one(i, "trunc64_u", &[f32v(18446742974197923840.0)]),
+            i64v(-1099511627776)
+        );
+        assert_eq!(
+            trap(i, "trunc64_u", &[f32v(18446744073709551616.0)]),
+            Trap::IntegerOverflow
+        );
         // saturating truncation.
         assert_eq!(one(i, "sat_s", &[f32v(f32::NAN)]), i32v(0));
         assert_eq!(one(i, "sat_s", &[f32v(1e10)]), i32v(i32::MAX));
@@ -1676,15 +1803,27 @@ mod tests {
         assert_eq!(one(i, "sat_u", &[f64v(1e10)]), i32v(-1));
         assert_eq!(one(i, "sat64_u", &[f64v(f64::INFINITY)]), i64v(-1));
         // conversions.
-        assert!(one(i, "demote", &[f64v(f64::NAN)]).as_f32().unwrap().is_nan());
+        assert!(one(i, "demote", &[f64v(f64::NAN)])
+            .as_f32()
+            .unwrap()
+            .is_nan());
         assert_eq!(one(i, "demote", &[f64v(1e40)]), f32v(f32::INFINITY));
         assert_eq!(one(i, "promote", &[f32v(0.5)]), f64v(0.5));
-        assert_eq!(bits32(one(i, "reinterpret", &[i32v(0x7f80_0001)])), 0x7f80_0001);
+        assert_eq!(
+            bits32(one(i, "reinterpret", &[i32v(0x7f80_0001)])),
+            0x7f80_0001
+        );
         assert_eq!(one(i, "reinterpret64", &[f64v(-0.0)]), i64v(i64::MIN));
-        assert_eq!(one(i, "convert_u", &[i64v(-1)]), f32v(18446744073709551616.0));
+        assert_eq!(
+            one(i, "convert_u", &[i64v(-1)]),
+            f32v(18446744073709551616.0)
+        );
         assert_eq!(one(i, "convert_s", &[i32v(i32::MIN)]), f64v(-2147483648.0));
         assert_eq!(one(i, "div", &[f64v(1.0), f64v(0.0)]), f64v(f64::INFINITY));
-        assert_eq!(bits64(one(i, "div", &[f64v(-1.0), f64v(0.0)])), f64::NEG_INFINITY.to_bits());
+        assert_eq!(
+            bits64(one(i, "div", &[f64v(-1.0), f64v(0.0)])),
+            f64::NEG_INFINITY.to_bits()
+        );
     }
 
     const MEMORY: &str = r#"(module
@@ -1737,7 +1876,10 @@ mod tests {
         assert_eq!(one(i, "load", &[i32v(0)]), i32v(0x3fc0_0000));
         assert_eq!(trap(i, "store", &[i32v(65533), i32v(0)]), Trap::OutOfBounds);
         ok(i, "store", &[i32v(65532), i32v(0x0a0b_0c0d)]);
-        assert_eq!(one(i, "loadf64", &[i32v(8)]), f64v(f64::from_bits(0x0807_0605_0403_0201)));
+        assert_eq!(
+            one(i, "loadf64", &[i32v(8)]),
+            f64v(f64::from_bits(0x0807_0605_0403_0201))
+        );
         // grow: type max 3 and instance limit.
         assert_eq!(one(i, "size", &[]), i32v(1));
         assert_eq!(one(i, "grow", &[i32v(1)]), i32v(1));
@@ -1747,27 +1889,51 @@ mod tests {
         assert_eq!(one(i, "size", &[]), i32v(3));
         assert_eq!(one(i, "load", &[i32v(3 * 65536 - 4)]), i32v(0));
         // bulk ops: bounds checked before any write.
-        assert_eq!(trap(i, "fill", &[i32v(3 * 65536 - 2), i32v(0xaa), i32v(3)]), Trap::OutOfBounds);
+        assert_eq!(
+            trap(i, "fill", &[i32v(3 * 65536 - 2), i32v(0xaa), i32v(3)]),
+            Trap::OutOfBounds
+        );
         assert_eq!(one(i, "load", &[i32v(3 * 65536 - 4)]), i32v(0));
         ok(i, "fill", &[i32v(100), i32v(0xaa), i32v(4)]);
         assert_eq!(one(i, "load", &[i32v(100)]), i32v(0xaaaa_aaaau32 as i32));
         ok(i, "fill", &[i32v(3 * 65536), i32v(1), i32v(0)]);
-        assert_eq!(trap(i, "fill", &[i32v(3 * 65536 + 1), i32v(1), i32v(0)]), Trap::OutOfBounds);
-        assert_eq!(trap(i, "copy", &[i32v(0), i32v(3 * 65536 - 2), i32v(4)]), Trap::OutOfBounds);
-        assert_eq!(trap(i, "copy", &[i32v(3 * 65536 - 2), i32v(0), i32v(4)]), Trap::OutOfBounds);
+        assert_eq!(
+            trap(i, "fill", &[i32v(3 * 65536 + 1), i32v(1), i32v(0)]),
+            Trap::OutOfBounds
+        );
+        assert_eq!(
+            trap(i, "copy", &[i32v(0), i32v(3 * 65536 - 2), i32v(4)]),
+            Trap::OutOfBounds
+        );
+        assert_eq!(
+            trap(i, "copy", &[i32v(3 * 65536 - 2), i32v(0), i32v(4)]),
+            Trap::OutOfBounds
+        );
         ok(i, "copy", &[i32v(200), i32v(8), i32v(8)]);
         assert_eq!(one(i, "load64", &[i32v(200)]), i64v(0x0807_0605_0403_0201));
         ok(i, "copy", &[i32v(201), i32v(200), i32v(7)]);
         assert_eq!(one(i, "load64", &[i32v(200)]), i64v(0x0706_0504_0302_0101));
-        assert_eq!(trap(i, "init", &[i32v(0), i32v(1), i32v(4)]), Trap::OutOfBounds);
-        assert_eq!(trap(i, "init", &[i32v(3 * 65536 - 2), i32v(0), i32v(4)]), Trap::OutOfBounds);
+        assert_eq!(
+            trap(i, "init", &[i32v(0), i32v(1), i32v(4)]),
+            Trap::OutOfBounds
+        );
+        assert_eq!(
+            trap(i, "init", &[i32v(3 * 65536 - 2), i32v(0), i32v(4)]),
+            Trap::OutOfBounds
+        );
         assert_eq!(one(i, "load", &[i32v(0)]), i32v(0x3fc0_0000));
         ok(i, "init", &[i32v(0), i32v(1), i32v(3)]);
         assert_eq!(one(i, "load", &[i32v(0)]), i32v(0x3f40_3020));
         ok(i, "drop", &[]);
         ok(i, "init", &[i32v(0), i32v(0), i32v(0)]);
-        assert_eq!(trap(i, "init", &[i32v(0), i32v(0), i32v(1)]), Trap::OutOfBounds);
-        assert_eq!(trap(i, "init", &[i32v(0), i32v(1), i32v(0)]), Trap::OutOfBounds);
+        assert_eq!(
+            trap(i, "init", &[i32v(0), i32v(0), i32v(1)]),
+            Trap::OutOfBounds
+        );
+        assert_eq!(
+            trap(i, "init", &[i32v(0), i32v(1), i32v(0)]),
+            Trap::OutOfBounds
+        );
         // The host sees the same memory.
         let mut buf = [0u8; 4];
         inst.memory().read(0, &mut buf).unwrap();
@@ -1786,7 +1952,8 @@ mod tests {
                 (br_if 1 (i64.eqz (local.get 0)))
                 (local.set 1 (i64.mul (local.get 1) (local.get 0)))
                 (local.set 0 (i64.sub (local.get 0) (i64.const 1)))
-                (br 0))))
+                (br 0)))
+            (local.get 1))
         (func (export "switch") (param i32) (result i32)
             (block (block (block (block
                 (br_table 0 1 2 3 (local.get 0)))
@@ -1795,12 +1962,14 @@ mod tests {
                 (return (i32.const 102)))
             (i32.const 103))
         (func (export "swap") (param i32 i32) (result i32 i32)
-            (block (type $pair) (local.get 1) (local.get 0)))
+            (local.get 1) (local.get 0)
+            (block (type $pair)))
         (func (export "loop-params") (param i32) (result i32)
             (i32.const 0) (local.get 0)
             (loop (param i32 i32) (result i32)
+                (i32.add)
                 (local.set 0 (i32.sub (local.get 0) (i32.const 1)))
-                (i32.add) (local.get 0) (local.get 0)
+                (local.get 0)
                 (br_if 0 (i32.gt_s (local.get 0) (i32.const 0)))
                 (drop)))
         (func (export "nested-br") (result i32)
@@ -1808,6 +1977,7 @@ mod tests {
                 (block (result i32)
                     (i32.const 1) (i32.const 2) (i32.const 3)
                     (br 1))
+                (drop)
                 (i32.const 9)))
         (func (export "if-no-else") (param i32) (result i32)
             (if (local.get 0) (then (return (i32.const 7))))
@@ -1854,6 +2024,7 @@ mod tests {
         (elem (i32.const 1) func $one $two)
         (elem $p func $two $one $one)
         (elem $e funcref (ref.func $one) (ref.null func))
+        (elem declare func $inc)
         (func $one (result i32) (i32.const 1))
         (func $two (result i32) (i32.const 2))
         (func $inc (param i32) (result i32) (i32.add (local.get 0) (i32.const 1)))
@@ -1883,13 +2054,19 @@ mod tests {
         assert_eq!(trap(i, "call", &[i32v(0)]), Trap::UninitializedElement);
         assert_eq!(trap(i, "call", &[i32v(4)]), Trap::UndefinedElement);
         assert_eq!(trap(i, "call", &[i32v(-1)]), Trap::UndefinedElement);
-        assert_eq!(trap(i, "call_ii", &[i32v(1)]), Trap::IndirectCallTypeMismatch);
+        assert_eq!(
+            trap(i, "call_ii", &[i32v(1)]),
+            Trap::IndirectCallTypeMismatch
+        );
         ok(i, "set", &[i32v(0), Value::FuncRef(Some(2))]);
         assert_eq!(one(i, "call_ii", &[i32v(0)]), i32v(8));
         assert_eq!(one(i, "get", &[i32v(0)]), Value::FuncRef(Some(2)));
         assert_eq!(one(i, "get", &[i32v(3)]), Value::FuncRef(None));
         assert_eq!(trap(i, "get", &[i32v(4)]), Trap::TableOutOfBounds);
-        assert_eq!(trap(i, "set", &[i32v(4), Value::FuncRef(None)]), Trap::TableOutOfBounds);
+        assert_eq!(
+            trap(i, "set", &[i32v(4), Value::FuncRef(None)]),
+            Trap::TableOutOfBounds
+        );
         assert_eq!(one(i, "is_null", &[i32v(3)]), i32v(1));
         assert_eq!(one(i, "is_null", &[i32v(1)]), i32v(0));
         assert_eq!(one(i, "ref_inc", &[]), Value::FuncRef(Some(2)));
@@ -1902,10 +2079,16 @@ mod tests {
         assert_eq!(one(i, "get", &[i32v(5)]), Value::FuncRef(Some(2)));
         ok(i, "fill", &[i32v(4), i32v(2)]);
         assert_eq!(one(i, "get", &[i32v(5)]), Value::FuncRef(None));
-        assert_eq!(trap(i, "copy", &[i32v(5), i32v(0), i32v(2)]), Trap::TableOutOfBounds);
+        assert_eq!(
+            trap(i, "copy", &[i32v(5), i32v(0), i32v(2)]),
+            Trap::TableOutOfBounds
+        );
         ok(i, "copy", &[i32v(3), i32v(0), i32v(3)]);
         assert_eq!(one(i, "get", &[i32v(5)]), Value::FuncRef(Some(1)));
-        assert_eq!(trap(i, "init", &[i32v(0), i32v(2), i32v(2)]), Trap::TableOutOfBounds);
+        assert_eq!(
+            trap(i, "init", &[i32v(0), i32v(2), i32v(2)]),
+            Trap::TableOutOfBounds
+        );
         ok(i, "init", &[i32v(0), i32v(0), i32v(3)]);
         assert_eq!(one(i, "call", &[i32v(0)]), i32v(2));
         assert_eq!(one(i, "call", &[i32v(2)]), i32v(1));
@@ -1913,7 +2096,10 @@ mod tests {
         assert_eq!(one(i, "get", &[i32v(1)]), Value::FuncRef(None));
         ok(i, "drop", &[]);
         ok(i, "init", &[i32v(0), i32v(0), i32v(0)]);
-        assert_eq!(trap(i, "init", &[i32v(0), i32v(0), i32v(1)]), Trap::TableOutOfBounds);
+        assert_eq!(
+            trap(i, "init", &[i32v(0), i32v(0), i32v(1)]),
+            Trap::TableOutOfBounds
+        );
         assert_eq!(one(i, "uget", &[i32v(1)]), Value::ExternRef(None));
         ok(i, "uset", &[i32v(1), Value::ExternRef(Some(42))]);
         assert_eq!(one(i, "uget", &[i32v(1)]), Value::ExternRef(Some(42)));
@@ -1977,7 +2163,8 @@ mod tests {
             results: &mut [Value],
         ) -> Result<HostOutcome, Trap> {
             self.calls.push((func.0, args.to_vec()));
-            ctx.memory.write(0, &(self.calls.len() as u32).to_le_bytes())?;
+            ctx.memory
+                .write(0, &(self.calls.len() as u32).to_le_bytes())?;
             match func.0 {
                 0 => {
                     if self.blocks > 0 {
@@ -2015,7 +2202,10 @@ mod tests {
         assert_eq!(e.run(&mut inst, &mut host, 1000), ExecResult::Blocked);
         assert_eq!(e.stack_len(), stack_after_block);
         assert!(!e.is_finished());
-        assert_eq!(e.run(&mut inst, &mut host, 1000), ExecResult::Done(vec![i32v(142)]));
+        assert_eq!(
+            e.run(&mut inst, &mut host, 1000),
+            ExecResult::Done(vec![i32v(142)])
+        );
         assert!(e.is_finished());
         assert_eq!(host.calls.len(), 3);
         for (f, args) in &host.calls {
@@ -2026,7 +2216,10 @@ mod tests {
         inst.memory().read(0, &mut buf).unwrap();
         assert_eq!(u32::from_le_bytes(buf), 3);
         // A finished execution keeps returning its result.
-        assert_eq!(e.run(&mut inst, &mut host, 1000), ExecResult::Done(vec![i32v(142)]));
+        assert_eq!(
+            e.run(&mut inst, &mut host, 1000),
+            ExecResult::Done(vec![i32v(142)])
+        );
 
         // Exit.
         let quit = inst.export_func("quit").unwrap();
@@ -2038,7 +2231,10 @@ mod tests {
         // Host trap.
         let none = inst.export_func("none").unwrap();
         let mut e = Execution::new(&inst, none, &[]).unwrap();
-        assert_eq!(e.run(&mut inst, &mut host, 1000), ExecResult::Trap(Trap::Host));
+        assert_eq!(
+            e.run(&mut inst, &mut host, 1000),
+            ExecResult::Trap(Trap::Host)
+        );
 
         // Host result of the wrong type is a host trap too.
         struct BadHost;
@@ -2055,12 +2251,29 @@ mod tests {
             }
         }
         let mut e = Execution::new(&inst, run, &[i32v(1)]).unwrap();
-        assert_eq!(e.run(&mut inst, &mut BadHost, 1000), ExecResult::Trap(Trap::Host));
-
-        // Imports cannot be run directly.
         assert_eq!(
-            Execution::new(&inst, 0, &[i32v(1), i32v(2)]).err(),
-            Some(Error::NoSuchFunction { func: 0 })
+            e.run(&mut inst, &mut BadHost, 1000),
+            ExecResult::Trap(Trap::Host)
+        );
+
+        // An import can be the entry function: the execution is one host
+        // call, with the same blocking and exit behaviour.
+        host.blocks = 1;
+        let mut e = Execution::new(&inst, 0, &[i32v(1), i32v(2)]).unwrap();
+        assert_eq!(e.run(&mut inst, &mut host, 0), ExecResult::OutOfFuel);
+        assert_eq!(e.run(&mut inst, &mut host, 1), ExecResult::Blocked);
+        assert_eq!(e.stack_len(), 2);
+        assert_eq!(
+            e.run(&mut inst, &mut host, 1),
+            ExecResult::Done(vec![i32v(3)])
+        );
+        let mut e = Execution::new(&inst, 1, &[i32v(5)]).unwrap();
+        assert_eq!(e.run(&mut inst, &mut host, 1), ExecResult::Exited(5));
+        let mut e = Execution::new(&inst, 2, &[]).unwrap();
+        assert_eq!(e.run(&mut inst, &mut host, 1), ExecResult::Trap(Trap::Host));
+        assert_eq!(
+            Execution::new(&inst, 0, &[i32v(1)]).err(),
+            Some(Error::ArgumentMismatch)
         );
     }
 
@@ -2083,12 +2296,18 @@ mod tests {
             }
         };
         assert_eq!(result, expected);
-        assert!(runs > 50, "fac(10) takes more than 50 instructions, ran {runs}");
+        assert!(
+            runs > 50,
+            "fac(10) takes more than 50 instructions, ran {runs}"
+        );
 
         // Exactly that many instructions as one budget finishes it; one less
         // does not.
         let mut e = Execution::new(&inst, fac, &[i64v(10)]).unwrap();
-        assert_eq!(e.run(&mut inst, &mut NoHost, runs - 1), ExecResult::OutOfFuel);
+        assert_eq!(
+            e.run(&mut inst, &mut NoHost, runs - 1),
+            ExecResult::OutOfFuel
+        );
         assert_eq!(e.run(&mut inst, &mut NoHost, 1), expected);
         let mut e = Execution::new(&inst, fac, &[i64v(10)]).unwrap();
         assert_eq!(e.run(&mut inst, &mut NoHost, runs), expected);
@@ -2149,7 +2368,8 @@ mod tests {
                 (if (result i32) (i32.eqz (local.get 0))
                     (then (i32.const 0))
                     (else (i32.add (i32.const 1) (call 1 (i32.sub (local.get 0) (i32.const 1)))))))
-            (func (export "locals") (param i32) (local i64 i64 i64 i64)
+            (func (export "locals") (param i32)
+                (local i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64)
                 (if (local.get 0) (then (call 2 (i32.sub (local.get 0) (i32.const 1))))))
         )"#;
         let limits = Limits {
@@ -2161,8 +2381,8 @@ mod tests {
         assert_eq!(trap(&mut inst, "runaway", &[]), Trap::CallDepth);
         assert_eq!(one(&mut inst, "deep", &[i32v(99)]), i32v(99));
         assert_eq!(trap(&mut inst, "deep", &[i32v(100)]), Trap::CallDepth);
-        // 5 stack values per frame: the value stack overflows before the
-        // call depth is reached.
+        // 16 stack values per frame (the parameter and 15 locals): the value
+        // stack (1000) overflows before the call depth (100) is reached.
         assert_eq!(trap(&mut inst, "locals", &[i32v(99)]), Trap::StackOverflow);
         assert_eq!(ok(&mut inst, "locals", &[i32v(50)]), vec![]);
 
@@ -2206,16 +2426,33 @@ mod tests {
         assert_eq!(r.err(), Some(Error::Link { import: 1 }));
         // Non-function imports are unsupported in M1.
         for imp in ["(table 1 funcref)", "(memory 1)", "(global i32)"] {
-            let r = instantiate_with(&alloc::format!(r#"(module (import "a" "b" {imp}))"#), &Limits::default());
+            let r = instantiate_with(
+                &alloc::format!(r#"(module (import "a" "b" {imp}))"#),
+                &Limits::default(),
+            );
             assert!(matches!(r, Err(Error::Unsupported { .. })), "{imp}: {r:?}");
         }
         // Out-of-bounds active segments trap at instantiation.
-        let r = instantiate_with(r#"(module (memory 1) (data (i32.const 65535) "ab"))"#, &Limits::default());
+        let r = instantiate_with(
+            r#"(module (memory 1) (data (i32.const 65535) "ab"))"#,
+            &Limits::default(),
+        );
         assert_eq!(r.err(), Some(Error::Trap(Trap::OutOfBounds)));
-        let r = instantiate_with(r#"(module (table 1 funcref) (func) (elem (i32.const 1) func 0))"#, &Limits::default());
+        let r = instantiate_with(
+            r#"(module (table 1 funcref) (func) (elem (i32.const 1) func 0))"#,
+            &Limits::default(),
+        );
         assert_eq!(r.err(), Some(Error::Trap(Trap::TableOutOfBounds)));
-        assert!(instantiate_with(r#"(module (memory 0) (data (i32.const 0) ""))"#, &Limits::default()).is_ok());
-        assert!(instantiate_with(r#"(module (memory 0) (data (i32.const 1) ""))"#, &Limits::default()).is_err());
+        assert!(instantiate_with(
+            r#"(module (memory 0) (data (i32.const 0) ""))"#,
+            &Limits::default()
+        )
+        .is_ok());
+        assert!(instantiate_with(
+            r#"(module (memory 0) (data (i32.const 1) ""))"#,
+            &Limits::default()
+        )
+        .is_err());
         // Memory larger than the limit.
         let r = instantiate_with(
             "(module (memory 2))",
@@ -2236,13 +2473,12 @@ mod tests {
         .unwrap();
         assert_eq!(one(&mut inst, "grow", &[i32v(1)]), i32v(1));
         assert_eq!(one(&mut inst, "grow", &[i32v(1)]), i32v(-1));
-        // Segments apply in order with globals as offsets; the start
-        // function is recorded, not run.
+        // Segments apply in order (later ones overwrite earlier ones); the
+        // start function is recorded, not run.
         let mut inst = instantiate(
             r#"(module
                 (memory 1)
-                (global $off i32 (i32.const 4))
-                (data (global.get $off) "\05\06")
+                (data (i32.const 4) "\05\06")
                 (data (i32.const 5) "\07")
                 (global $g (mut i32) (i32.const 0))
                 (func $start (global.set $g (i32.const 77)))
@@ -2262,9 +2498,18 @@ mod tests {
         // Execution::new argument checks.
         let inst = instantiate(CONTROL);
         let fac = inst.export_func("fac").unwrap();
-        assert_eq!(Execution::new(&inst, fac, &[]).err(), Some(Error::ArgumentMismatch));
-        assert_eq!(Execution::new(&inst, fac, &[i32v(1)]).err(), Some(Error::ArgumentMismatch));
-        assert_eq!(Execution::new(&inst, 999, &[]).err(), Some(Error::NoSuchFunction { func: 999 }));
+        assert_eq!(
+            Execution::new(&inst, fac, &[]).err(),
+            Some(Error::ArgumentMismatch)
+        );
+        assert_eq!(
+            Execution::new(&inst, fac, &[i32v(1)]).err(),
+            Some(Error::ArgumentMismatch)
+        );
+        assert_eq!(
+            Execution::new(&inst, 999, &[]).err(),
+            Some(Error::NoSuchFunction { func: 999 })
+        );
         assert!(Execution::new(&inst, fac, &[i64v(1)]).is_ok());
     }
 }

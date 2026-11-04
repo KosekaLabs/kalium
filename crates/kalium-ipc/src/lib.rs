@@ -570,14 +570,14 @@ mod tests {
         let mut ch = Channel::new(1, 2, 0);
         ch.sender_added();
         assert_eq!(
-            ch.send(Message::new(vec![0; 3])).unwrap_err().0,
+            ch.send(Message::new(vec![0; 3])).unwrap_err(),
             IpcError::TooBig
         );
         // Full channel, oversized message: TooBig wins.
         let mut ch = open(1, 2, 0);
         ch.send(msg(1)).unwrap();
         assert_eq!(
-            ch.send(Message::new(vec![0; 3])).unwrap_err().0,
+            ch.send(Message::new(vec![0; 3])).unwrap_err(),
             IpcError::TooBig
         );
         // Full and closed: Closed wins over Full.
@@ -763,6 +763,39 @@ mod tests {
         assert!(!q.contains(2));
         assert_eq!(q.iter().copied().collect::<Vec<_>>(), vec![1, 3]);
         assert_eq!(q.wake_all(), vec![1, 3]);
+    }
+
+    /// The kernel's blocking pattern: receivers park while the channel is
+    /// not readable; a send wakes one, the last sender going away wakes all
+    /// so they observe `Closed` instead of waiting forever.
+    #[test]
+    fn parked_receivers_are_woken_by_send_and_by_close() {
+        let mut ch = open(4, 16, 0);
+        let mut q: WaitQueue<u32> = WaitQueue::new();
+        // Two receivers find the queue empty and park, in order.
+        assert_eq!(ch.try_recv(), Err(IpcError::Empty));
+        assert!(!ch.is_readable());
+        assert!(q.park(1));
+        assert_eq!(ch.try_recv(), Err(IpcError::Empty));
+        assert!(q.park(2));
+        // A send wakes exactly the first one, which gets the message.
+        ch.send(msg(7)).unwrap();
+        assert!(ch.is_readable());
+        assert_eq!(q.wake_one(), Some(1));
+        assert_eq!(ch.try_recv().unwrap(), msg(7));
+        assert!(!ch.is_readable());
+        assert_eq!(q.len(), 1);
+        // The last sender drops: the channel is readable (closed) and every
+        // waiter is woken to observe Closed.
+        ch.sender_dropped();
+        assert!(ch.is_readable());
+        assert_eq!(q.wake_all(), vec![2]);
+        assert_eq!(ch.try_recv(), Err(IpcError::Closed));
+        // A thread re-issuing its wait after a spurious wake is parked once.
+        assert!(q.park(2));
+        assert!(!q.park(2));
+        assert!(q.remove(2));
+        assert!(q.is_empty());
     }
 
     #[test]
