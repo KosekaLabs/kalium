@@ -364,9 +364,10 @@ impl Channel {
         self.receivers
     }
 
-    /// Removes and returns every queued message, oldest first. The kernel
-    /// uses this when it destroys a channel whose queue still holds
-    /// capabilities that must be released.
+    /// Removes and returns every queued message, oldest first. (The kernel
+    /// empties a dying channel's queue one message at a time with
+    /// [`try_recv`](Channel::try_recv) instead, so that freeing allocates
+    /// nothing; this is the convenience for callers that can.)
     pub fn drain(&mut self) -> Vec<Message> {
         self.queue.drain(..).collect()
     }

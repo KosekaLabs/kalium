@@ -876,6 +876,15 @@ const HOG_DRAINED_BYTES: u64 = (HOG_CHANNELS - 1)
     * kalium_ipc::Message::cost_of(kalium_abi::limits::MAX_MESSAGE_LEN, 0) as u64
     + (HOG_QUEUE_DEPTH - HOG_RECEIVED_BACK)
         * kalium_ipc::Message::cost_of(0, kalium_abi::limits::MAX_MESSAGE_CAPS) as u64;
+/// The reference cycle `hog` leaves before it hoards: one channel whose
+/// queue holds one zero-byte message carrying one capability on that
+/// channel, with both ends dropped. The kernel must collect the channel
+/// (one object, one message, the message's cost) at once; a kernel that
+/// only counts references keeps it, and then `hog` is a channel short of
+/// its quota and the budget never settles.
+const CYCLE_OBJECTS: u64 = 1;
+const CYCLE_MESSAGES: u64 = 1;
+const CYCLE_BYTES: u64 = kalium_ipc::Message::cost_of(0, 1) as u64;
 
 /// One expected console line.
 enum Expect {
@@ -912,6 +921,12 @@ enum Expect {
     /// exited, nothing charged to the kernel-wide budget outlived its
     /// release.
     BudgetSettled,
+    /// `kalium: collected N unreachable objects: M queued messages, B
+    /// budget bytes` with exactly [`CYCLE_OBJECTS`], [`CYCLE_MESSAGES`]
+    /// and [`CYCLE_BYTES`]: the channel `hog` sent over itself and
+    /// dropped was freed although a queued capability still referred to
+    /// it.
+    CycleCollected,
 }
 
 impl Expect {
@@ -942,6 +957,9 @@ impl Expect {
                 parse_hog_drain(line) == Some((HOG_DRAINED_MESSAGES, HOG_DRAINED_BYTES))
             }
             Expect::BudgetSettled => parse_budget_in_use(line) == Some(0),
+            Expect::CycleCollected => {
+                parse_collected(line) == Some((CYCLE_OBJECTS, CYCLE_MESSAGES, CYCLE_BYTES))
+            }
         }
     }
 
@@ -967,8 +985,25 @@ impl Expect {
                 "`kalium: instance <id> (hog) exit drained {HOG_DRAINED_MESSAGES} queued messages, {HOG_DRAINED_BYTES} budget bytes`"
             ),
             Expect::BudgetSettled => "`kalium: instance budget: 0 bytes in use`".into(),
+            Expect::CycleCollected => format!(
+                "`kalium: collected {CYCLE_OBJECTS} unreachable objects: {CYCLE_MESSAGES} queued messages, {CYCLE_BYTES} budget bytes`"
+            ),
         }
     }
+}
+
+/// Parses `kalium: collected N unreachable objects: M queued messages, B
+/// budget bytes` into `(N, M, B)`.
+fn parse_collected(line: &str) -> Option<(u64, u64, u64)> {
+    let rest = line.strip_prefix("kalium: collected ")?;
+    let (objects, rest) = rest.split_once(" unreachable objects: ")?;
+    let (messages, rest) = rest.split_once(" queued messages, ")?;
+    let bytes = rest.strip_suffix(" budget bytes")?;
+    Some((
+        objects.parse().ok()?,
+        messages.parse().ok()?,
+        bytes.parse().ok()?,
+    ))
 }
 
 /// Parses `hog: N cap-only messages sent, M received back` into `(N, M)`.
@@ -1111,6 +1146,12 @@ const ORDERED: &[Expect] = &[
     // with zero-byte messages carrying four capabilities each, takes half
     // back, and the kernel's report of what its exit drained gives back
     // exactly their cost (`Message::cost_of`).
+    // Before any of that, `hog` leaves a reference cycle (a channel's send
+    // end queued in that same channel, both ends dropped) that only a
+    // reachability rule frees: the kernel reports the collection, and the
+    // quota and the budget lines below show it was given back.
+    Expect::Line("hog: cycle: a channel's send end sent over itself, both ends dropped"),
+    Expect::CycleCollected,
     Expect::HogQuota,
     Expect::HogCapOnly,
     Expect::Line("hog: quota reached, kernel alive"),
@@ -1141,51 +1182,66 @@ fn check_scenario(out: &str) -> Vec<String> {
         {
             Some(i) => pos += i + 1,
             None => {
-                let detail = match expect {
-                    Expect::RtMet => match lines.iter().find_map(|l| parse_rt_met(l)) {
-                        Some((met, total)) => format!(" (found `rt: met {met}/{total}`)"),
-                        None => String::new(),
-                    },
-                    Expect::GreedyLimit => {
-                        match lines.iter().find_map(|l| parse_greedy_refused(l)) {
-                            Some(n) => format!(" (found `... after {n} instances`)"),
+                let detail =
+                    match expect {
+                        Expect::RtMet => match lines.iter().find_map(|l| parse_rt_met(l)) {
+                            Some((met, total)) => format!(" (found `rt: met {met}/{total}`)"),
                             None => String::new(),
+                        },
+                        Expect::GreedyLimit => {
+                            match lines.iter().find_map(|l| parse_greedy_refused(l)) {
+                                Some(n) => format!(" (found `... after {n} instances`)"),
+                                None => String::new(),
+                            }
                         }
-                    }
-                    Expect::ShelfRestoreFaster => {
-                        match lines.iter().find_map(|l| parse_shelf_times(l)) {
-                            Some((init, restore)) => {
-                                format!(" (found `init {init} us, restore {restore} us`)")
+                        Expect::ShelfRestoreFaster => {
+                            match lines.iter().find_map(|l| parse_shelf_times(l)) {
+                                Some((init, restore)) => {
+                                    format!(" (found `init {init} us, restore {restore} us`)")
+                                }
+                                None => String::new(),
+                            }
+                        }
+                        Expect::HogQuota => {
+                            match lines.iter().find_map(|l| parse_hog(l)) {
+                                Some((m, p, c, n)) => {
+                                    format!(" (found `memobjs {m}, pages {p}, channels {c}, messages {n}`)")
+                                }
+                                None => String::new(),
+                            }
+                        }
+                        Expect::HogCapOnly => {
+                            match lines.iter().find_map(|l| parse_hog_cap_only(l)) {
+                                Some((s, r)) => {
+                                    format!(
+                                        " (found `{s} cap-only messages sent, {r} received back`)"
+                                    )
+                                }
+                                None => String::new(),
+                            }
+                        }
+                        Expect::HogDrain => match lines.iter().find_map(|l| parse_hog_drain(l)) {
+                            Some((n, b)) => {
+                                format!(" (found `drained {n} queued messages, {b} budget bytes`)")
                             }
                             None => String::new(),
+                        },
+                        Expect::BudgetSettled => {
+                            match lines.iter().find_map(|l| parse_budget_in_use(l)) {
+                                Some(b) => format!(" (found `{b} bytes in use`)"),
+                                None => String::new(),
+                            }
                         }
-                    }
-                    Expect::HogQuota => match lines.iter().find_map(|l| parse_hog(l)) {
-                        Some((m, p, c, n)) => {
-                            format!(" (found `memobjs {m}, pages {p}, channels {c}, messages {n}`)")
-                        }
-                        None => String::new(),
-                    },
-                    Expect::HogCapOnly => match lines.iter().find_map(|l| parse_hog_cap_only(l)) {
-                        Some((s, r)) => {
-                            format!(" (found `{s} cap-only messages sent, {r} received back`)")
-                        }
-                        None => String::new(),
-                    },
-                    Expect::HogDrain => match lines.iter().find_map(|l| parse_hog_drain(l)) {
-                        Some((n, b)) => {
-                            format!(" (found `drained {n} queued messages, {b} budget bytes`)")
-                        }
-                        None => String::new(),
-                    },
-                    Expect::BudgetSettled => {
-                        match lines.iter().find_map(|l| parse_budget_in_use(l)) {
-                            Some(b) => format!(" (found `{b} bytes in use`)"),
+                        Expect::CycleCollected => {
+                            match lines.iter().find_map(|l| parse_collected(l)) {
+                            Some((o, m, b)) => format!(
+                                " (found `collected {o} unreachable objects: {m} queued messages, {b} budget bytes`)"
+                            ),
                             None => String::new(),
                         }
-                    }
-                    _ => String::new(),
-                };
+                        }
+                        _ => String::new(),
+                    };
                 failures.push(format!(
                     "missing {} after line {pos}{detail}",
                     expect.describe()
@@ -1364,6 +1420,12 @@ mod tests {
                     "{HOG_DRAINED_MESSAGES} queued messages, {HOG_DRAINED_BYTES} budget bytes"
                 ),
             )
+            .replace(
+                "{cycle}",
+                &format!(
+                    "{CYCLE_OBJECTS} unreachable objects: {CYCLE_MESSAGES} queued messages, {CYCLE_BYTES} budget bytes"
+                ),
+            )
     });
 
     const GOOD_TEMPLATE: &str = "kalium: boot\n\
@@ -1432,6 +1494,8 @@ mod tests {
         init: shelf exited 0\n\
         init: shelf init 284494 us, restore 27429 us\n\
         kalium: instance 0 (init) spawned instance 1 (hog, fair)\n\
+        hog: cycle: a channel's send end sent over itself, both ends dropped\n\
+        kalium: collected {cycle}\n\
         hog: memobjs 2, pages 256, channels 64, messages 1024\n\
         hog: send 4096 bytes on a fresh channel: ok\n\
         hog: {hog_cap_only}\n\
@@ -1738,5 +1802,73 @@ mod tests {
         assert!(f[0].contains("found `4096 bytes in use`"), "{f:?}");
         let no_report = GOOD.replace("kalium: instance budget: 0 bytes in use\n", "");
         assert_eq!(check_scenario(&no_report).len(), 1);
+    }
+
+    /// Regression: a channel whose own queue held a capability on it was
+    /// never freed by the reference count alone. `hog` leaves exactly
+    /// that; the kernel must report collecting it, and the leak shows up
+    /// again in `hog`'s channel quota and in the budget at the end.
+    #[test]
+    fn hog_cycle_is_collected() {
+        assert_eq!((CYCLE_OBJECTS, CYCLE_MESSAGES), (1, 1));
+        assert_eq!(CYCLE_BYTES, kalium_ipc::Message::cost_of(0, 1) as u64);
+        let line = format!(
+            "kalium: collected {CYCLE_OBJECTS} unreachable objects: {CYCLE_MESSAGES} queued messages, {CYCLE_BYTES} budget bytes"
+        );
+        assert_eq!(
+            parse_collected(&line),
+            Some((CYCLE_OBJECTS, CYCLE_MESSAGES, CYCLE_BYTES))
+        );
+        assert_eq!(
+            parse_collected(
+                "kalium: collected 2 unreachable objects: 3 queued messages, 4 budget bytes"
+            ),
+            Some((2, 3, 4))
+        );
+        assert_eq!(
+            parse_collected(
+                "kalium: collected x unreachable objects: 3 queued messages, 4 budget bytes"
+            ),
+            None
+        );
+        assert!(GOOD.contains(&line));
+        // The pre-fix kernel: no collection, one channel and one message
+        // short of the quota, the exit drain a queue short, and the
+        // message's cost still in use at the end.
+        let leaked = GOOD
+            .replace(&format!("{line}\n"), "")
+            .replace(
+                "hog: memobjs 2, pages 256, channels 64, messages 1024",
+                "hog: memobjs 2, pages 256, channels 63, messages 1008",
+            )
+            .replace(
+                "kalium: instance budget: 0 bytes in use",
+                &format!("kalium: instance budget: {CYCLE_BYTES} bytes in use"),
+            );
+        let f = check_scenario(&leaked);
+        assert_eq!(f.len(), 3, "{f:?}");
+        assert!(f[0].contains("collected"), "{f:?}");
+        assert!(
+            f[1].contains("found `memobjs 2, pages 256, channels 63"),
+            "{f:?}"
+        );
+        assert!(
+            f[2].contains(&format!("found `{CYCLE_BYTES} bytes in use`")),
+            "{f:?}"
+        );
+        // A collection that freed the wrong thing, or reported it wrongly.
+        for wrong in [
+            "kalium: collected 2 unreachable objects: 1 queued messages, 100 budget bytes",
+            "kalium: collected 1 unreachable objects: 0 queued messages, 0 budget bytes",
+        ] {
+            let f = check_scenario(&GOOD.replace(&line, wrong));
+            assert_eq!(f.len(), 1, "{f:?}");
+            assert!(f[0].contains("found `collected"), "{f:?}");
+        }
+        let no_step = GOOD.replace(
+            "hog: cycle: a channel's send end sent over itself, both ends dropped\n",
+            "",
+        );
+        assert_eq!(check_scenario(&no_step).len(), 1);
     }
 }

@@ -642,8 +642,8 @@ impl<'a> HostCall<'a> {
             }
         }
         let now = timer::now_ns();
-        let channel = self.k.channel_mut(chan).ok_or(errno::EBADCAP)?;
-        match channel.send_or_return(Message::with_caps(bytes, moved)) {
+        self.k.channel_mut(chan).ok_or(errno::EBADCAP)?;
+        match self.k.send_on(chan, Message::with_caps(bytes, moved)) {
             Ok(()) => {
                 self.k.wake_one_on(chan, now);
                 OK
@@ -675,7 +675,8 @@ impl<'a> HostCall<'a> {
         let (bp, bl) = range(mem, buf, buf_len)?;
         let (cp, _) = range_n(mem, caps, ncaps_max, 4)?;
         let (hp, _) = range(mem, out_hdr, kalium_abi::layout::RECV_HEADER_SIZE as i32)?;
-        let msg = match self.k.channel_mut(chan).ok_or(errno::EBADCAP)?.try_recv() {
+        self.k.channel_mut(chan).ok_or(errno::EBADCAP)?;
+        let msg = match self.k.recv_from(chan) {
             Ok(m) => m,
             Err(IpcError::Empty) if blocking => return Ok(self.block_on(&[chan])),
             Err(e) => return Err(e.errno()),

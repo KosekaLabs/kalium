@@ -61,7 +61,9 @@ Every byte the kernel allocates for an instance is charged to it, per
 instance (memory objects, snapshots, channels) and against one kernel-wide
 budget that keeps a headroom for the kernel itself, so a hoarding service
 (`hog` in the boot image) is stopped with `ENOMEM` and never by an
-allocation failure in the kernel (`docs/running.md`, "Resource quotas").
+allocation failure in the kernel (`docs/running.md`, "Resource quotas"),
+and an object kept only by capabilities queued where nobody can receive
+them (a channel sent over itself) is collected rather than leaked.
 Capabilities can be revoked (`cap_revoke` invalidates everything derived
 from one, wherever it went) and instances can be shelved: `init` takes a
 snapshot of a service that has finished an expensive initialisation

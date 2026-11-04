@@ -434,7 +434,8 @@ impl HostCall<'_> {
         }
         if self.wasi().stdin_pos >= self.wasi().stdin.len() {
             // Nothing buffered: take the next message.
-            match self.k.channel_mut(chan).ok_or(errno::BADF)?.try_recv() {
+            self.k.channel_mut(chan).ok_or(errno::BADF)?;
+            match self.k.recv_from(chan) {
                 Ok(msg) => {
                     let now = timer::now_ns();
                     // The message's copy was charged to the budget at

@@ -7,7 +7,7 @@ cost than about real hardware.
 
 ## What runs
 
-`cargo xtask test` boots the kernel and runs a scenario of twelve
+`cargo xtask test` boots the kernel and runs a scenario of thirteen
 WebAssembly services from the boot image. In order:
 
 | Service | What it proves |
@@ -19,18 +19,22 @@ WebAssembly services from the boot image. In order:
 | `park`, `greedy` | A hostile spawner is stopped at the 32-instance quota and its slots are reclaimed. |
 | `revoked` | A derived console capability is revoked while in use; the holder gets `EBADCAP` and a revoked channel end reports `ECLOSED` to its peer. |
 | `shelf` | An instance is snapshotted after an expensive initialisation and three copies are restored from the snapshot, about 10x faster than a cold start. |
+| `hog` | A hostile service hits every resource quota (memory objects, pages, channels, queued messages) and the kernel stays alive; a capability sent over its own channel is collected as an unreachable cycle; the instance budget settles at zero. |
 | `hello_std` | An unmodified Rust `std` program for `wasm32-wasip1` (println, Vec, HashMap, floats, sleep, exit code 3). |
 | `hello_c` | An unmodified C program built with clang and wasi-libc (printf, malloc, qsort, stdin from a channel, exit code 5). |
 
-The whole scenario executes about 60 million Wasm instructions in about 1.4 s
-of QEMU time at roughly 40 million instructions per second interpreted.
+The whole scenario executes about 55 million Wasm instructions in about 2 s
+of QEMU time, between 25 and 40 million instructions per second interpreted
+depending on host load. The host-side test suites hold 266 tests.
 
 ## Components
 
 - **Kernel binary** (`kernel/`): boot image, object registry, host ABI
   (`kalium:core`, `kalium:ipc`, `kalium:memory`, `kalium:spawn`, and
   `wasi_snapshot_preview1`), run loop with measured fuel-to-time calibration
-  and timer preemption, trap reporting, instance and resource quotas.
+  and timer preemption, trap reporting, instance and resource quotas with a
+  kernel-wide budget, and a collector for objects reachable only through
+  queued capabilities.
 - **kalium-wasm**: decoder, validator and interpreter for WebAssembly 2.0
   (MVP, sign extension, non-trapping conversions, bulk memory, reference
   types, multi-value). Passes all 90 files of the vendored core spec suite
@@ -88,6 +92,13 @@ fixed. Confirmed and fixed, each with a regression test:
 - `fd_read` reported EOF on a leading empty iovec and blocked on a zero-byte
   read.
 - A failed revocation reported success.
+- A service could exhaust the kernel heap and make a later unchecked kernel
+  allocation panic (now per-instance quotas, a kernel-wide budget with
+  headroom, fallible allocation on every host path).
+- In-flight capabilities in queued messages were not charged; snapshot copies
+  allocated infallibly.
+- A capability queued in its own channel formed a reference cycle that was
+  never freed (now a mark-and-sweep collector over queued capabilities).
 - The exception vector save macro overflowed its 0x80-byte slot and was
   silently shifted by alignment (found while adding FP/SIMD state).
 

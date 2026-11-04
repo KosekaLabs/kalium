@@ -35,11 +35,19 @@ document is changed. The long-term design is in [architecture.md](architecture.m
      `shelf: resumed ok` and exits 0; init reports
      `init: shelf init N us, restore M us` and the restore is the faster
      start (`M < N`);
-   - init spawns `hog`, a hostile service that creates memory objects of
+   - init spawns `hog`, a hostile service that first leaves the kernel a
+     reference cycle (it creates a channel, sends one of the channel's own
+     send capabilities over the channel and drops both ends, printing
+     `hog: cycle: a channel's send end sent over itself, both ends
+     dropped`), which the kernel must collect at once (`kalium: collected
+     1 unreachable objects: 1 queued messages, B budget bytes`, with `B`
+     the message's `cost_of`; see [Reachability](#reachability)), and then
+     creates memory objects of
      the largest size, grows its linear memory, creates channels and fills
      their queues until each quota refuses it (see
      [Resource quotas](#resource-quotas)): it prints exactly
-     `hog: memobjs 2, pages 256, channels 64, messages 1024`, finds that a
+     `hog: memobjs 2, pages 256, channels 64, messages 1024` (so the
+     collected channel went back to its quota), finds that a
      4096-byte `send` on a fresh channel still works (or fails cleanly with
      `ENOMEM`), fills the rest of that queue with zero-byte messages
      carrying 4 capabilities each and takes half of the queue back
@@ -213,6 +221,42 @@ kept at home: derive `handle` (with `DERIVE`) from the original, transfer a
 derivation of `handle`, and `cap_revoke(handle)` when the time comes; the
 original and `handle` are untouched.
 
+### Reachability
+
+An object (a channel, a memory object, a snapshot, an exited instance's
+record) exists while something refers to it, and is freed, its charges
+released, when nothing does. The references are the capabilities on it,
+wherever they are: in a table, or queued in a message in flight. A count
+of those alone would leak a cycle, so the rule is in terms of what can
+still be used:
+
+- An object is **live** while a table or a kernel pin holds a capability
+  on it, or a capability on it is queued in a channel that is itself
+  live. A capability queued in a channel that nobody can receive from any
+  more keeps nothing alive.
+- A channel whose own queue holds a capability on that channel (a service
+  sends one of the channel's send ends over the channel and never
+  receives it), or a set of channels whose queues refer to each other, is
+  freed as soon as the last capability on it in a table is dropped or
+  its holder exits: the queued messages are drained, the capabilities
+  they carry released (which may free further objects, iteratively,
+  never recursively, and without allocating a work list sized by the
+  number of objects), and the charges go back to the creator's quota and
+  the kernel-wide budget. The kernel reports it: `kalium: collected N
+  unreachable objects: M queued messages, B budget bytes`.
+- The channel endpoint counts are not affected: a queued send end counts
+  as a sender while the message carrying it can be received, so `recv`
+  never reports `ECLOSED` on a channel whose queue holds a sender, and a
+  channel whose only sender is in its own queue, with no receiver held
+  anywhere, is collected rather than kept open.
+- The check runs after a release only (a `send` queues a capability in a
+  channel the sender holds, a `recv` or a mint puts one in a table, so
+  neither can make an object unreachable), when the released object is
+  left with references that only queued messages hold, and once per
+  instance exit; it is a mark from the tables and pins over the queues
+  and a drain of what was not marked, bounded by the number of objects
+  and queued capabilities.
+
 ### Snapshots
 
 The fast-start primitive of the runtime shelf: an instance that has done
@@ -338,6 +382,11 @@ and makes the kernel's next small allocation fail.
 ### Object kinds (u32)
 
 `Console=1, Channel=2, MemObj=3, Instance=4, Spawn=5, Snapshot=6`.
+
+The kernel's `cap_revoke` scans every table and every queued message once
+with `is_descendant` and `is_valid`, counting what dies, after
+`can_revoke` has said the revocation will be recorded: nothing is
+allocated on that path, however many capabilities exist.
 
 `kalium-abi` defines all of the above as constants (`limits::MAX_DERIVE_DEPTH`,
 the quotas of [Resource quotas](#resource-quotas) and the `entry` values of `spawn_snapshot` included) plus the import module and function names, and nothing else. It has no dependencies and no `unsafe`.
@@ -700,7 +749,9 @@ impl Lineage {
     pub fn retain(&mut self, node: NodeId) -> Result<(), CapError>;     // one more capability carries it
     pub fn release(&mut self, node: NodeId);                            // one fewer; frees unreferenced nodes up the chain
     pub fn revoke(&mut self, node: NodeId) -> Result<(), CapError>;     // everything below `node` becomes invalid
+    pub fn can_revoke(&self, node: NodeId) -> Result<(), CapError>;     // `revoke`'s error, nothing changed
     pub fn revoke_among(&mut self, node: NodeId, held: &[Capability]) -> Result<Vec<Capability>, CapError>; // + which of `held` died
+    pub fn is_descendant(&self, node: NodeId, ancestor: NodeId) -> bool;
     pub fn is_valid(&self, node: NodeId) -> bool;                       // walks up, at most MAX_DEPTH steps
 }
 ```
@@ -769,7 +820,10 @@ clock proving the RT guarantee under fair load.
   missing.
 - Host ABI implementation: one `impl Host` that dispatches on `HostFuncId`,
   with the object registry (keyed by `ObjectId`) holding channels, memory
-  objects, instances, each with its reference count, its `Lineage` and
+  objects, instances, each with its reference count (and how many of the
+  references are capabilities queued in messages, so that an object kept
+  only by unreachable queues is found and collected, see
+  [Reachability](#reachability)), its `Lineage` and
   what it is charged for (see [Resource quotas](#resource-quotas): the
   creator's quotas and the kernel-wide budget, a `kalium_wasm::Budget` of
   the heap minus the kernel's headroom that the instances' memories and

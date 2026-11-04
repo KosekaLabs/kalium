@@ -18,6 +18,16 @@
 //! `MAX_CHANNELS_PER_INSTANCE` and the queue depth, each with `ENOMEM`
 //! or `EAGAIN`, and the kernel is unharmed.
 //!
+//! Before any of that it leaves the kernel a reference cycle: a channel
+//! whose own queue holds a send capability on it, with both ends dropped
+//! (`hog: cycle: a channel's send end sent over itself, both ends
+//! dropped`). Nothing can ever receive that message, so the kernel must
+//! collect the channel (it reports `kalium: collected 1 unreachable
+//! objects: 1 queued messages, B budget bytes`), give the channel back
+//! to this instance's quota and the message's cost back to the budget; a
+//! kernel that only counts references keeps it for ever and the budget
+//! never settles at zero.
+//!
 //! Prints `hog: memobjs N, pages P, channels C, messages M`,
 //! `hog: send 4096 bytes on a fresh channel: ok` (or `ENOMEM`),
 //! `hog: 15 cap-only messages sent, 8 received back` and
@@ -43,6 +53,30 @@ const GROW_STEP: usize = 64;
 #[no_mangle]
 pub extern "C" fn _start() {
     let console = Console::from_cap(Cap::slot(0));
+
+    // A reference cycle for the kernel to collect: a send end of a channel
+    // queued in that same channel, then both ends dropped. The queued
+    // capability is the only reference left on the channel, so a kernel
+    // that frees objects by reference count alone leaks it (and its
+    // charge on the budget, and this instance's channel quota: the loop
+    // below would then stop one channel short).
+    let _ = console.println("hog: cycle: a channel's send end sent over itself, both ends dropped");
+    let (tx, rx) = match Channel::create() {
+        Ok(ends) => ends,
+        Err(e) => fail(console, "channel_create (cycle)", e),
+    };
+    let own = match tx.cap().derive(rights::SEND | rights::TRANSFER) {
+        Ok(c) => c,
+        Err(e) => fail(console, "cap_derive (cycle)", e),
+    };
+    if let Err(e) = tx.send(&[], &[own]) {
+        fail(console, "send (cycle)", e);
+    }
+    for c in [tx.cap(), rx.cap()] {
+        if let Err(e) = cap_drop(c) {
+            fail(console, "cap_drop (cycle)", e);
+        }
+    }
 
     // Memory objects of the largest size, kept.
     let mut memobjs: u32 = 0;

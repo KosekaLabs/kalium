@@ -668,6 +668,19 @@ impl Lineage {
         Ok(())
     }
 
+    /// Whether [`revoke`](Lineage::revoke) of `node` would succeed, with
+    /// the error it would fail with and nothing changed. The kernel asks
+    /// before it settles what the revocation kills, so that a refused
+    /// revocation (`NoMem` once the generation would wrap) invalidates
+    /// nothing and touches no count.
+    pub fn can_revoke(&self, node: NodeId) -> Result<(), CapError> {
+        let n = self.get(node).ok_or(CapError::BadCap)?;
+        n.generation
+            .checked_add(1)
+            .map(|_| ())
+            .ok_or(CapError::NoMem)
+    }
+
     /// [`revoke`](Lineage::revoke), reporting which of `held` (capabilities
     /// on this object, wherever they live: tables or messages in flight)
     /// stopped being valid by it. Those are exactly the capabilities whose
@@ -1935,6 +1948,7 @@ mod tests {
         // state just before the last one that succeeds.
         l.get_mut(a).unwrap().generation = u32::MAX - 1;
         let before = child_of(&mut l, a);
+        assert_eq!(l.can_revoke(a), Ok(()));
         assert_eq!(l.revoke(a), Ok(()));
         assert!(!l.is_valid(before));
         assert_eq!(l.get(a).unwrap().generation, u32::MAX);
@@ -1942,7 +1956,12 @@ mod tests {
         // The next revocation cannot be recorded: an error, and the child
         // derived meanwhile stays valid (it is exactly what the kernel's
         // caller is told was invalidated if the error is swallowed).
+        // `can_revoke` says so beforehand, and changes nothing.
         let after = child_of(&mut l, a);
+        assert_eq!(l.can_revoke(a), Err(CapError::NoMem));
+        assert_eq!(l.can_revoke(r), Ok(()));
+        assert_eq!(l.can_revoke(NodeId(99)), Err(CapError::BadCap));
+        assert!(l.is_valid(after));
         let err = l.revoke(a).unwrap_err();
         assert_eq!(err, CapError::NoMem);
         assert_eq!(err.errno(), errno::ENOMEM);

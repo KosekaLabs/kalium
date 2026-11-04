@@ -7,20 +7,54 @@
 //! interrupt handler (the timer tick) touches an atomic flag, so no lock is
 //! needed around this state.
 //!
-//! # Objects and reference counts
+//! # Objects, reference counts and reachability
 //!
 //! Every [`ObjectId`] names an [`Object`] in the registry. The registry keeps
 //! a reference count per object: the number of capabilities that refer to
 //! it, wherever they are (in a table or in flight inside a queued message),
 //! plus one pin for objects that must outlive their capabilities (the
 //! console, the spawner and every instance while it runs). A capability
-//! comes into existence through [`Kernel::retain`] (`channel_create`,
+//! comes into existence through `Entry::retain` (`channel_create`,
 //! `cap_derive`, `memobj_create`, `spawn`, the boot capabilities) and
 //! disappears through [`Kernel::release`] (`cap_drop`, instance exit, a
 //! message discarded with its channel). Transfers (`send`/`recv`, `spawn`)
-//! move a capability without touching the count. When the count reaches zero
-//! the object is destroyed; a destroyed channel releases the capabilities in
-//! its queued messages.
+//! move a capability without touching the count, but the registry also
+//! counts, per object, how many of its capabilities are *queued* in
+//! messages ([`Kernel::send_on`] adds them, [`Kernel::recv_from`] and the
+//! draining of a queue take them away). When the count reaches zero the
+//! object is destroyed; a destroyed channel's queue is drained and the
+//! capabilities in it released, which may destroy further objects: that
+//! runs as a loop over a list of dying entries linked through the entries
+//! themselves, so a chain of channels queued in channels is freed without
+//! recursion and without allocating.
+//!
+//! A reference count alone leaks a cycle: a channel whose own queue holds
+//! a message carrying a capability on that channel (a service sends one of
+//! the channel's own send ends over the channel and never receives it)
+//! keeps one reference however many table slots are dropped, and so is
+//! never freed, its charge never released. **Rule:** an object is live
+//! while a table or a pin holds a capability on it, or a capability on it
+//! is queued in a channel that is itself live; a capability queued in a
+//! channel nobody can receive from keeps nothing alive. The registry
+//! enforces it with a mark-and-sweep over the queues
+//! ([`Kernel::collect_unreachable`]): when a release leaves an object with
+//! references but none held by a table or a pin (`refs == queued`), the
+//! objects a table or a pin holds are marked, every capability in a
+//! marked channel's queue marks its object (a bounded work list; when it
+//! overflows the marked channels are rescanned, each round marking at
+//! least one more object), and the queues of the unmarked channels are
+//! drained, which releases every reference on the unmarked objects (by
+//! construction all of them sit in those queues) and frees them, charges
+//! and queued messages included. Only releases can make an object
+//! unreachable (a `send` queues a capability in a channel the sender
+//! holds; a `recv` or a mint puts one in a table), so the check after a
+//! release is the only trigger needed; an instance's exit runs it once
+//! after releasing the whole table. The channel endpoint counts are not
+//! touched by this: a queued send end counts as a sender while someone
+//! may still receive it, and a channel whose only sender is in its own
+//! queue, with no receiver held anywhere, is collected rather than kept
+//! open. The kernel reports what a collection freed (`kalium: collected
+//! N unreachable objects: M queued messages, B budget bytes`).
 //!
 //! Channels additionally count their send and receive ends so that `recv`
 //! can report `ECLOSED` once every sender is gone: `retain`/`release` call
@@ -136,10 +170,11 @@
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::cell::Cell;
 
 use kalium_cap::{CapError, CapIndex, CapTable, Capability, Lineage, ObjectId, ObjectKind, Rights};
 use kalium_hal::println;
-use kalium_ipc::{Channel, WaitQueue};
+use kalium_ipc::{Channel, IpcError, Message, WaitQueue};
 use kalium_mm::MemObject;
 use kalium_sched::{Class, Scheduler, ThreadId};
 use kalium_wasm::{
@@ -247,13 +282,38 @@ pub enum Object {
 
 struct Entry {
     object: Object,
-    /// Capabilities referring to the object plus pins (see the module docs).
+    /// Capabilities referring to the object, wherever they are, plus pins
+    /// (see the module docs).
     refs: usize,
+    /// Of `refs`, the capabilities queued in messages. `refs - queued` is
+    /// what tables and pins hold: the object is a root of reachability
+    /// while that is positive, and a candidate for collection when it is
+    /// zero with `refs` left.
+    queued: usize,
     /// The derivation tree of the capabilities on the object.
     lineage: Lineage,
     /// What the object is charged for (module docs, "Quotas").
     cost: Cost,
+    /// The collector's mark: the epoch of the collection that last found
+    /// the object reachable. A `Cell` so that marking an object needs no
+    /// exclusive borrow of the registry while another entry's queue is
+    /// being read.
+    mark: Cell<u64>,
+    /// Set once `refs` reached zero and the entry waits on the dying list
+    /// for its queue to be drained; `next_dying` links the list (`0` ends
+    /// it: object ids start at 1). Only ever set inside `release_ref`.
+    dying: bool,
+    next_dying: u64,
 }
+
+/// An empty dying list (`Entry::next_dying`).
+const NO_DYING: u64 = 0;
+
+/// Entries the collector's work list holds at most. Bounded so that a
+/// collection on a host call allocates a bounded amount whatever the
+/// number of objects; a registry with more reachable objects than this
+/// costs rescans, not memory.
+const MARK_LIST_LIMIT: usize = 1024;
 
 impl Entry {
     /// A capability on this object came into existence (its node has just
@@ -290,10 +350,11 @@ impl Entry {
     }
 }
 
-/// What `release` lets go of: a capability, or a pin taken with
-/// `new_object`.
+/// What `release` lets go of: a capability in a table, a capability
+/// queued in a message, or a pin taken with `new_object`.
 enum Ref {
     Cap(Capability),
+    Queued(Capability),
     Pin(ObjectId),
 }
 
@@ -322,6 +383,45 @@ fn mint_fresh(
         Err(e) => {
             entry.lineage.release(node);
             Err(e)
+        }
+    }
+}
+
+/// Puts a newly marked object on the collector's work list, or records
+/// that the list was too small for it.
+fn push_marked(list: &mut Vec<u64>, limit: usize, id: u64, overflow: &mut bool) {
+    if list.len() < limit {
+        list.push(id);
+    } else {
+        *overflow = true;
+    }
+}
+
+/// Marks the objects the queued messages of channel `id` refer to (nothing
+/// for another kind of object).
+fn mark_queued(
+    objects: &BTreeMap<u64, Entry>,
+    id: u64,
+    epoch: u64,
+    list: &mut Vec<u64>,
+    limit: usize,
+    overflow: &mut bool,
+) {
+    let Some(Entry {
+        object: Object::Channel { channel, .. },
+        ..
+    }) = objects.get(&id)
+    else {
+        return;
+    };
+    for msg in channel.messages() {
+        for c in &msg.caps {
+            if let Some(child) = objects.get(&c.object.0) {
+                if child.mark.get() != epoch {
+                    child.mark.set(epoch);
+                    push_marked(list, limit, c.object.0, overflow);
+                }
+            }
         }
     }
 }
@@ -427,6 +527,17 @@ pub struct Kernel {
     /// and the budget bytes they released (`Message::cost`); an instance's
     /// exit reports what the channels it held took with it.
     drained: Drained,
+    /// A release left an object with references but none held by a table
+    /// or a pin: a collection is due (module docs, "Objects, reference
+    /// counts and reachability").
+    collect_pending: bool,
+    /// Collections are held back (an instance's exit releases a whole
+    /// table first, then collects once).
+    collect_deferred: bool,
+    /// A collection is running: its own releases must not start another.
+    collecting: bool,
+    /// The current collection's epoch (`Entry::mark`).
+    epoch: u64,
 }
 
 /// Running totals of the queued messages freed with their channels.
@@ -453,6 +564,10 @@ impl Kernel {
             budget: Budget::new(instance_bytes).into_shared(),
             reschedule: false,
             drained: Drained::default(),
+            collect_pending: false,
+            collect_deferred: false,
+            collecting: false,
+            epoch: 0,
         };
         k.console = k.new_object(Object::Console, 1);
         k.spawner = k.new_object(Object::Spawn, 1);
@@ -495,8 +610,12 @@ impl Kernel {
             Entry {
                 object,
                 refs: pins,
+                queued: 0,
                 lineage: Lineage::new(),
                 cost,
+                mark: Cell::new(0),
+                dying: false,
+                next_dying: NO_DYING,
             },
         );
         ObjectId(id)
@@ -623,47 +742,263 @@ impl Kernel {
     }
 
     fn release_ref(&mut self, first: Ref, now: u64) {
-        let mut pending = alloc::vec![first];
-        while let Some(r) = pending.pop() {
-            let (id, cap) = match r {
-                Ref::Cap(c) => (c.object, Some(c)),
-                Ref::Pin(id) => (id, None),
+        let mut dying = NO_DYING;
+        self.release_one(first, now, &mut dying);
+        self.drain_dying(&mut dying, now);
+        self.collect_if_pending(now);
+    }
+
+    /// Drops one reference. An object whose last reference went is put at
+    /// the head of the dying list (`head`, linked through the entries,
+    /// which stay in the registry until [`drain_dying`](Kernel::drain_dying)
+    /// has emptied their queues and removes them). An object left with
+    /// references that only queued messages hold is flagged for the
+    /// collector (module docs).
+    fn release_one(&mut self, r: Ref, now: u64, head: &mut u64) {
+        let (id, cap, queued) = match r {
+            Ref::Cap(c) => (c.object, Some(c), false),
+            Ref::Queued(c) => (c.object, Some(c), true),
+            Ref::Pin(id) => (id, None, false),
+        };
+        let Some(e) = self.objects.get_mut(&id.0) else {
+            return;
+        };
+        let mut to_wake = Vec::new();
+        if let Some(cap) = cap {
+            let valid = e.lineage.is_valid(cap.node);
+            e.lineage.release(cap.node);
+            if valid {
+                to_wake = e.endpoint_dropped(cap);
+            }
+        }
+        if queued {
+            e.queued = e.queued.saturating_sub(1);
+        }
+        e.refs = e.refs.saturating_sub(1);
+        if e.refs == 0 {
+            if !e.dying {
+                e.dying = true;
+                e.next_dying = *head;
+                *head = id.0;
+            }
+        } else if e.refs == e.queued {
+            self.collect_pending = true;
+        }
+        for tid in to_wake {
+            self.wake_thread(tid, now);
+        }
+    }
+
+    /// Frees the entries on the dying list: a channel's queue is drained
+    /// one message at a time, the capabilities of each released (which may
+    /// put more entries at the head of the list, drained before this one
+    /// goes on), then the entry leaves the registry and its charge is
+    /// released. Iterative, and nothing is allocated: the list runs
+    /// through the entries.
+    fn drain_dying(&mut self, head: &mut u64, now: u64) {
+        while *head != NO_DYING {
+            let id = *head;
+            let next = match self.objects.get_mut(&id) {
+                Some(Entry {
+                    object: Object::Channel { channel, .. },
+                    ..
+                }) => channel.try_recv().ok(),
+                _ => None,
             };
-            let mut to_wake = Vec::new();
-            let mut gone = false;
-            if let Some(e) = self.objects.get_mut(&id.0) {
-                if let Some(cap) = cap {
-                    let valid = e.lineage.is_valid(cap.node);
-                    e.lineage.release(cap.node);
-                    if valid {
-                        to_wake = e.endpoint_dropped(cap);
+            match next {
+                Some(msg) => {
+                    self.account_drained(&msg);
+                    for cap in msg.caps {
+                        self.release_one(Ref::Queued(cap), now, head);
                     }
                 }
-                e.refs = e.refs.saturating_sub(1);
-                gone = e.refs == 0;
-            }
-            for tid in to_wake {
-                self.wake_thread(tid, now);
-            }
-            if gone {
-                if let Some(entry) = self.objects.remove(&id.0) {
+                None => {
+                    let Some(entry) = self.objects.remove(&id) else {
+                        *head = NO_DYING;
+                        return;
+                    };
+                    *head = entry.next_dying;
                     if let Some(quota) = quota_of(&entry.object) {
                         self.uncharge(entry.cost, quota);
                     }
-                    if let Object::Channel { mut channel, .. } = entry.object {
-                        for msg in channel.drain() {
-                            // The message's copy was charged at `send`
-                            // (`Message::cost_of`): the slot, the payload
-                            // and the capabilities, released together.
-                            let cost = msg.cost();
-                            self.budget.release(cost);
-                            self.drained.messages = self.drained.messages.saturating_add(1);
-                            self.drained.bytes = self.drained.bytes.saturating_add(cost);
-                            pending.extend(msg.caps.into_iter().map(Ref::Cap));
-                        }
+                }
+            }
+        }
+    }
+
+    /// A queued message is freed with its channel: its copy was charged
+    /// at `send` (`Message::cost_of`: the slot, the payload and the
+    /// capabilities), released together.
+    fn account_drained(&mut self, msg: &Message) {
+        let cost = msg.cost();
+        self.budget.release(cost);
+        self.drained.messages = self.drained.messages.saturating_add(1);
+        self.drained.bytes = self.drained.bytes.saturating_add(cost);
+    }
+
+    /// `send`: queues `msg` on channel `chan`, counting the capabilities
+    /// it carries as in flight. On refusal the message comes back with the
+    /// error, as [`Channel::send_or_return`] hands it back, so that the
+    /// caller can restore its capabilities to the sender's table.
+    pub fn send_on(&mut self, chan: ObjectId, msg: Message) -> Result<(), (IpcError, Message)> {
+        for c in &msg.caps {
+            if let Some(e) = self.objects.get_mut(&c.object.0) {
+                e.queued = e.queued.saturating_add(1);
+            }
+        }
+        let result = match self.channel_mut(chan) {
+            Some(channel) => channel.send_or_return(msg),
+            None => Err((IpcError::Closed, msg)),
+        };
+        if let Err((_, msg)) = &result {
+            for c in &msg.caps {
+                if let Some(e) = self.objects.get_mut(&c.object.0) {
+                    e.queued = e.queued.saturating_sub(1);
+                }
+            }
+        }
+        result
+    }
+
+    /// `recv`: takes the oldest message of channel `chan`
+    /// ([`Channel::try_recv`]'s errors). Its capabilities are no longer in
+    /// flight: the caller puts them in a table or releases them.
+    pub fn recv_from(&mut self, chan: ObjectId) -> Result<Message, IpcError> {
+        let msg = self.channel_mut(chan).ok_or(IpcError::Closed)?.try_recv()?;
+        for c in &msg.caps {
+            if let Some(e) = self.objects.get_mut(&c.object.0) {
+                e.queued = e.queued.saturating_sub(1);
+            }
+        }
+        Ok(msg)
+    }
+
+    // -- collection of unreachable objects ----------------------------------
+
+    fn collect_if_pending(&mut self, now: u64) {
+        if self.collect_pending && !self.collect_deferred && !self.collecting {
+            self.collect_unreachable(now);
+        }
+    }
+
+    /// Frees the objects that only queued messages refer to and that no
+    /// table or pin can reach through the queues (module docs, "Objects,
+    /// reference counts and reachability"): marks what tables and pins
+    /// hold and everything the queues of marked channels carry, then
+    /// drains the queues of the unmarked channels, which releases every
+    /// reference on the unmarked objects and frees them. Bounded work:
+    /// every object is marked at most once, the work list is at most
+    /// [`MARK_LIST_LIMIT`] entries (an overflow is made up by rescanning
+    /// the marked channels, each round marking at least one more object),
+    /// and the sweep drains at least one queue per round. The one
+    /// allocation, the work list, is fallible: when the heap has no room
+    /// for it the collection is left pending for the next release.
+    fn collect_unreachable(&mut self, now: u64) {
+        self.collect_pending = false;
+        // The common release leaves nothing held by queued messages only.
+        if !self
+            .objects
+            .values()
+            .any(|e| e.refs > 0 && e.refs == e.queued)
+        {
+            return;
+        }
+        let limit = self.objects.len().min(MARK_LIST_LIMIT);
+        let mut list: Vec<u64> = Vec::new();
+        if list.try_reserve_exact(limit).is_err() {
+            self.collect_pending = true;
+            return;
+        }
+        self.collecting = true;
+        self.epoch = self.epoch.wrapping_add(1);
+        let epoch = self.epoch;
+        let objects_before = self.objects.len();
+        let drained_before = self.drained;
+
+        // Mark. Roots: what a table or a pin holds.
+        let mut overflow = false;
+        for (&id, e) in self.objects.iter() {
+            if e.refs > e.queued {
+                e.mark.set(epoch);
+                push_marked(&mut list, limit, id, &mut overflow);
+            }
+        }
+        loop {
+            while let Some(id) = list.pop() {
+                mark_queued(&self.objects, id, epoch, &mut list, limit, &mut overflow);
+            }
+            if !overflow {
+                break;
+            }
+            // Marked objects the list could not hold: their queues have
+            // not been looked at. Rescan every marked channel; a round
+            // that overflows again has marked something new.
+            overflow = false;
+            for (&id, e) in self.objects.iter() {
+                if e.mark.get() == epoch {
+                    mark_queued(&self.objects, id, epoch, &mut list, limit, &mut overflow);
+                }
+            }
+        }
+
+        // Sweep: drain the queues of the unmarked channels, a batch at a
+        // time, until none is left with a message.
+        loop {
+            list.clear();
+            for (&id, e) in self.objects.iter() {
+                if e.mark.get() == epoch || list.len() >= limit {
+                    continue;
+                }
+                if let Object::Channel { channel, .. } = &e.object {
+                    if !channel.is_empty() {
+                        list.push(id);
                     }
                 }
             }
+            if list.is_empty() {
+                break;
+            }
+            while let Some(id) = list.pop() {
+                self.drain_unreachable(id, now);
+            }
+        }
+        self.collecting = false;
+
+        let freed = objects_before.saturating_sub(self.objects.len());
+        if freed > 0 {
+            println!(
+                "kalium: collected {} unreachable objects: {} queued messages, {} budget bytes",
+                freed,
+                self.drained
+                    .messages
+                    .saturating_sub(drained_before.messages),
+                self.drained.bytes.saturating_sub(drained_before.bytes),
+            );
+        }
+    }
+
+    /// Empties the queue of unreachable channel `id`, releasing what its
+    /// messages carry; the channel itself goes when its last reference
+    /// does (possibly from its own queue, through the dying list).
+    fn drain_unreachable(&mut self, id: u64, now: u64) {
+        let mut dying = NO_DYING;
+        loop {
+            let msg = match self.objects.get_mut(&id) {
+                Some(Entry {
+                    object: Object::Channel { channel, .. },
+                    dying: false,
+                    ..
+                }) => channel.try_recv().ok(),
+                _ => None,
+            };
+            let Some(msg) = msg else {
+                return;
+            };
+            self.account_drained(&msg);
+            for cap in msg.caps {
+                self.release_one(Ref::Queued(cap), now, &mut dying);
+            }
+            self.drain_dying(&mut dying, now);
         }
     }
 
@@ -742,57 +1077,77 @@ impl Kernel {
     /// woken so that a blocked `recv`/`wait_any`/`instance_wait` re-issues
     /// its call and sees `EBADCAP` (or `ECLOSED`).
     ///
-    /// Errors are the lineage's ([`Lineage::revoke_among`]), and nothing is
+    /// Errors are the lineage's ([`Lineage::can_revoke`]), and nothing is
     /// invalidated on one: `BadCap` if the object or the node is unknown
     /// (the host call has validated the capability first, so not from
     /// there), `NoMem` if the node's generation would wrap. The error must
     /// reach the caller, since the derived capabilities stay valid then.
+    ///
+    /// The scan of every table and every queued message counts what the
+    /// revocation kills and allocates nothing, however many capabilities
+    /// there are: this runs on a host call, where an allocation sized by
+    /// what instances hold must not be able to abort the kernel.
     pub fn revoke(&mut self, cap: Capability, now: u64) -> Result<usize, CapError> {
         let id = cap.object;
-        let Some(entry) = self.objects.get(&id.0) else {
-            return Err(CapError::BadCap);
-        };
-        // Every valid capability on the object, in tables and in flight.
-        // The lineage decides which of them this revocation kills.
+        let entry = self.objects.get(&id.0).ok_or(CapError::BadCap)?;
+        entry.lineage.can_revoke(cap.node)?;
+        // What dies: every capability on the object that is valid now and
+        // strictly below `cap.node` (the node itself, its siblings and its
+        // ancestors are untouched, and one already invalid stays so).
         let lineage = &entry.lineage;
-        let mut held: Vec<Capability> = Vec::new();
+        let dies = |c: &Capability| {
+            c.object == id
+                && c.node != cap.node
+                && lineage.is_descendant(c.node, cap.node)
+                && lineage.is_valid(c.node)
+        };
+        let mut dead = 0usize;
+        let mut senders = 0usize;
+        let mut receivers = 0usize;
+        let mut count = |c: &Capability| {
+            if dies(c) {
+                dead += 1;
+                if c.rights.contains(Rights::SEND) {
+                    senders += 1;
+                }
+                if c.rights.contains(Rights::RECV) {
+                    receivers += 1;
+                }
+            }
+        };
         for inst in &self.instances {
-            held.extend(
-                inst.caps
-                    .iter()
-                    .map(|(_, c)| *c)
-                    .filter(|c| c.object == id && lineage.is_valid(c.node)),
-            );
+            for (_, c) in inst.caps.iter() {
+                count(c);
+            }
         }
         for e in self.objects.values() {
             if let Object::Channel { channel, .. } = &e.object {
                 for msg in channel.messages() {
-                    held.extend(
-                        msg.caps
-                            .iter()
-                            .copied()
-                            .filter(|c| c.object == id && lineage.is_valid(c.node)),
-                    );
+                    for c in &msg.caps {
+                        count(c);
+                    }
                 }
             }
         }
-        let Some(entry) = self.objects.get_mut(&id.0) else {
-            return Err(CapError::BadCap);
+        let entry = self.objects.get_mut(&id.0).ok_or(CapError::BadCap)?;
+        entry.lineage.revoke(cap.node)?;
+        let to_wake = match &mut entry.object {
+            Object::Channel { channel, waiters } => {
+                for _ in 0..senders {
+                    channel.sender_dropped();
+                }
+                for _ in 0..receivers {
+                    channel.receiver_dropped();
+                }
+                waiters.wake_all()
+            }
+            Object::Instance { waiters, .. } => waiters.wake_all(),
+            _ => Vec::new(),
         };
-        let dead = entry.lineage.revoke_among(cap.node, &held)?;
-        let mut to_wake = Vec::new();
-        for c in &dead {
-            to_wake.extend(entry.endpoint_dropped(*c));
-        }
-        if let Object::Channel { waiters, .. } | Object::Instance { waiters, .. } =
-            &mut entry.object
-        {
-            to_wake.extend(waiters.wake_all());
-        }
         for tid in to_wake {
             self.wake_thread(tid, now);
         }
-        Ok(dead.len())
+        Ok(dead)
     }
 
     /// Removes a slot and destroys its capability, live or revoked.
@@ -1192,9 +1547,14 @@ impl Kernel {
             self.sched.remove(tid);
         }
         let before = self.drained;
+        // The whole table first, one collection of what it left
+        // unreachable after (module docs).
+        self.collect_deferred = true;
         for cap in caps {
             self.release(cap, now);
         }
+        self.collect_deferred = false;
+        self.collect_if_pending(now);
         // Channels that died with the instance: what their queues still
         // held goes back to the budget here (the boot-test scenario checks
         // the figure against `Message::cost_of` for `hog`).

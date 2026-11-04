@@ -77,7 +77,7 @@ kalium:   module 6: park (215 bytes)
 kalium:   module 7: greedy (3782 bytes)
 kalium:   module 8: revoked (1110 bytes)
 kalium:   module 9: shelf (1257 bytes)
-kalium:   module 10: hog (3470 bytes)
+kalium:   module 10: hog (4952 bytes)
 kalium:   module 11: hello_std (101148 bytes)
 kalium:   module 12: hello_c (202342 bytes)
 kalium: instance limits: 256 pages, 65536 stack values, call depth 1024, 256 cap slots
@@ -162,11 +162,13 @@ kalium: instance 1 (shelf) exited 0 after 11665700 instructions
 init: shelf exited 0
 init: shelf init 284494 us, restore 27429 us
 kalium: instance 0 (init) spawned instance 1 (hog, fair)
+hog: cycle: a channel's send end sent over itself, both ends dropped
+kalium: collected 1 unreachable objects: 1 queued messages, 100 budget bytes
 hog: memobjs 2, pages 256, channels 64, messages 1024
 hog: send 4096 bytes on a fresh channel: ok
 hog: 15 cap-only messages sent, 8 received back
 hog: quota reached, kernel alive
-kalium: instance 1 (hog) exited 0 after 32084 instructions
+kalium: instance 1 (hog) exited 0 after 36825 instructions
 kalium: instance 1 (hog) exit drained 1016 queued messages, 4179200 budget bytes
 init: hog exited 0
 kalium: instance 0 (init) spawned instance 1 (park, fair)
@@ -632,7 +634,10 @@ kalium: init exited 0
 ```
 
 The boot-test scenario checks this on every `cargo xtask test` with
-`hog` (module 10), spawned after `shelf` with a console only. It creates
+`hog` (module 10), spawned after `shelf` with a console only. It first
+leaves the kernel a reference cycle (see
+[Reference cycles](#reference-cycles-through-queued-capabilities)
+below), then creates
 memory objects of the largest size until refused, grows its linear memory
 until refused (64 pages at a time, halving on refusal), creates channels
 until refused and fills each queue with 4096-byte messages until refused,
@@ -696,3 +701,38 @@ kalium: init exited 0
 needs room in the budget for its copy of the message; a service that
 has exhausted the budget itself cannot even send until it frees
 something, which is the point.)
+
+### Reference cycles through queued capabilities
+
+A capability queued in a message is a reference on its object like one in
+a table, and the kernel frees an object when its last reference goes.
+Counting alone leaks a cycle: a channel whose own queue holds a message
+carrying a capability on that same channel keeps one reference however
+many slots are dropped, and so was never freed; its message stayed
+charged to the budget and the channel to its creator's quota (until the
+creator exited; after that it was nobody's and stayed for ever). A
+service could leave such a channel behind at every exit and eat the
+budget a few kilobytes at a time, or 64 KiB at a time with a full queue
+behind the self-reference. The rule now
+([prototype-plan.md](prototype-plan.md), "Reachability") is that a queued
+capability keeps its object alive only while the channel it is queued in
+is itself reachable from a table or a pin; when a release leaves an
+object with references held by queued messages only, the kernel marks
+what tables and pins hold and everything the queues of marked channels
+carry, drains the queues of the unmarked channels and so frees them, and
+reports it.
+
+`hog` leaves exactly one such cycle at its start: a channel, one of its
+send ends derived and sent over the channel itself, both ends dropped
+(`hog: cycle: a channel's send end sent over itself, both ends
+dropped`). The kernel collects it on the second `cap_drop`:
+`kalium: collected 1 unreachable objects: 1 queued messages, 100 budget
+bytes` (the cost of a zero-byte message carrying one capability,
+`Message::cost_of(0, 1)`), and `xtask` checks the line with the figures
+from the same function. Before the fix the same step showed the leak
+three times over, each a failing assertion: `hog` got one channel fewer
+than its quota (`hog: memobjs 2, pages 256, channels 63, messages 1008`,
+since the leaked channel still counted against it), its exit drained one
+queue fewer (`exit drained 1000 queued messages, 4112896 budget bytes`),
+and the end of the run reported `kalium: instance budget: 100 bytes in
+use` instead of 0.
