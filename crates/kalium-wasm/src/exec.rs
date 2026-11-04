@@ -278,6 +278,8 @@ pub struct Execution {
     max_depth: usize,
     /// Reused buffer for host call results.
     host_results: Vec<Value>,
+    /// Instructions executed so far.
+    fuel_used: u64,
     /// Set when the entry function is an import: the whole execution is one
     /// host call with the arguments on the stack (and no frame).
     entry_import: Option<u32>,
@@ -571,6 +573,7 @@ impl Execution {
             max_stack: limits.max_stack_values,
             max_depth: limits.max_call_depth,
             host_results: Vec::new(),
+            fuel_used: 0,
             entry_import: None,
         };
         let setup = (|| {
@@ -618,6 +621,11 @@ impl Execution {
     /// Current number of values on the stack (locals included).
     pub fn stack_len(&self) -> usize {
         self.stack.len()
+    }
+
+    /// Total fuel consumed (instructions executed) over all `run` calls.
+    pub fn fuel_used(&self) -> u64 {
+        self.fuel_used
     }
 
     /// Run for at most `fuel` instructions (1 unit per instruction). Returns
@@ -875,14 +883,28 @@ impl Execution {
 
     // ---- the interpreter loop -------------------------------------------
 
-    #[allow(clippy::cognitive_complexity)]
     fn run_inner(
         &mut self,
         module: &Module,
         inst: &mut Instance,
         host: &mut dyn Host,
-        mut fuel: u64,
+        fuel: u64,
     ) -> Result<Flow, Trap> {
+        let mut left = fuel;
+        let r = self.run_loop(module, inst, host, &mut left);
+        self.fuel_used += fuel - left;
+        r
+    }
+
+    #[allow(clippy::cognitive_complexity)]
+    fn run_loop(
+        &mut self,
+        module: &Module,
+        inst: &mut Instance,
+        host: &mut dyn Host,
+        fuel_ref: &mut u64,
+    ) -> Result<Flow, Trap> {
+        let mut fuel = *fuel_ref;
         let mut fi = self.frames.len().checked_sub(1).ok_or(Trap::Invalid)?;
         let mut body = Self::body_of(module, inst, self.frames[fi].func)?;
         let mut pc = self.frames[fi].pc as usize;
@@ -899,7 +921,10 @@ impl Execution {
                         pc = frame.pc as usize;
                         base = frame.base;
                     }
-                    None => return Ok(Flow::Done),
+                    None => {
+                        *fuel_ref = fuel;
+                        return Ok(Flow::Done);
+                    }
                 }
             };
         }
@@ -931,9 +956,13 @@ impl Execution {
                                 self.push(v)?;
                             }
                             self.frames[fi].pc = (pc - 1) as u32;
+                            *fuel_ref = fuel;
                             return Ok(Flow::Blocked);
                         }
-                        HostOutcome::Exit(code) => return Ok(Flow::Exited(code)),
+                        HostOutcome::Exit(code) => {
+                            *fuel_ref = fuel;
+                            return Ok(Flow::Exited(code));
+                        }
                     }
                 } else {
                     self.frames[fi].pc = pc as u32;
@@ -961,6 +990,7 @@ impl Execution {
         loop {
             if fuel == 0 {
                 self.frames[fi].pc = pc as u32;
+                *fuel_ref = fuel;
                 return Ok(Flow::OutOfFuel);
             }
             fuel -= 1;
