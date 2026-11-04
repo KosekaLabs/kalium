@@ -1,0 +1,20 @@
+# Source of tests/fixtures/rust_fixture.wasm. Detached from the kalium
+# workspace on purpose; see ../README.md for how to rebuild.
+[package]
+name = "kalium-wasm-fixture"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[workspace]
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+debug = false
+strip = true

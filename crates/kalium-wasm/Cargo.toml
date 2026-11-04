@@ -4,7 +4,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "WebAssembly decoder, validator and interpreter for the Kalium kernel (no_std + alloc)"
 
 [dependencies]
+# Float math for the interpreter (no_std). The decoder itself does not use it.
+libm = "0.2"
 
 [dev-dependencies]
+# Host-only: assembles the text-format test modules.
+wat = "1"
+# Host-only: parses the vendored spec test scripts (tests/spec/*.wast).
+wast = "263"
