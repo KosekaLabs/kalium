@@ -14,6 +14,7 @@ const MOD_PONG: u32 = 2;
 const MOD_RT: u32 = 3;
 const MOD_FAIR: u32 = 4;
 const MOD_FAULTY: u32 = 5;
+const MOD_GREEDY: u32 = 7;
 
 /// `rt` parameters: period 2 ms, budget 500 µs.
 const RT_PERIOD_NS: i64 = 2_000_000;
@@ -69,6 +70,18 @@ pub extern "C" fn _start() {
     // and carry on.
     let faulty = spawn_fair(spawner, MOD_FAULTY, &[], "faulty");
     report("faulty", faulty);
+
+    // Phase 4: a hostile spawner. `greedy` floods the kernel with `park`
+    // instances, dropping their capabilities, until the kernel-wide instance
+    // limit refuses it, then shows the slots come back. It takes init's
+    // Spawn capability with it (init has nothing left to spawn), so this is
+    // the last phase.
+    let greedy_console = console
+        .cap()
+        .derive(rights::WRITE | rights::TRANSFER)
+        .unwrap_or_else(|e| fail("cap_derive (greedy console)", e));
+    let greedy = spawn_fair(spawner, MOD_GREEDY, &[greedy_console, spawner], "greedy");
+    report("greedy", greedy);
 
     say("init: done");
     exit(0);

@@ -53,8 +53,10 @@ done"): the `init` service prints through its console capability, spawns
 object transferred in the last one; spawns two busy-looping fair instances
 and a real-time one (period 2 ms, budget 500 µs) that meets its periods under
 that load; spawns `faulty`, which traps on an out-of-bounds load and is
-reported by the kernel while everything else continues. `init` observes each
-exit through `instance_wait`, and the kernel exits QEMU with the result.
+reported by the kernel while everything else continues; hands its `Spawn`
+capability to `greedy`, a hostile service that spawns and forgets instances
+until the kernel's instance limit refuses it. `init` observes each exit
+through `instance_wait`, and the kernel exits QEMU with the result.
 
 The interpreter runs at roughly 12 million Wasm instructions per second under
 QEMU TCG on a laptop-class host. Ahead-of-time compilation, MMU-backed

@@ -17,6 +17,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "greedy"
+version = "0.1.0"
+dependencies = [
+ "kalium-sdk",
+]
+
+[[package]]
 name = "init"
 version = "0.1.0"
 dependencies = [
@@ -32,6 +39,13 @@ name = "kalium-sdk"
 version = "0.1.0"
 dependencies = [
  "kalium-abi",
+]
+
+[[package]]
+name = "park"
+version = "0.1.0"
+dependencies = [
+ "kalium-sdk",
 ]
 
 [[package]]

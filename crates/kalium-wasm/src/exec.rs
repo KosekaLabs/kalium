@@ -23,8 +23,10 @@
 //! [`Execution::run`] returns `OutOfFuel` promptly and can be resumed.
 //!
 //! Host calls see their arguments as a slice of the stack; on
-//! [`HostOutcome::Block`] nothing is popped and the pc is rewound to the
-//! call instruction so that resuming re-issues the call.
+//! [`HostOutcome::Block`] nothing is popped, anything the instruction popped
+//! before the call (the table index of `call_indirect`) is pushed back, and
+//! the pc is rewound to the call instruction so that resuming re-issues the
+//! call with the stack exactly as it was.
 //!
 //! The interpreter assumes a validated module but never trusts it: any
 //! state a valid module cannot produce (type confusion on the stack, an
@@ -909,14 +911,25 @@ impl Execution {
                 }
             };
         }
+        // `$restore` is what the instruction popped before the call (the
+        // table index of `call_indirect`): it goes back on the stack when the
+        // host blocks, so that the re-issued instruction finds the stack as
+        // it was and calls the same function with the same arguments.
         macro_rules! call {
-            ($f:expr) => {{
+            ($f:expr) => {
+                call!($f, None)
+            };
+            ($f:expr, $restore:expr) => {{
                 let f: u32 = $f;
                 if inst.is_imported_func(f) {
                     match self.host_call(module, inst, host, f)? {
                         HostOutcome::Continue => {}
                         HostOutcome::Block => {
                             // Rewind to the call so that resuming re-issues it.
+                            let restore: Option<Value> = $restore;
+                            if let Some(v) = restore {
+                                self.push(v)?;
+                            }
                             self.frames[fi].pc = (pc - 1) as u32;
                             return Ok(Flow::Blocked);
                         }
@@ -1025,7 +1038,8 @@ impl Execution {
                             return Err(Trap::IndirectCallTypeMismatch);
                         }
                     }
-                    call!(f);
+                    // The popped index is restored if the host blocks.
+                    call!(f, Some(Value::I32(i as i32)));
                 }
 
                 // ---- parametric ---------------------------------------
@@ -1095,7 +1109,7 @@ impl Execution {
                 Instr::TableGrow(t) => {
                     let n = self.pop_as::<i32>()? as u32;
                     let init = self.pop()?;
-                    let r = table!(t).grow(n, init).map_or(-1, |old| old as i32);
+                    let r = inst.grow_table(t, n, init)?.map_or(-1, |old| old as i32);
                     self.push(Value::I32(r))?;
                 }
                 Instr::TableFill(t) => {
@@ -2277,6 +2291,157 @@ mod tests {
         );
     }
 
+    /// A host that blocks the first call to each function and answers the
+    /// second, recording every call it sees.
+    struct BlockOnceHost {
+        seen: Vec<u32>,
+        calls: Vec<(u32, Vec<Value>)>,
+    }
+
+    impl Host for BlockOnceHost {
+        fn call(
+            &mut self,
+            _ctx: &mut HostCtx<'_>,
+            func: HostFuncId,
+            args: &[Value],
+            results: &mut [Value],
+        ) -> Result<HostOutcome, Trap> {
+            self.calls.push((func.0, args.to_vec()));
+            if !self.seen.contains(&func.0) {
+                self.seen.push(func.0);
+                return Ok(HostOutcome::Block);
+            }
+            match func.0 {
+                0 => {
+                    let a = args[0].as_i32().ok_or(Trap::Host)?;
+                    let b = args[1].as_i32().ok_or(Trap::Host)?;
+                    results[0] = Value::I32(a + b);
+                    Ok(HostOutcome::Continue)
+                }
+                1 => Ok(HostOutcome::Continue),
+                _ => Err(Trap::Host),
+            }
+        }
+    }
+
+    /// `call_indirect` pops the table index before the host call; when the
+    /// host blocks, the index must go back on the stack so that the
+    /// re-issued instruction calls the same function with the same
+    /// arguments (KW-1).
+    #[test]
+    fn call_indirect_blocking_import_restores_table_index() {
+        let mut inst = instantiate(
+            r#"(module
+                (type $binop (func (param i32 i32) (result i32)))
+                (type $nullary (func))
+                (import "env" "add" (func $add (type $binop)))
+                (import "env" "none" (func $none (type $nullary)))
+                (table 2 funcref)
+                (elem (i32.const 0) $add $none)
+                (func (export "run") (param i32) (result i32)
+                    (call_indirect (type $binop) (local.get 0) (i32.const 1) (i32.const 0)))
+                (func (export "nullary") (result i32)
+                    (i32.const 7)
+                    (call_indirect (type $nullary) (i32.const 1)))
+            )"#,
+        );
+        let mut host = BlockOnceHost {
+            seen: Vec::new(),
+            calls: Vec::new(),
+        };
+
+        // Two arguments: the slot index (0) sits above them when the host
+        // blocks and must still be there on resume.
+        let run = inst.export_func("run").unwrap();
+        let mut e = Execution::new(&inst, run, &[i32v(41)]).unwrap();
+        assert_eq!(e.run(&mut inst, &mut host, 1000), ExecResult::Blocked);
+        // Local 0, the two arguments and the table index.
+        assert_eq!(e.stack_len(), 4);
+        assert_eq!(
+            e.run(&mut inst, &mut host, 1000),
+            ExecResult::Done(vec![i32v(42)])
+        );
+        assert_eq!(
+            host.calls,
+            vec![(0, vec![i32v(41), i32v(1)]), (0, vec![i32v(41), i32v(1)])]
+        );
+
+        // Zero arguments: the value below the index (7) must not be taken
+        // for the index on resume.
+        host.calls.clear();
+        let nullary = inst.export_func("nullary").unwrap();
+        let mut e = Execution::new(&inst, nullary, &[]).unwrap();
+        assert_eq!(e.run(&mut inst, &mut host, 1000), ExecResult::Blocked);
+        assert_eq!(e.stack_len(), 2);
+        assert_eq!(
+            e.run(&mut inst, &mut host, 1000),
+            ExecResult::Done(vec![i32v(7)])
+        );
+        assert_eq!(host.calls, vec![(1, vec![]), (1, vec![])]);
+    }
+
+    /// Tables are bounded by the instance-wide element budget
+    /// (`Limits::max_table_elements`), not only per table (KW-2).
+    #[test]
+    fn table_element_budget() {
+        let budget = |n| Limits {
+            max_table_elements: n,
+            ..Limits::default()
+        };
+        // Declared minimums are summed over all tables.
+        let two = "(module (table 100 funcref) (table 100 externref))";
+        assert!(matches!(
+            instantiate_with(two, &budget(150)),
+            Err(Error::Limit { .. })
+        ));
+        assert!(instantiate_with(two, &budget(200)).is_ok());
+        assert!(matches!(
+            instantiate_with("(module (table 151 funcref))", &budget(150)),
+            Err(Error::Limit { .. })
+        ));
+        // An absurd minimum (u32::MAX elements would be 64 GiB) is rejected
+        // under the default limits without allocating anything.
+        assert!(matches!(
+            instantiate_with("(module (table 0xffff_ffff funcref))", &Limits::default()),
+            Err(Error::Limit { .. })
+        ));
+        assert!(matches!(
+            instantiate_with(
+                "(module (table 40000 funcref) (table 30000 funcref))",
+                &Limits::default()
+            ),
+            Err(Error::Limit { .. })
+        ));
+
+        // Growth returns -1 (not a trap) when the budget would be exceeded,
+        // even though each table's own bound would allow it.
+        let wat = r#"(module
+            (table $a 10 funcref)
+            (table $b 10 funcref)
+            (func (export "grow_a") (param i32) (result i32)
+                (table.grow $a (ref.null func) (local.get 0)))
+            (func (export "grow_b") (param i32) (result i32)
+                (table.grow $b (ref.null func) (local.get 0)))
+            (func (export "size_b") (result i32) (table.size $b))
+        )"#;
+        let mut inst = instantiate_with(wat, &budget(30)).unwrap();
+        assert_eq!(inst.table_elements(), 20);
+        assert_eq!(one(&mut inst, "grow_b", &[i32v(10)]), i32v(10));
+        assert_eq!(inst.table_elements(), 30);
+        assert_eq!(one(&mut inst, "grow_b", &[i32v(1)]), i32v(-1));
+        assert_eq!(one(&mut inst, "grow_a", &[i32v(1)]), i32v(-1));
+        assert_eq!(one(&mut inst, "grow_a", &[i32v(-1)]), i32v(-1));
+        // A zero-length grow always succeeds, as in the spec.
+        assert_eq!(one(&mut inst, "grow_a", &[i32v(0)]), i32v(10));
+        assert_eq!(one(&mut inst, "size_b", &[]), i32v(20));
+        assert_eq!(inst.table_elements(), 30);
+
+        // A normal module under the default limits is unaffected.
+        let mut inst = instantiate_with(wat, &Limits::default()).unwrap();
+        assert_eq!(one(&mut inst, "grow_a", &[i32v(1000)]), i32v(10));
+        assert_eq!(inst.table_elements(), 1020);
+    }
+
     #[test]
     fn fuel_resumption_matches_single_run() {
         let mut inst = instantiate(CONTROL);
@@ -2376,6 +2541,7 @@ mod tests {
             max_memory_pages: 1,
             max_stack_values: 1000,
             max_call_depth: 100,
+            max_table_elements: 100,
         };
         let mut inst = instantiate_with(wat, &limits).unwrap();
         assert_eq!(trap(&mut inst, "runaway", &[]), Trap::CallDepth);

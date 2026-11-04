@@ -23,8 +23,27 @@ use alloc::vec::Vec;
 
 /// Upper bound on the number of declared locals of one function. Real
 /// toolchains stay far below this; it keeps a hostile module from making us
-/// allocate gigabytes before validation rejects it.
+/// allocate gigabytes before validation rejects it. Exceeding it is reported
+/// as `Malformed("too many locals")`, the spec test suite's wording.
 pub const MAX_LOCALS: u32 = 1 << 20;
+
+/// Upper bound on the declared locals of a whole module, as a multiple of
+/// the module's size in bytes: the locals of all its functions together may
+/// not exceed `MAX_LOCALS_PER_BYTE * bytes.len()` (nor [`MAX_LOCALS`]).
+/// Locals are stored expanded, one byte each, so this bounds what decoding
+/// can allocate for them to 64 times the module's own size; without it a
+/// run-length declaration of a million locals costs a module 8 bytes.
+/// Rust-built modules declare a few locals per hundred bytes of code.
+/// Exceeding it is `Error::Limit`.
+pub const MAX_LOCALS_PER_BYTE: u32 = 64;
+
+/// The number of locals a module of `len` bytes may declare in total.
+fn locals_budget(len: usize) -> u32 {
+    u32::try_from(len)
+        .unwrap_or(u32::MAX)
+        .saturating_mul(MAX_LOCALS_PER_BYTE)
+        .min(MAX_LOCALS)
+}
 
 /// Decode a module without validating it. [`Module::new`] decodes *and*
 /// validates; this is for tools and tests that want the raw IR.
@@ -78,8 +97,9 @@ pub fn decode(bytes: &[u8]) -> Result<Module, Error> {
                     );
                 }
                 let mut code = Vec::with_capacity(count.min(s.remaining()));
+                let mut locals_budget = locals_budget(bytes.len());
                 for _ in 0..count {
-                    let body = s.func_body(&mut uses_data_count)?;
+                    let body = s.func_body(&mut uses_data_count, &mut locals_budget)?;
                     code.push(body);
                 }
                 m.code = code;
@@ -587,7 +607,15 @@ impl<'a> Reader<'a> {
 
     // ---- code -------------------------------------------------------------
 
-    fn func_body(&mut self, uses_data_count: &mut bool) -> Result<FuncBody, Error> {
+    /// `locals_budget` is the number of locals the module may still declare
+    /// (see [`MAX_LOCALS_PER_BYTE`]); every run is charged to it before it is
+    /// expanded, so a module cannot make the decoder allocate more than the
+    /// budget however it spreads its locals over functions.
+    fn func_body(
+        &mut self,
+        uses_data_count: &mut bool,
+        locals_budget: &mut u32,
+    ) -> Result<FuncBody, Error> {
         let size = self.u32()? as usize;
         let start = self.pos;
         if size > self.remaining() {
@@ -607,6 +635,9 @@ impl<'a> Reader<'a> {
                 Some(t) if t <= MAX_LOCALS => t,
                 _ => return Err(b.err_at(off, "too many locals")),
             };
+            *locals_budget = locals_budget.checked_sub(n).ok_or(Error::Limit {
+                msg: "too many locals in module",
+            })?;
             locals.extend(core::iter::repeat_n(ty, n as usize));
         }
 

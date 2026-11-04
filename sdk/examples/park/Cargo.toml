@@ -1,0 +1,16 @@
+[package]
+name = "park"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Kalium boot-test example service: park"
+
+[lib]
+crate-type = ["cdylib"]
+test = false
+doctest = false
+bench = false
+
+[dependencies]
+kalium-sdk.workspace = true

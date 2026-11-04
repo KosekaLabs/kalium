@@ -76,6 +76,7 @@ const LIMITS: Limits = Limits {
     max_memory_pages: 65536,
     max_stack_values: 1 << 20,
     max_call_depth: 10_000,
+    max_table_elements: 1 << 20,
 };
 
 // ---------------------------------------------------------------------------

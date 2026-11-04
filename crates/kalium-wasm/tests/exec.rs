@@ -485,6 +485,7 @@ fn fuzz_unvalidated_modules_never_panic() {
         max_memory_pages: 4,
         max_stack_values: 512,
         max_call_depth: 16,
+        max_table_elements: 64,
     };
     let mut instantiated = 0;
     let mut ran = 0;

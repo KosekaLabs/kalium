@@ -1,7 +1,7 @@
 //! Embeds the boot image: the SDK example modules built by `cargo xtask wasm`
 //! into `target/wasm/<name>.wasm`, in the fixed order the plan prescribes
-//! (`init=0, ping=1, pong=2, rt=3, fair=4, faulty=5`; `init` hardcodes the
-//! indices of the others).
+//! (`init=0, ping=1, pong=2, rt=3, fair=4, faulty=5, park=6, greedy=7`;
+//! `init` and `greedy` hardcode the indices of the others).
 //!
 //! The generated `$OUT_DIR/boot_image.rs` defines
 //! `BOOT_IMAGE: [BootModule; N]` with the module name and an
@@ -16,7 +16,9 @@ use std::fs;
 use std::path::PathBuf;
 
 /// Boot image order. Keep in sync with `xtask` and `sdk/examples/init`.
-const MODULES: [&str; 6] = ["init", "ping", "pong", "rt", "fair", "faulty"];
+const MODULES: [&str; 8] = [
+    "init", "ping", "pong", "rt", "fair", "faulty", "park", "greedy",
+];
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");

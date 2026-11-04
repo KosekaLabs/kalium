@@ -156,6 +156,7 @@ mod imp {
                 max_memory_pages: 256.min(pages_for_heap.max(4)),
                 max_stack_values: 65536,
                 max_call_depth: 1024,
+                max_table_elements: 65536,
             }
         }
 

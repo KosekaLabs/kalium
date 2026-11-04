@@ -485,6 +485,14 @@ pub mod limits {
     /// Maximum memory object size:
     /// > Size limit 16 MiB in M1.
     pub const MAX_MEMOBJ_SIZE: u64 = 16 * 1024 * 1024;
+    /// Maximum number of live instances, kernel-wide and counting `init`:
+    /// > At most 32 instances may be live at once ... `spawn` fails with
+    /// > `ENOMEM` beyond that
+    ///
+    /// Bounds what a holder of a `Spawn` capability can make the kernel
+    /// allocate, whatever it does with the `Instance` capabilities it gets
+    /// back. An exited instance's slot is reused.
+    pub const MAX_INSTANCES: usize = 32;
 }
 
 /// Scheduling class values passed to `spawn`.
@@ -736,6 +744,7 @@ mod tests {
         assert_eq!(limits::MAX_MESSAGE_LEN, 4096);
         assert_eq!(limits::MAX_MESSAGE_CAPS, 4);
         assert_eq!(limits::MAX_MEMOBJ_SIZE, 16 << 20);
+        assert_eq!(limits::MAX_INSTANCES, 32);
         assert_eq!(sched::CLASS_FAIR, 0);
         assert_eq!(sched::CLASS_REAL_TIME, 1);
         assert_eq!(exit::SUCCESS, 0);

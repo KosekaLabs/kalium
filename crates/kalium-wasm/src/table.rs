@@ -12,7 +12,9 @@ use alloc::vec::Vec;
 
 /// Hard cap on the number of elements of any table, whatever the type says.
 /// `table.grow` past it returns `-1`; a module declaring a larger minimum
-/// fails to instantiate with `Error::Limit`.
+/// fails to instantiate with `Error::Limit`. On top of this per-table cap,
+/// [`crate::Instance`] enforces the instance-wide budget over all tables,
+/// [`crate::Limits::max_table_elements`].
 pub const MAX_TABLE_ELEMENTS: u32 = 1 << 20;
 
 /// A bounds-checked table of references.

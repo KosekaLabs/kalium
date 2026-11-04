@@ -31,9 +31,17 @@
 //! # Instances and threads
 //!
 //! An instance is one Wasm instance plus one thread; its index in
-//! [`Kernel::instances`] is both its id and its [`ThreadId`]. The Wasm state
-//! ([`Runnable`]) is taken out of the slot while the run loop executes it so
-//! that host calls can borrow the rest of the kernel. A thread that blocks
+//! [`Kernel::instances`] is both its id and its [`ThreadId`]. There are at
+//! most [`kalium_abi::limits::MAX_INSTANCES`] slots: `create_instance`
+//! refuses to go past that (`ENOMEM` to the spawner), and the slot of an
+//! exited instance is reused by the next one created, like a process id,
+//! so a `spawn` loop that drops its `Instance` capabilities cannot grow the
+//! kernel's heap. Slot 0 is `init`'s for the kernel's lifetime. Nothing
+//! refers to an instance by index across its exit except the
+//! `Object::Instance` its capabilities name, which records the exit itself.
+//! The Wasm state ([`Runnable`]) is taken out of the slot while the run
+//! loop executes it so that host calls can borrow the rest of the kernel. A
+//! thread that blocks
 //! is parked on the wait queue of the object it waits for and remembers
 //! which queues it is in, so a wake-up through any one of them removes it
 //! from all (`wait_any` parks on several).
@@ -130,13 +138,15 @@ pub enum SpawnError {
     Link,
     /// Instantiation ran out of memory.
     NoMem,
+    /// `MAX_INSTANCES` instances are live.
+    TooMany,
 }
 
 impl SpawnError {
     pub fn errno(&self) -> i32 {
         match self {
             SpawnError::NoModule | SpawnError::Link => kalium_abi::errno::ENOENT,
-            SpawnError::NoMem => kalium_abi::errno::ENOMEM,
+            SpawnError::NoMem | SpawnError::TooMany => kalium_abi::errno::ENOMEM,
         }
     }
 }
@@ -384,9 +394,27 @@ impl Kernel {
         }
     }
 
+    /// The slot for a new instance: the lowest slot whose instance has
+    /// exited and whose thread the scheduler has let go, else a fresh one
+    /// while there are fewer than `MAX_INSTANCES`. Slot 0 (`init`) is never
+    /// reused: the run loop treats its exit as the end of the kernel.
+    fn free_slot(&self) -> Option<usize> {
+        let reusable = (1..self.instances.len()).find(|&i| {
+            self.instances[i].exited.is_some() && !self.sched.contains(ThreadId(i as u32))
+        });
+        match reusable {
+            Some(i) => Some(i),
+            None if self.instances.len() < kalium_abi::limits::MAX_INSTANCES => {
+                Some(self.instances.len())
+            }
+            None => None,
+        }
+    }
+
     /// Creates an instance of boot module `module` with `caps` as its
     /// initial capability table (slots `0..n` in order) and schedules it.
     /// Returns the instance id. On error `caps` is handed back untouched.
+    /// Fails with `TooMany` once `MAX_INSTANCES` instances are live.
     pub fn create_instance(
         &mut self,
         module: usize,
@@ -394,6 +422,10 @@ impl Kernel {
         class: Class,
         now: u64,
     ) -> Result<usize, (SpawnError, CapTable)> {
+        // Before anything is allocated for the new instance.
+        let Some(id) = self.free_slot() else {
+            return Err((SpawnError::TooMany, caps));
+        };
         let decoded = match self.decoded_module(module) {
             Ok(m) => m,
             Err(e) => return Err((e, caps)),
@@ -452,7 +484,6 @@ impl Kernel {
             Err(_) => return Err((SpawnError::Link, caps)),
         };
 
-        let id = self.instances.len();
         let object = self.new_object(
             Object::Instance {
                 instance: id,
@@ -461,7 +492,7 @@ impl Kernel {
             },
             1,
         );
-        self.instances.push(Inst {
+        let inst = Inst {
             name,
             caps,
             object,
@@ -471,7 +502,13 @@ impl Kernel {
             sleep_until: None,
             yield_pending: false,
             parked_on: Vec::new(),
-        });
+        };
+        if id == self.instances.len() {
+            self.instances.push(inst);
+        } else {
+            // Reusing the slot of an exited instance; see the module docs.
+            self.instances[id] = inst;
+        }
         self.sched.add(ThreadId(id as u32), class, now);
         self.reschedule = true;
         Ok(id)

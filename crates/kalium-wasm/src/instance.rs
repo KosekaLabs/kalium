@@ -69,6 +69,11 @@ pub struct Limits {
     pub max_stack_values: usize,
     /// Hard cap on the depth of the call stack.
     pub max_call_depth: usize,
+    /// Hard cap on the number of table elements of the instance, summed over
+    /// all its tables (each element is a 16-byte [`Value`]). A module whose
+    /// declared table minimums add up to more fails to instantiate with
+    /// [`Error::Limit`]; `table.grow` past it returns `-1`.
+    pub max_table_elements: u32,
 }
 
 impl Default for Limits {
@@ -77,6 +82,7 @@ impl Default for Limits {
             max_memory_pages: 256,
             max_stack_values: 64 * 1024,
             max_call_depth: 1024,
+            max_table_elements: 65536,
         }
     }
 }
@@ -219,10 +225,22 @@ impl Instance {
             globals.push(v);
         }
 
-        // Tables.
+        // Tables. Each one is bounded by the smaller of the per-table cap and
+        // the instance's element budget, and the declared minimums together
+        // must fit the budget before anything is allocated.
+        let per_table = MAX_TABLE_ELEMENTS.min(limits.max_table_elements);
+        let mut declared: u32 = 0;
+        for t in &module.tables {
+            declared = declared
+                .checked_add(t.limits.min)
+                .filter(|&n| n <= limits.max_table_elements)
+                .ok_or(Error::Limit {
+                    msg: "declared table sizes exceed the instance's table element limit",
+                })?;
+        }
         let mut tables = Vec::with_capacity(module.tables.len());
         for t in &module.tables {
-            let table = Table::new(*t, MAX_TABLE_ELEMENTS).ok_or(Error::Limit {
+            let table = Table::new(*t, per_table).ok_or(Error::Limit {
                 msg: "table size exceeds limit",
             })?;
             tables.push(table);
@@ -359,6 +377,33 @@ impl Instance {
     /// Table `idx`, if it exists.
     pub fn table(&self, idx: u32) -> Option<&Table> {
         self.tables.get(idx as usize)
+    }
+
+    /// Number of table elements currently in use, summed over all tables
+    /// (never more than [`Limits::max_table_elements`]).
+    pub fn table_elements(&self) -> u32 {
+        self.tables
+            .iter()
+            .fold(0u32, |n, t| n.saturating_add(t.size()))
+    }
+
+    /// `table.grow` on table `idx`: grow by `delta` entries set to `init`.
+    /// Returns the old size, or `None` (which Wasm sees as `-1`, the spec's
+    /// failed grow) when the table's own bound or the instance's element
+    /// budget ([`Limits::max_table_elements`]) would be exceeded.
+    /// `Trap::Invalid` names a table that does not exist.
+    pub(crate) fn grow_table(
+        &mut self,
+        idx: u32,
+        delta: u32,
+        init: Value,
+    ) -> Result<Option<u32>, Trap> {
+        let in_use = self.table_elements();
+        let table = self.tables.get_mut(idx as usize).ok_or(Trap::Invalid)?;
+        match in_use.checked_add(delta) {
+            Some(total) if total <= self.limits.max_table_elements => Ok(table.grow(delta, init)),
+            _ => Ok(None),
+        }
     }
 
     /// The current value of global `idx`, if it exists.

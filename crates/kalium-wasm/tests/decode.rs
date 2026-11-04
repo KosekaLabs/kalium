@@ -1329,3 +1329,67 @@ fn huge_counts_do_not_allocate() {
     let bytes = raw(&[section(2, &[1, 0xFF, 0xFF, 0xFF, 0xFF, 0x0F])]);
     assert!(Module::new(&bytes).is_err());
 }
+
+/// Locals are stored expanded, so a module must not be able to make the
+/// decoder allocate far more than its own size: the locals of all functions
+/// together are bounded by `MAX_LOCALS_PER_BYTE` per input byte (KW-3).
+#[test]
+fn locals_are_bounded_by_module_size() {
+    use kalium_wasm::decode::{MAX_LOCALS, MAX_LOCALS_PER_BYTE};
+
+    /// `funcs` functions of type `() -> ()`, each declaring `locals` i32
+    /// locals in a single run.
+    fn with_locals(funcs: u32, locals: u32) -> Vec<u8> {
+        let mut body = vec![1];
+        leb(&mut body, locals);
+        body.extend_from_slice(&[0x7F, 0x0B]);
+        let mut code = Vec::new();
+        leb(&mut code, funcs);
+        for _ in 0..funcs {
+            leb(&mut code, body.len() as u32);
+            code.extend_from_slice(&body);
+        }
+        let mut func_sec = Vec::new();
+        leb(&mut func_sec, funcs);
+        func_sec.extend(std::iter::repeat_n(0u8, funcs as usize));
+        raw(&[
+            section(1, &[1, 0x60, 0, 0]),
+            section(3, &func_sec),
+            section(10, &code),
+        ])
+    }
+    let over = Err(Error::Limit {
+        msg: "too many locals in module",
+    });
+
+    // One function at the per-function limit: 8 bytes of locals in a module
+    // of a few dozen bytes would expand to 1 MiB.
+    let m = with_locals(1, MAX_LOCALS);
+    assert!(m.len() < 64);
+    assert_eq!(Module::new(&m), over);
+    // Many functions just under the per-function limit: 256 MiB expanded
+    // from a module of about 2 KiB.
+    let m = with_locals(256, MAX_LOCALS - 1);
+    assert!(m.len() < 4096);
+    assert_eq!(Module::new(&m), over);
+
+    // Exactly at the budget decodes; one more local is over it. Both counts
+    // take two LEB bytes, so the two modules have the same size.
+    let probe = with_locals(2, 128);
+    let half = probe.len() as u32 * MAX_LOCALS_PER_BYTE / 2;
+    assert!((128..16383).contains(&half));
+    let at = with_locals(2, half);
+    assert_eq!(at.len(), probe.len());
+    let m = Module::new(&at).unwrap();
+    let total: usize = m.code.iter().map(|b| b.locals.len()).sum();
+    assert_eq!(total, 2 * half as usize);
+    assert!(total <= at.len() * MAX_LOCALS_PER_BYTE as usize);
+    let beyond = with_locals(2, half + 1);
+    assert_eq!(beyond.len(), probe.len());
+    assert_eq!(Module::new(&beyond), over);
+
+    // A real toolchain's output is nowhere near the budget.
+    let fixture = Module::new(FIXTURE).unwrap();
+    let total: usize = fixture.code.iter().map(|b| b.locals.len()).sum();
+    assert!(total < FIXTURE.len());
+}

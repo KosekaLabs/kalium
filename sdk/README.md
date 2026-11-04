@@ -3,7 +3,9 @@
 This directory is a separate Cargo workspace that targets
 `wasm32-unknown-unknown`. It holds `kalium-sdk`, the safe Rust wrapper over
 the kernel's host ABI, and the example services in `examples/` that make up
-the M1 boot-test scenario (`init`, `ping`, `pong`, `rt`, `fair`, `faulty`).
+the M1 boot-test scenario (`init`, `ping`, `pong`, `rt`, `fair`, `faulty`)
+plus the hostile pair that checks the kernel's instance limit (`greedy`,
+`park`).
 
 The ABI itself (import names, errno values, rights, kinds, wire layouts) is
 defined once, in `crates/kalium-abi`, and both the kernel and this SDK are
@@ -19,8 +21,9 @@ cargo xtask wasm
 
 builds every example in release mode (`opt-level = "s"`, LTO, `panic =
 "abort"`, stripped) and copies them to `target/wasm/<name>.wasm` in boot
-image order (`init=0, ping=1, pong=2, rt=3, fair=4, faulty=5`). The kernel's
-`build.rs` embeds them from there. To build by hand:
+image order (`init=0, ping=1, pong=2, rt=3, fair=4, faulty=5, park=6,
+greedy=7`). The kernel's `build.rs` embeds them from there. To build by
+hand:
 
 ```
 cargo build --release --target wasm32-unknown-unknown --manifest-path sdk/Cargo.toml
@@ -157,6 +160,11 @@ memory object containing `hello`, which `pong` reads back (`pong: got
 memobj hello`, `pong: 100 messages`). Then `init` spawns two `fair`
 instances that busy-loop for a second and `rt`, a real-time instance
 (period 2 ms, budget 500 µs) that runs 400 periods and prints `rt: met
-X/400`. Finally `faulty` performs an out-of-bounds load and traps. `init`
-waits for each instance, prints `init: <name> exited <code>` for each,
-prints `init: done` and exits with 0.
+X/400`. Then `faulty` performs an out-of-bounds load and traps. Finally
+`init` hands its `Spawn` capability to `greedy`, which spawns `park`
+instances and drops their capabilities until the kernel refuses with
+`ENOMEM` at its instance limit (`greedy: spawn refused (ENOMEM) after 30
+instances`), releases them by closing the channel they block on, and spawns
+once more to show the slots are reused (`greedy: slot reclaimed, park exited
+0`). `init` waits for each instance, prints `init: <name> exited <code>` for
+each, prints `init: done` and exits with 0.

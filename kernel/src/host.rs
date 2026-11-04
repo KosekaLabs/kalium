@@ -795,7 +795,14 @@ impl<'a> HostCall<'a> {
             .map_err(cap_errno)?
             .object;
         let target = match self.k.object(id) {
-            Some(Object::Instance { instance, .. }) => *instance,
+            // Already exited: its slot may belong to another instance by
+            // now, so the object's own record decides, not the slot.
+            Some(Object::Instance { exit: Some(_), .. }) => return OK,
+            Some(Object::Instance {
+                instance,
+                exit: None,
+                ..
+            }) => *instance,
             _ => return Err(errno::EBADCAP),
         };
         if target == self.cur {

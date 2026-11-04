@@ -471,9 +471,11 @@ impl Scheduler {
         if self.threads.remove(&id).is_none() {
             return false;
         }
-        // The fair queue may still hold an entry; it is dropped when it
-        // reaches the front (the thread is unknown by then). The `current`
-        // record is cleared so `next_deadline_ns` stops reporting its slice.
+        // Purge the fair queue: the kernel reuses the slot, and so the
+        // `ThreadId`, of an exited instance, and a stale entry would give
+        // the new thread a second turn. The `current` record is cleared so
+        // `next_deadline_ns` stops reporting its slice.
+        self.fair_queue.retain(|&t| t != id);
         if self.current.map(|c| c.id) == Some(id) {
             self.current = None;
         }
@@ -1500,8 +1502,9 @@ mod tests {
         assert_eq!(s.rt_stats(ThreadId(2)), None);
         // No RT thread, no sleeper: nothing pending but the queue.
         assert_eq!(s.next_deadline_ns(), None);
-        // Thread 3 is queued; removing it drops its stale entry at pick.
+        // Thread 3 is queued; removing it purges its entry.
         assert!(s.remove(ThreadId(3)));
+        assert!(!s.fair_queue.contains(&ThreadId(3)));
         assert_eq!(s.pick_next(MS), Some((ThreadId(4), MS)));
         // The sleeper's wake time no longer resurrects anything.
         s.tick(5 * MS);
@@ -1658,6 +1661,34 @@ mod tests {
         assert_eq!(s.next_deadline_ns(), Some(MS));
         s.tick(MS);
         assert_eq!(s.next_deadline_ns(), Some(2 * MS));
+    }
+
+    #[test]
+    fn reused_thread_id_has_one_queue_entry() {
+        // The kernel reuses the slot, and so the `ThreadId`, of an exited
+        // instance. A stale fair-queue entry of the old thread must not give
+        // the new one a second turn in the round robin.
+        let mut s = Scheduler::new();
+        s.add(ThreadId(1), fair(1), 0);
+        s.add(ThreadId(2), fair(1), 0);
+        // 1 runs its whole slice and is preempted: queued behind 2.
+        assert_eq!(s.pick_next(0).map(|p| p.0), Some(ThreadId(1)));
+        s.account(ThreadId(1), MS, MS, RunOutcome::Preempted);
+        assert!(s.fair_queue.contains(&ThreadId(1)));
+        // 1 exits while queued and its id is reused by a new thread.
+        assert!(s.remove(ThreadId(1)));
+        assert!(!s.fair_queue.contains(&ThreadId(1)));
+        s.add(ThreadId(1), fair(1), MS);
+        assert_eq!(
+            s.fair_queue.iter().filter(|&&t| t == ThreadId(1)).count(),
+            1
+        );
+        // Round robin: 2, the new 1, 2 again, 1 again.
+        for (i, expect) in [2u32, 1, 2, 1].into_iter().enumerate() {
+            let now = (i as u64 + 1) * MS;
+            assert_eq!(s.pick_next(now).map(|p| p.0), Some(ThreadId(expect)));
+            s.account(ThreadId(expect), MS, now + MS, RunOutcome::Preempted);
+        }
     }
 
     #[test]

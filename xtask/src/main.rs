@@ -24,9 +24,11 @@ const EXIT_TIMEOUT: i32 = 124;
 const BOOT_TEST_MARKER: &str = "kalium: 10 ticks";
 
 /// The SDK example modules in boot-image order (`init=0, ping=1, pong=2,
-/// rt=3, fair=4, faulty=5`); the kernel's `build.rs` embeds
-/// `target/wasm/<name>.wasm` in this order.
-const WASM_MODULES: [&str; 6] = ["init", "ping", "pong", "rt", "fair", "faulty"];
+/// rt=3, fair=4, faulty=5, park=6, greedy=7`); the kernel's `build.rs`
+/// embeds `target/wasm/<name>.wasm` in this order.
+const WASM_MODULES: [&str; 8] = [
+    "init", "ping", "pong", "rt", "fair", "faulty", "park", "greedy",
+];
 const WASM_TARGET: &str = "wasm32-unknown-unknown";
 /// Where the SDK workspace builds (kept apart from the kernel's target dir
 /// so the two workspaces never share a lock or a profile).
@@ -481,6 +483,9 @@ fn test(root: &Path) -> i32 {
 /// `rt` must meet at least this many of its 400 periods (95%).
 const RT_PERIODS: u32 = 400;
 const RT_MIN_MET: u32 = 380;
+/// How many `park` children `greedy` spawns before the kernel-wide instance
+/// limit refuses the next one: everything but `init` and `greedy` itself.
+const GREEDY_CHILDREN: u32 = kalium_abi::limits::MAX_INSTANCES as u32 - 2;
 
 /// One expected console line.
 enum Expect {
@@ -490,6 +495,9 @@ enum Expect {
     FaultyTrap,
     /// `rt: met N/400` with `N >= RT_MIN_MET`.
     RtMet,
+    /// `greedy: spawn refused (ENOMEM) after N instances` with
+    /// `N == GREEDY_CHILDREN`: the instance limit held exactly.
+    GreedyLimit,
 }
 
 impl Expect {
@@ -502,6 +510,7 @@ impl Expect {
             }
             Expect::RtMet => parse_rt_met(line)
                 .is_some_and(|(met, total)| total == RT_PERIODS && met >= RT_MIN_MET),
+            Expect::GreedyLimit => parse_greedy_refused(line) == Some(GREEDY_CHILDREN),
         }
     }
 
@@ -512,8 +521,19 @@ impl Expect {
                 "`kalium: instance <id> (faulty) trapped: out of bounds memory access`".into()
             }
             Expect::RtMet => format!("`rt: met N/{RT_PERIODS}` with N >= {RT_MIN_MET}"),
+            Expect::GreedyLimit => {
+                format!("`greedy: spawn refused (ENOMEM) after {GREEDY_CHILDREN} instances`")
+            }
         }
     }
+}
+
+/// Parses `greedy: spawn refused (ENOMEM) after N instances` into `N`.
+fn parse_greedy_refused(line: &str) -> Option<u32> {
+    line.strip_prefix("greedy: spawn refused (ENOMEM) after ")?
+        .strip_suffix(" instances")?
+        .parse()
+        .ok()
 }
 
 /// Parses `rt: met N/T` into `(N, T)`.
@@ -536,6 +556,9 @@ const ORDERED: &[Expect] = &[
     Expect::Line("init: fair exited 0"),
     Expect::FaultyTrap,
     Expect::Line("init: faulty exited -1"),
+    Expect::GreedyLimit,
+    Expect::Line("greedy: slot reclaimed, park exited 0"),
+    Expect::Line("init: greedy exited 0"),
     Expect::Line("init: done"),
     Expect::Line("kalium: init exited 0"),
 ];
@@ -558,6 +581,12 @@ fn check_scenario(out: &str) -> Vec<String> {
                         Some((met, total)) => format!(" (found `rt: met {met}/{total}`)"),
                         None => String::new(),
                     },
+                    Expect::GreedyLimit => {
+                        match lines.iter().find_map(|l| parse_greedy_refused(l)) {
+                            Some(n) => format!(" (found `... after {n} instances`)"),
+                            None => String::new(),
+                        }
+                    }
                     _ => String::new(),
                 };
                 failures.push(format!(
@@ -695,9 +724,16 @@ mod tests {
         init: rt exited 0\n\
         init: fair exited 0\n\
         init: fair exited 0\n\
-        kalium: instance 6 (faulty) trapped: out of bounds memory access\n\
-        kalium: instance 6 (faulty) exited -1\n\
+        kalium: instance 1 (faulty) trapped: out of bounds memory access\n\
+        kalium: instance 1 (faulty) exited -1\n\
         init: faulty exited -1\n\
+        kalium: instance 0 (init) spawned instance 1 (greedy, fair)\n\
+        kalium: instance 1 (greedy) spawned instance 2 (park, fair)\n\
+        greedy: spawn refused (ENOMEM) after 30 instances\n\
+        kalium: instance 2 (park) exited 0\n\
+        greedy: slot reclaimed, park exited 0\n\
+        kalium: instance 1 (greedy) exited 0\n\
+        init: greedy exited 0\n\
         init: done\n\
         kalium: init exited 0\n";
 
@@ -730,7 +766,7 @@ mod tests {
         let one_fair = GOOD.replacen("init: fair exited 0\n", "", 1);
         assert_eq!(check_scenario(&one_fair).len(), 1);
         let no_trap = GOOD.replace(
-            "kalium: instance 6 (faulty) trapped: out of bounds memory access\n",
+            "kalium: instance 1 (faulty) trapped: out of bounds memory access\n",
             "",
         );
         assert_eq!(check_scenario(&no_trap).len(), 1);
@@ -740,5 +776,34 @@ mod tests {
         assert!(check_scenario(&late_ping)[0].contains("before"));
         let panicked = format!("{GOOD}kalium: panic at x: y\n");
         assert_eq!(check_scenario(&panicked).len(), 1);
+    }
+
+    #[test]
+    fn greedy_must_hit_the_limit_exactly() {
+        assert_eq!(GREEDY_CHILDREN, 30);
+        assert_eq!(
+            parse_greedy_refused("greedy: spawn refused (ENOMEM) after 30 instances"),
+            Some(30)
+        );
+        assert_eq!(
+            parse_greedy_refused("greedy: spawn refused (ENOMEM) after x instances"),
+            None
+        );
+        // One child too many or too few means the kernel's limit is off.
+        for n in [29, 31] {
+            let off = GOOD.replace("after 30 instances", &format!("after {n} instances"));
+            let f = check_scenario(&off);
+            assert_eq!(f.len(), 1, "{f:?}");
+            assert!(f[0].contains(&format!("found `... after {n} instances`")));
+        }
+        // A kernel without the limit: greedy gives up and init fails.
+        let unlimited = GOOD
+            .replace(
+                "greedy: spawn refused (ENOMEM) after 30 instances\n",
+                "greedy: no instance limit\n",
+            )
+            .replace("greedy: slot reclaimed, park exited 0\n", "")
+            .replace("init: greedy exited 0", "init: greedy exited 1");
+        assert_eq!(check_scenario(&unlimited).len(), 3);
     }
 }
