@@ -61,6 +61,15 @@ fn plan_declares_the_current_api() {
         "as is any table, memory or global import",
         // The embedder's obligation the range check enforces.
         "An `addr` inside the importer's own range is `Error::IncompatibleImport`",
+        // Fast start: the shared program and snapshots.
+        "pub program: ProgramCache",
+        "pub fn snapshot(&self) -> Result<Snapshot, Error>;",
+        "pub fn from_snapshot(module: Arc<Module>, snapshot: &Snapshot, resolve: &mut dyn FnMut(&str, &str, &ExternType<'_>) -> Option<Extern>, limits: &Limits, func_base: u32) -> Result<Instance, Error>;",
+        "pub fn to_bytes(&self) -> Vec<u8>;",
+        "pub fn from_bytes(bytes: &[u8]) -> Result<Snapshot, Error>;",
+        "pub fn memory_pages(&self) -> u32; pub fn memory(&self) -> &[u8];",
+        "Snapshot { msg }",
+        "`Rc::strong_count == 1`",
     ];
     let missing: Vec<&str> = required
         .iter()
@@ -87,7 +96,7 @@ fn plan_items_exist_in_the_crate() {
     // check of the signatures the strings above name. Nothing is run.
     use kalium_wasm::{
         Error, Extern, ExternType, GlobalRef, Host, HostCtx, HostFuncId, HostOutcome, Instance,
-        Limits, MemoryRef, Module, TableRef, Trap, Value,
+        Limits, MemoryRef, Module, ProgramCache, Snapshot, TableRef, Trap, Value,
     };
     use std::sync::Arc;
     /// The signature the plan gives `Instance::instantiate` and `Instance::allocate`.
@@ -105,6 +114,24 @@ fn plan_items_exist_in_the_crate() {
     let _: fn(&Instance, &str) -> Option<GlobalRef> = Instance::export_global;
     let _: fn(&Instance, u32) -> Option<u32> = Instance::func_addr;
     let _: fn(&Instance, u32) -> Option<u32> = Instance::local_func;
+    let _: fn(&Instance) -> Result<Snapshot, Error> = Instance::snapshot;
+    /// The signature the plan gives `Instance::from_snapshot`.
+    type FromSnapshot = fn(
+        Arc<Module>,
+        &Snapshot,
+        &mut dyn FnMut(&str, &str, &ExternType<'_>) -> Option<Extern>,
+        &Limits,
+        u32,
+    ) -> Result<Instance, Error>;
+    let _: FromSnapshot = Instance::from_snapshot;
+    let _: fn(&Snapshot) -> Vec<u8> = Snapshot::to_bytes;
+    let _: fn(&[u8]) -> Result<Snapshot, Error> = Snapshot::from_bytes;
+    let _: fn(&Snapshot) -> u32 = Snapshot::memory_pages;
+    let _: fn(&Snapshot) -> &[u8] = Snapshot::memory;
+    let _ = Error::Snapshot { msg: "" };
+    fn _program(m: &Module) -> &ProgramCache {
+        &m.program
+    }
     fn _call_foreign(
         host: &mut dyn Host,
         ctx: &mut HostCtx<'_>,

@@ -1,5 +1,6 @@
 //! `init`: the first instance. Runs the M1 boot-test scenario from
-//! `docs/prototype-plan.md` (plus the WASI demos of module 8 and 9) and
+//! `docs/prototype-plan.md` (plus the WASI demos of modules 10 and 11, the
+//! revocation test of module 8 and the snapshot test of module 9) and
 //! reports every child's exit code.
 //!
 //! Initial capabilities: slot 0 `Console(WRITE|DERIVE|TRANSFER)`, slot 1
@@ -7,7 +8,8 @@
 #![no_std]
 
 use kalium_sdk::{
-    cap_drop, exit, rights, spawn, Cap, Channel, Class, Console, Errno, Instance, Line,
+    cap_drop, cap_revoke, exit, rights, spawn, spawn_snapshot, time_now, yield_now, Cap, Channel,
+    Class, Console, Entry, Errno, Instance, Line,
 };
 
 /// Boot image module indices (the order `cargo xtask wasm` lays out and
@@ -18,9 +20,11 @@ const MOD_RT: u32 = 3;
 const MOD_FAIR: u32 = 4;
 const MOD_FAULTY: u32 = 5;
 const MOD_GREEDY: u32 = 7;
+const MOD_REVOKED: u32 = 8;
+const MOD_SHELF: u32 = 9;
 /// The WASI demos (`demos/`): a Rust `std` program and a C program.
-const MOD_HELLO_STD: u32 = 8;
-const MOD_HELLO_C: u32 = 9;
+const MOD_HELLO_STD: u32 = 10;
+const MOD_HELLO_C: u32 = 11;
 
 /// `rt` parameters: period 2 ms, budget 500 µs.
 const RT_PERIOD_NS: i64 = 2_000_000;
@@ -106,6 +110,126 @@ pub extern "C" fn _start() {
     );
     report("hello_c", hello_c);
     cap_drop(stdin_tx.cap()).unwrap_or_else(|e| fail("cap_drop (hello_c stdin)", e));
+
+    // Phase 3c: revocation. `revoked` gets a console derived from a handle
+    // init keeps, and the derived receive end of a channel. Once it has
+    // printed through the console (it says so on `ready`), init revokes
+    // both: the console through the handle, so init's own console and the
+    // handle stay usable, and the receive end through the original, which
+    // init then drops so that the channel has no valid receiver left and
+    // init's own send fails with ECLOSED. Then `go` tells `revoked` to try
+    // its capabilities, which must fail with EBADCAP; it exits 42.
+    let (go_tx, go_rx) = Channel::create().unwrap_or_else(|e| fail("channel_create (go)", e));
+    let (ready_tx, ready_rx) =
+        Channel::create().unwrap_or_else(|e| fail("channel_create (ready)", e));
+    let (data_tx, data_rx) = Channel::create().unwrap_or_else(|e| fail("channel_create (data)", e));
+    let handle = console
+        .cap()
+        .derive(rights::WRITE | rights::DERIVE | rights::TRANSFER)
+        .unwrap_or_else(|e| fail("cap_derive (revoked handle)", e));
+    let revoked_console = handle
+        .derive(rights::WRITE | rights::TRANSFER)
+        .unwrap_or_else(|e| fail("cap_derive (revoked console)", e));
+    let revoked_rx = data_rx
+        .cap()
+        .derive(rights::RECV | rights::WAIT | rights::TRANSFER)
+        .unwrap_or_else(|e| fail("cap_derive (revoked receiver)", e));
+    let revoked = spawn_fair(
+        spawner,
+        MOD_REVOKED,
+        &[revoked_console, go_rx.cap(), ready_tx.cap(), revoked_rx],
+        "revoked",
+    );
+    ready_rx
+        .recv(&mut [0u8; 8], &mut [])
+        .unwrap_or_else(|e| fail("recv (ready)", e));
+    cap_revoke(handle).unwrap_or_else(|e| fail("cap_revoke (handle)", e));
+    cap_revoke(data_rx.cap()).unwrap_or_else(|e| fail("cap_revoke (data receiver)", e));
+    cap_drop(data_rx.cap()).unwrap_or_else(|e| fail("cap_drop (data receiver)", e));
+    match data_tx.send(b"lost", &[]) {
+        Err(Errno::Closed) => say("init: send to revoked receiver: ECLOSED"),
+        Ok(()) => say("init: send to revoked receiver succeeded"),
+        Err(e) => fail("send (data)", e),
+    }
+    // The handle still works: init prints through a child of it.
+    let via_handle = handle
+        .derive(rights::WRITE)
+        .unwrap_or_else(|e| fail("cap_derive (after revoke)", e));
+    let _ = Console::from_cap(via_handle).println("init: handle derives again after revoke");
+    go_tx
+        .send(b"go", &[])
+        .unwrap_or_else(|e| fail("send (go)", e));
+    report("revoked", revoked);
+    for c in [
+        go_tx.cap(),
+        ready_rx.cap(),
+        data_tx.cap(),
+        handle,
+        via_handle,
+    ] {
+        cap_drop(c).unwrap_or_else(|e| fail("cap_drop (revocation phase)", e));
+    }
+
+    // Phase 3d: the runtime shelf. `shelf` builds an expensive state in
+    // `_start`, says `ready` and parks in `recv`; init takes a snapshot of
+    // it (retrying while it is still runnable) and starts three instances
+    // from the snapshot at `resume`, which check the state and exit 0.
+    // The times from spawn to the child's signal (its `ready` for the
+    // fresh start, its exit for the restored ones) are compared: the
+    // restore must be the faster start.
+    let (ready_tx, ready_rx) =
+        Channel::create().unwrap_or_else(|e| fail("channel_create (shelf ready)", e));
+    let (go_tx, go_rx) = Channel::create().unwrap_or_else(|e| fail("channel_create (shelf go)", e));
+    let shelf_console = derive_demo_console(console);
+    let t0 = time_now();
+    let shelf = spawn_fair(
+        spawner,
+        MOD_SHELF,
+        &[shelf_console, ready_tx.cap(), go_rx.cap()],
+        "shelf",
+    );
+    ready_rx
+        .recv(&mut [0u8; 8], &mut [])
+        .unwrap_or_else(|e| fail("recv (shelf ready)", e));
+    let init_ns = time_now() - t0;
+    let snapshot = loop {
+        match shelf.snapshot() {
+            Ok(s) => break s,
+            // Woken by `ready` before shelf parked: let it get there.
+            Err(Errno::Busy) => yield_now(),
+            Err(e) => fail("instance_snapshot (shelf)", e),
+        }
+    };
+    let mut restore_ns = i64::MAX;
+    for _ in 0..3 {
+        let resumed_console = derive_demo_console(console);
+        let t0 = time_now();
+        let resumed = spawn_snapshot(
+            spawner,
+            snapshot,
+            &[resumed_console],
+            Class::Fair,
+            0,
+            0,
+            Entry::Resume,
+        )
+        .unwrap_or_else(|e| fail("spawn_snapshot (shelf)", e));
+        report("resumed shelf", resumed);
+        restore_ns = restore_ns.min(time_now() - t0);
+    }
+    // Closing `go` lets the parked original exit 0.
+    cap_drop(go_tx.cap()).unwrap_or_else(|e| fail("cap_drop (shelf go)", e));
+    report("shelf", shelf);
+    let _ = Line::new()
+        .str("init: shelf init ")
+        .int(init_ns / 1000)
+        .str(" us, restore ")
+        .int(restore_ns / 1000)
+        .str(" us")
+        .println(console);
+    for c in [snapshot.cap(), ready_rx.cap()] {
+        cap_drop(c).unwrap_or_else(|e| fail("cap_drop (shelf phase)", e));
+    }
 
     // Phase 4: a hostile spawner. `greedy` floods the kernel with `park`
     // instances, dropping their capabilities, until the kernel-wide instance

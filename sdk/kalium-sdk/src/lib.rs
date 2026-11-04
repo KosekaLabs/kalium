@@ -50,7 +50,10 @@ pub mod text;
 pub use console::Console;
 pub use ipc::{Channel, Receiver, Sender};
 pub use memobj::MemObj;
-pub use spawn::{instance_kill, instance_wait, module_count, spawn, Class, Instance};
+pub use spawn::{
+    instance_kill, instance_snapshot, instance_wait, module_count, spawn, spawn_snapshot, Class,
+    Entry, Instance, Snapshot,
+};
 pub use text::Line;
 
 use core::sync::atomic::{AtomicI32, Ordering};
@@ -176,6 +179,11 @@ impl Cap {
         cap_derive(self, rights)
     }
 
+    /// See [`cap_revoke`].
+    pub fn revoke(self) -> Result<(), Errno> {
+        cap_revoke(self)
+    }
+
     /// See [`cap_info`].
     pub fn info(self) -> Result<CapInfo, Errno> {
         cap_info(self)
@@ -205,6 +213,29 @@ pub fn cap_derive(cap: Cap, rights: u64) -> Result<Cap, Errno> {
         return Err(Errno::Other(r));
     }
     Ok(Cap(out))
+}
+
+/// Invalidates every capability derived from `cap`, transitively,
+/// wherever it is now: in this table, in another instance's, or in a
+/// message in flight (`cap_revoke`). Their next use fails with
+/// [`Errno::BadCap`]; they keep their slots until dropped. `cap` itself
+/// stays valid and may derive again. Needs a live, unrevoked slot and no
+/// right: whoever holds a capability may cut off what was derived from it,
+/// and only that (not siblings, not the capability it was derived from).
+/// [`Errno::NoMem`], with nothing invalidated, once `cap`'s node has been
+/// revoked so often (2^32 - 1 times) that its generation would wrap.
+///
+/// A revoked channel end stops counting at once: a sender whose receivers
+/// are all revoked or dropped gets [`Errno::Closed`]; a receiver whose
+/// senders are, too, once the queue is drained.
+///
+/// The idiom for a capability to hand out and take back later is a handle
+/// kept at home: `let handle = cap.derive(rights | DERIVE)?;` then transfer
+/// `handle.derive(rights)?` and later `handle.revoke()?`, which leaves
+/// `cap` and `handle` untouched.
+pub fn cap_revoke(cap: Cap) -> Result<(), Errno> {
+    // SAFETY: no pointers are passed.
+    Errno::check(unsafe { raw::cap_revoke(cap.0) })
 }
 
 /// The kind and rights of a capability (`cap_info`).
@@ -335,6 +366,8 @@ mod tests {
         // that without panicking.
         assert_eq!(cap_drop(Cap::slot(0)), Err(Errno::Fault));
         assert_eq!(cap_derive(Cap::slot(0), rights::WRITE), Err(Errno::Fault));
+        assert_eq!(cap_revoke(Cap::slot(0)), Err(Errno::Fault));
+        assert_eq!(Cap::slot(0).revoke(), Err(Errno::Fault));
         assert_eq!(cap_info(Cap::slot(0)), Err(Errno::Fault));
         assert_eq!(time_now(), 0);
         // Infallible `i32` imports return the stub's EFAULT marker too.

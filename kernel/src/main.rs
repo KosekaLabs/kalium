@@ -179,7 +179,7 @@ mod imp {
     #[cfg(not(feature = "boot-only"))]
     mod full {
         use kalium_abi::rights;
-        use kalium_cap::{CapTable, Capability, ObjectKind, Rights};
+        use kalium_cap::{CapTable, ObjectKind, Rights};
         use kalium_hal::{println, timer};
         use kalium_sched::Class;
         use kalium_wasm::Limits;
@@ -222,18 +222,19 @@ mod imp {
 
             let mut k = Kernel::new(&BOOT_IMAGE, limits);
             let mut caps = CapTable::new(CAP_TABLE_LIMIT);
-            let console = Capability::new(
+            let console = k.mint_root_into(
+                &mut caps,
                 k.console,
                 ObjectKind::Console,
                 Rights::from_bits_truncate(rights::INIT_CONSOLE),
             );
-            let spawner = Capability::new(
+            let spawner = k.mint_root_into(
+                &mut caps,
                 k.spawner,
                 ObjectKind::Spawn,
                 Rights::from_bits_truncate(rights::INIT_SPAWN),
             );
-            if k.mint_into(&mut caps, console).is_err() || k.mint_into(&mut caps, spawner).is_err()
-            {
+            if console.is_err() || spawner.is_err() {
                 panic!("cannot create init's capabilities");
             }
             let now = timer::now_ns();

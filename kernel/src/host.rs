@@ -1,6 +1,8 @@
 //! The host ABI: one [`Host`] implementation that dispatches on
 //! [`HostFuncId`] to every function of `kalium:core`, `kalium:ipc`,
-//! `kalium:memory` and `kalium:spawn` with the semantics of
+//! `kalium:memory` and `kalium:spawn` (including the snapshot pair,
+//! `instance_snapshot`/`spawn_snapshot`, see `kernel.rs`, "Snapshots")
+//! with the semantics of
 //! `docs/prototype-plan.md`, and hands the `wasi_snapshot_preview1` ids
 //! (the range starting at [`crate::wasi::BASE`]) to [`crate::wasi`].
 //!
@@ -13,8 +15,11 @@
 //!   instance's linear memory before anything else happens (`EFAULT`); an
 //!   empty range is accepted whatever its pointer; a negative count is
 //!   `EINVAL`;
-//! - capability indices go through [`CapTable::check`], whose errors map
-//!   to `EBADCAP`/`EPERM`;
+//! - capability indices go through [`HostCall::check_cap`] (or
+//!   [`HostCall::get_cap`] / [`HostCall::check_cap_rights`]): the slot must
+//!   be live and the capability valid in its object's lineage, i.e. not
+//!   revoked (`EBADCAP`, see `kernel.rs`), then of the right kind with the
+//!   right rights (`EPERM`);
 //! - blocking functions return [`HostOutcome::Block`] after parking the
 //!   thread; the interpreter rewinds to the call, so the call is re-issued
 //!   when the thread runs again and re-checks everything. `yield_` and
@@ -23,16 +28,22 @@
 //! - the [`Effect`] tells the run loop how to account the slice when the
 //!   outcome is `Block`.
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use kalium_abi::layout::RecvHeader;
-use kalium_abi::{errno, exit as abi_exit, imports, rights, sched as abi_sched};
+use kalium_abi::{
+    entry as abi_entry, errno, exit as abi_exit, imports, rights, sched as abi_sched,
+};
 use kalium_cap::{CapError, CapIndex, CapTable, Capability, ObjectKind, Rights};
 use kalium_hal::{console, println, timer};
 use kalium_ipc::{Channel, IpcError, Message, WaitQueue};
 use kalium_mm::{MemError, MemObject};
-use kalium_sched::{Class, ThreadId};
-use kalium_wasm::{FuncType, Host, HostCtx, HostFuncId, HostOutcome, Memory, Trap, ValType, Value};
+use kalium_sched::{Class, State, ThreadId};
+use kalium_wasm::{
+    Error as WasmError, FuncType, Host, HostCtx, HostFuncId, HostOutcome, Memory, Snapshot, Trap,
+    ValType, Value,
+};
 
 use crate::kernel::{Kernel, Object, CAP_TABLE_LIMIT};
 
@@ -40,27 +51,30 @@ use crate::kernel::{Kernel, Object, CAP_TABLE_LIMIT};
 pub const CONSOLE_WRITE: u32 = 0;
 pub const CAP_DROP: u32 = 1;
 pub const CAP_DERIVE: u32 = 2;
-pub const CAP_INFO: u32 = 3;
-pub const TIME_NOW: u32 = 4;
-pub const YIELD: u32 = 5;
-pub const SLEEP: u32 = 6;
-pub const EXIT: u32 = 7;
-pub const INSTANCE_ID: u32 = 8;
-pub const CHANNEL_CREATE: u32 = 9;
-pub const SEND: u32 = 10;
-pub const RECV: u32 = 11;
-pub const TRY_RECV: u32 = 12;
-pub const WAIT_ANY: u32 = 13;
-pub const MEMOBJ_CREATE: u32 = 14;
-pub const MEMOBJ_SIZE: u32 = 15;
-pub const MEMOBJ_READ: u32 = 16;
-pub const MEMOBJ_WRITE: u32 = 17;
-pub const SPAWN: u32 = 18;
-pub const INSTANCE_WAIT: u32 = 19;
-pub const INSTANCE_KILL: u32 = 20;
-pub const MODULE_COUNT: u32 = 21;
+pub const CAP_REVOKE: u32 = 3;
+pub const CAP_INFO: u32 = 4;
+pub const TIME_NOW: u32 = 5;
+pub const YIELD: u32 = 6;
+pub const SLEEP: u32 = 7;
+pub const EXIT: u32 = 8;
+pub const INSTANCE_ID: u32 = 9;
+pub const CHANNEL_CREATE: u32 = 10;
+pub const SEND: u32 = 11;
+pub const RECV: u32 = 12;
+pub const TRY_RECV: u32 = 13;
+pub const WAIT_ANY: u32 = 14;
+pub const MEMOBJ_CREATE: u32 = 15;
+pub const MEMOBJ_SIZE: u32 = 16;
+pub const MEMOBJ_READ: u32 = 17;
+pub const MEMOBJ_WRITE: u32 = 18;
+pub const SPAWN: u32 = 19;
+pub const INSTANCE_WAIT: u32 = 20;
+pub const INSTANCE_KILL: u32 = 21;
+pub const MODULE_COUNT: u32 = 22;
+pub const INSTANCE_SNAPSHOT: u32 = 23;
+pub const SPAWN_SNAPSHOT: u32 = 24;
 
-const TABLE: [(u32, &str, &str); 22] = [
+const TABLE: [(u32, &str, &str); 25] = [
     (
         CONSOLE_WRITE,
         imports::core::MODULE,
@@ -68,6 +82,7 @@ const TABLE: [(u32, &str, &str); 22] = [
     ),
     (CAP_DROP, imports::core::MODULE, imports::core::CAP_DROP),
     (CAP_DERIVE, imports::core::MODULE, imports::core::CAP_DERIVE),
+    (CAP_REVOKE, imports::core::MODULE, imports::core::CAP_REVOKE),
     (CAP_INFO, imports::core::MODULE, imports::core::CAP_INFO),
     (TIME_NOW, imports::core::MODULE, imports::core::TIME_NOW),
     (YIELD, imports::core::MODULE, imports::core::YIELD),
@@ -123,6 +138,16 @@ const TABLE: [(u32, &str, &str); 22] = [
         imports::spawn::MODULE,
         imports::spawn::MODULE_COUNT,
     ),
+    (
+        INSTANCE_SNAPSHOT,
+        imports::spawn::MODULE,
+        imports::spawn::INSTANCE_SNAPSHOT,
+    ),
+    (
+        SPAWN_SNAPSHOT,
+        imports::spawn::MODULE,
+        imports::spawn::SPAWN_SNAPSHOT,
+    ),
 ];
 
 /// Verifies that the id constants agree with `kalium-abi`'s import table.
@@ -151,6 +176,7 @@ pub fn signature(id: u32) -> Option<FuncType> {
         CONSOLE_WRITE => (&[I32, I32, I32], &[I32]),
         CAP_DROP => (&[I32], &[I32]),
         CAP_DERIVE => (&[I32, I64, I32], &[I32]),
+        CAP_REVOKE => (&[I32], &[I32]),
         CAP_INFO => (&[I32, I32], &[I32]),
         TIME_NOW => (&[], &[I64]),
         YIELD => (&[], &[]),
@@ -168,6 +194,8 @@ pub fn signature(id: u32) -> Option<FuncType> {
         INSTANCE_WAIT => (&[I32, I32], &[I32]),
         INSTANCE_KILL => (&[I32], &[I32]),
         MODULE_COUNT => (&[], &[I32]),
+        INSTANCE_SNAPSHOT => (&[I32, I32], &[I32]),
+        SPAWN_SNAPSHOT => (&[I32, I32, I32, I32, I32, I64, I64, I32, I32], &[I32]),
         _ => return None,
     };
     Some(FuncType::new(params.to_vec(), results.to_vec()))
@@ -330,6 +358,46 @@ impl<'a> HostCall<'a> {
         &mut self.k.instances[self.cur].caps
     }
 
+    /// The capability in `idx`: `EBADCAP` unless the slot is live and the
+    /// capability has not been revoked.
+    pub(crate) fn get_cap(&self, idx: CapIndex) -> Result<Capability, i32> {
+        let cap = *self.k.instances[self.cur]
+            .caps
+            .get(idx)
+            .map_err(cap_errno)?;
+        if self.k.is_valid(cap) {
+            Ok(cap)
+        } else {
+            Err(errno::EBADCAP)
+        }
+    }
+
+    /// [`get_cap`](HostCall::get_cap), then kind and rights (`EPERM`).
+    pub(crate) fn check_cap(
+        &self,
+        idx: CapIndex,
+        kind: ObjectKind,
+        rights: Rights,
+    ) -> Result<Capability, i32> {
+        let cap = self.get_cap(idx)?;
+        cap.check(kind, rights).map_err(cap_errno)?;
+        Ok(cap)
+    }
+
+    /// [`get_cap`](HostCall::get_cap), then rights of any kind (`EPERM`).
+    pub(crate) fn check_cap_rights(
+        &self,
+        idx: CapIndex,
+        rights: Rights,
+    ) -> Result<Capability, i32> {
+        let cap = self.get_cap(idx)?;
+        if cap.has(rights) {
+            Ok(cap)
+        } else {
+            Err(errno::EPERM)
+        }
+    }
+
     pub(crate) fn block_on(&mut self, objects: &[kalium_cap::ObjectId]) -> Step {
         let tid = self.tid();
         for &o in objects {
@@ -344,9 +412,7 @@ impl<'a> HostCall<'a> {
 
     fn console_write(&mut self, mem: &mut Memory, cap: i32, ptr: i32, len: i32) -> R {
         let idx = cap_index(cap)?;
-        self.caps()
-            .check(idx, ObjectKind::Console, Rights::WRITE)
-            .map_err(cap_errno)?;
+        self.check_cap(idx, ObjectKind::Console, Rights::WRITE)?;
         let (p, l) = range(mem, ptr, len)?;
         if l > 0 {
             let bytes = mem.slice(p, l).map_err(|_| errno::EFAULT)?;
@@ -366,21 +432,39 @@ impl<'a> HostCall<'a> {
         let (op, _) = range(mem, out, 4)?;
         let idx = cap_index(cap)?;
         let rights = Rights::from_bits(rights as u64).ok_or(errno::EINVAL)?;
-        let derived = self
-            .caps()
-            .get(idx)
-            .map_err(cap_errno)?
-            .derive(rights)
+        let new = self
+            .k
+            .derive_into(self.cur, idx, rights)
             .map_err(cap_errno)?;
-        let new = self.k.mint(self.cur, derived).map_err(cap_errno)?;
         write_i32(mem, op, new.as_i32())?;
+        OK
+    }
+
+    /// `cap_revoke`: see `kernel.rs`, "Lineages and revocation". Needs a
+    /// live, unrevoked slot and no right; the slot stays valid. A lineage
+    /// error (`ENOMEM` once the node's generation would wrap) is reported
+    /// as such, like `cap_derive`'s depth limit, since nothing was
+    /// invalidated then.
+    fn cap_revoke(&mut self, cap: i32) -> R {
+        let idx = cap_index(cap)?;
+        let target = self.get_cap(idx)?;
+        let now = timer::now_ns();
+        let n = self.k.revoke(target, now).map_err(cap_errno)?;
+        println!(
+            "kalium: instance {} ({}) revoked slot {}: {} derived capabilit{} invalidated",
+            self.cur,
+            self.k.instances[self.cur].name,
+            idx.as_i32(),
+            n,
+            if n == 1 { "y" } else { "ies" }
+        );
         OK
     }
 
     fn cap_info(&mut self, mem: &mut Memory, cap: i32, out: i32) -> R {
         let (op, _) = range(mem, out, kalium_abi::layout::CAP_INFO_SIZE as i32)?;
         let idx = cap_index(cap)?;
-        let info = self.caps().get(idx).map_err(cap_errno)?.info();
+        let info = self.get_cap(idx)?.info();
         write_bytes(mem, op, &info.to_le_bytes())?;
         OK
     }
@@ -436,18 +520,13 @@ impl<'a> HostCall<'a> {
             },
             0,
         );
-        let send = Capability::new(
-            id,
-            ObjectKind::Channel,
-            Rights::from_bits_truncate(rights::CHANNEL_SEND_END),
-        );
-        let recv = Capability::new(
-            id,
-            ObjectKind::Channel,
-            Rights::from_bits_truncate(rights::CHANNEL_RECV_END),
-        );
-        let si = self.k.mint(self.cur, send).map_err(cap_errno)?;
-        let ri = match self.k.mint(self.cur, recv) {
+        let send = Rights::from_bits_truncate(rights::CHANNEL_SEND_END);
+        let recv = Rights::from_bits_truncate(rights::CHANNEL_RECV_END);
+        let si = self
+            .k
+            .mint_root(self.cur, id, ObjectKind::Channel, send)
+            .map_err(cap_errno)?;
+        let ri = match self.k.mint_root(self.cur, id, ObjectKind::Channel, recv) {
             Ok(i) => i,
             Err(e) => {
                 let now = timer::now_ns();
@@ -463,18 +542,14 @@ impl<'a> HostCall<'a> {
     fn send(&mut self, mem: &mut Memory, cap: i32, msg: i32, len: i32, caps: i32, ncaps: i32) -> R {
         let idx = cap_index(cap)?;
         let chan = self
-            .caps()
-            .check(idx, ObjectKind::Channel, Rights::SEND)
-            .map_err(cap_errno)?
+            .check_cap(idx, ObjectKind::Channel, Rights::SEND)?
             .object;
         let (mp, ml) = range(mem, msg, len)?;
         let list = read_i32s(mem, caps, ncaps)?;
         let mut idxs = Vec::with_capacity(list.len());
         for c in list {
             let i = cap_index(c)?;
-            self.caps()
-                .check_rights(i, Rights::TRANSFER)
-                .map_err(cap_errno)?;
+            self.check_cap_rights(i, Rights::TRANSFER)?;
             idxs.push(i);
         }
         self.k
@@ -525,9 +600,7 @@ impl<'a> HostCall<'a> {
     ) -> R {
         let idx = cap_index(cap)?;
         let chan = self
-            .caps()
-            .check(idx, ObjectKind::Channel, Rights::RECV)
-            .map_err(cap_errno)?
+            .check_cap(idx, ObjectKind::Channel, Rights::RECV)?
             .object;
         let (bp, bl) = range(mem, buf, buf_len)?;
         let (cp, _) = range_n(mem, caps, ncaps_max, 4)?;
@@ -575,11 +648,7 @@ impl<'a> HostCall<'a> {
         let mut ids = Vec::with_capacity(list.len());
         for c in list {
             let i = cap_index(c)?;
-            let id = self
-                .caps()
-                .check(i, ObjectKind::Channel, Rights::WAIT)
-                .map_err(cap_errno)?
-                .object;
+            let id = self.check_cap(i, ObjectKind::Channel, Rights::WAIT)?.object;
             ids.push(id);
         }
         for (i, &id) in ids.iter().enumerate() {
@@ -605,12 +674,15 @@ impl<'a> HostCall<'a> {
         }
         let obj = MemObject::new(size).map_err(mem_errno)?;
         let id = self.k.new_object(Object::MemObj(obj), 0);
-        let cap = Capability::new(
-            id,
-            ObjectKind::MemObj,
-            Rights::from_bits_truncate(rights::MEMOBJ_OWNER),
-        );
-        let ix = self.k.mint(self.cur, cap).map_err(cap_errno)?;
+        let ix = self
+            .k
+            .mint_root(
+                self.cur,
+                id,
+                ObjectKind::MemObj,
+                Rights::from_bits_truncate(rights::MEMOBJ_OWNER),
+            )
+            .map_err(cap_errno)?;
         write_i32(mem, op, ix.as_i32())?;
         OK
     }
@@ -619,9 +691,7 @@ impl<'a> HostCall<'a> {
         let (op, _) = range(mem, out_size, 8)?;
         let idx = cap_index(cap)?;
         let id = self
-            .caps()
-            .check(idx, ObjectKind::MemObj, Rights::NONE)
-            .map_err(cap_errno)?
+            .check_cap(idx, ObjectKind::MemObj, Rights::NONE)?
             .object;
         let size = self.k.memobj(id).ok_or(errno::EBADCAP)?.size();
         write_i64(mem, op, size as i64)?;
@@ -631,9 +701,7 @@ impl<'a> HostCall<'a> {
     fn memobj_read(&mut self, mem: &mut Memory, cap: i32, offset: i64, ptr: i32, len: i32) -> R {
         let idx = cap_index(cap)?;
         let id = self
-            .caps()
-            .check(idx, ObjectKind::MemObj, Rights::READ)
-            .map_err(cap_errno)?
+            .check_cap(idx, ObjectKind::MemObj, Rights::READ)?
             .object;
         let (p, l) = range(mem, ptr, len)?;
         let offset = u64::try_from(offset).map_err(|_| errno::EINVAL)?;
@@ -653,9 +721,7 @@ impl<'a> HostCall<'a> {
     fn memobj_write(&mut self, mem: &mut Memory, cap: i32, offset: i64, ptr: i32, len: i32) -> R {
         let idx = cap_index(cap)?;
         let id = self
-            .caps()
-            .check(idx, ObjectKind::MemObj, Rights::WRITE)
-            .map_err(cap_errno)?
+            .check_cap(idx, ObjectKind::MemObj, Rights::WRITE)?
             .object;
         let (p, l) = range(mem, ptr, len)?;
         let offset = u64::try_from(offset).map_err(|_| errno::EINVAL)?;
@@ -687,15 +753,146 @@ impl<'a> HostCall<'a> {
         out: i32,
     ) -> R {
         let idx = cap_index(cap)?;
-        self.caps()
-            .check(idx, ObjectKind::Spawn, Rights::SPAWN)
-            .map_err(cap_errno)?;
-        let (op, _) = range(mem, out, 4)?;
-        let list = read_i32s(mem, caps, ncaps)?;
+        self.check_cap(idx, ObjectKind::Spawn, Rights::SPAWN)?;
         let module = usize::try_from(module)
             .ok()
             .filter(|&m| m < self.k.modules.len())
             .ok_or(errno::ENOENT)?;
+        self.spawn_from(
+            mem, module, None, caps, ncaps, class, period_ns, budget_ns, out,
+        )
+    }
+
+    /// `instance_snapshot`: see `kernel.rs`, "Snapshots". The instance
+    /// must be parked (blocked or sleeping): `EBUSY` while it is runnable,
+    /// is the caller, or has an object the snapshot cannot take (shared,
+    /// or borrowed by a host call); `ECLOSED` once it has exited.
+    fn instance_snapshot(&mut self, mem: &mut Memory, cap: i32, out: i32) -> R {
+        let (op, _) = range(mem, out, 4)?;
+        let idx = cap_index(cap)?;
+        let id = self
+            .check_cap(idx, ObjectKind::Instance, Rights::SNAPSHOT)?
+            .object;
+        if self.caps().len() >= self.caps().limit() {
+            return Err(errno::ENOMEM);
+        }
+        let target = match self.k.object(id) {
+            Some(Object::Instance { exit: Some(_), .. }) => return Err(errno::ECLOSED),
+            Some(Object::Instance {
+                instance,
+                exit: None,
+                ..
+            }) => *instance,
+            _ => return Err(errno::EBADCAP),
+        };
+        if target == self.cur {
+            return Err(errno::EBUSY);
+        }
+        match self.k.sched.state(ThreadId(target as u32)) {
+            Some(State::Blocked) | Some(State::Sleeping { .. }) => {}
+            _ => return Err(errno::EBUSY),
+        }
+        let snapshot = match self.k.snapshot_instance(target) {
+            Some(Ok(s)) => s,
+            Some(Err(WasmError::OutOfMemory)) => return Err(errno::ENOMEM),
+            // Shared or borrowed objects (`Unsupported`, `Trap::Host`), or
+            // no Wasm state at all.
+            Some(Err(_)) | None => return Err(errno::EBUSY),
+        };
+        let module = self.k.instances[target].module;
+        let (pages, bytes) = (snapshot.memory_pages(), snapshot.encoded_len());
+        let now = timer::now_ns();
+        let sid = self.k.new_object(
+            Object::Snapshot {
+                module,
+                snapshot: Arc::new(snapshot),
+            },
+            1,
+        );
+        let minted = self.k.mint_root(
+            self.cur,
+            sid,
+            ObjectKind::Snapshot,
+            Rights::from_bits_truncate(rights::SNAPSHOT_OWNER),
+        );
+        // The pin kept the object through minting; without a capability it
+        // is freed here.
+        self.k.unpin(sid, now);
+        let ix = minted.map_err(cap_errno)?;
+        write_i32(mem, op, ix.as_i32())?;
+        println!(
+            "kalium: instance {} ({}) snapshotted instance {} ({}): {} pages, {} bytes",
+            self.cur,
+            self.k.instances[self.cur].name,
+            target,
+            self.k.instances[target].name,
+            pages,
+            bytes
+        );
+        OK
+    }
+
+    /// `spawn_snapshot`: `spawn` from a `Snapshot` capability (`READ`),
+    /// starting at `entry` (`kalium_abi::entry`).
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_snapshot(
+        &mut self,
+        mem: &mut Memory,
+        cap: i32,
+        snapshot_cap: i32,
+        caps: i32,
+        ncaps: i32,
+        class: i32,
+        period_ns: i64,
+        budget_ns: i64,
+        entry: i32,
+        out: i32,
+    ) -> R {
+        let idx = cap_index(cap)?;
+        self.check_cap(idx, ObjectKind::Spawn, Rights::SPAWN)?;
+        let sidx = cap_index(snapshot_cap)?;
+        let sid = self
+            .check_cap(sidx, ObjectKind::Snapshot, Rights::READ)?
+            .object;
+        let entry = match entry {
+            abi_entry::START => abi_entry::START_EXPORT,
+            abi_entry::RESUME => abi_entry::RESUME_EXPORT,
+            _ => return Err(errno::EINVAL),
+        };
+        let (module, snapshot) = match self.k.object(sid) {
+            Some(Object::Snapshot { module, snapshot }) => (*module, snapshot.clone()),
+            _ => return Err(errno::EBADCAP),
+        };
+        self.spawn_from(
+            mem,
+            module,
+            Some((&snapshot, entry)),
+            caps,
+            ncaps,
+            class,
+            period_ns,
+            budget_ns,
+            out,
+        )
+    }
+
+    /// The common part of `spawn` and `spawn_snapshot`, after the `Spawn`
+    /// capability and the module are known.
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_from(
+        &mut self,
+        mem: &mut Memory,
+        module: usize,
+        source: Option<(&Snapshot, &'static str)>,
+        caps: i32,
+        ncaps: i32,
+        class: i32,
+        period_ns: i64,
+        budget_ns: i64,
+        out: i32,
+    ) -> R {
+        let (op, _) = range(mem, out, 4)?;
+        let list = read_i32s(mem, caps, ncaps)?;
         let class = match class {
             abi_sched::CLASS_FAIR => Class::Fair { weight: 1 },
             abi_sched::CLASS_REAL_TIME => Class::RealTime {
@@ -710,9 +907,7 @@ impl<'a> HostCall<'a> {
         let mut idxs = Vec::with_capacity(list.len());
         for c in list {
             let i = cap_index(c)?;
-            self.caps()
-                .check_rights(i, Rights::TRANSFER)
-                .map_err(cap_errno)?;
+            self.check_cap_rights(i, Rights::TRANSFER)?;
             idxs.push(i);
         }
         // Room for the Instance capability once the transferred ones are gone.
@@ -737,7 +932,13 @@ impl<'a> HostCall<'a> {
             }
         }
         let now = timer::now_ns();
-        let id = match self.k.create_instance(module, child, class, now) {
+        let created = match source {
+            None => self.k.create_instance(module, child, class, now),
+            Some((snapshot, entry)) => self
+                .k
+                .restore_instance(module, snapshot, entry, child, class, now),
+        };
+        let id = match created {
             Ok(id) => id,
             Err((e, child)) => {
                 let back: Vec<Capability> = child.iter().map(|(_, c)| *c).collect();
@@ -745,12 +946,13 @@ impl<'a> HostCall<'a> {
                 return Err(e.errno());
             }
         };
-        let cap = Capability::new(
-            self.k.instances[id].object,
+        let object = self.k.instances[id].object;
+        let ix = match self.k.mint_root(
+            self.cur,
+            object,
             ObjectKind::Instance,
             Rights::from_bits_truncate(rights::INSTANCE_OWNER),
-        );
-        let ix = match self.k.mint(self.cur, cap) {
+        ) {
             Ok(ix) => ix,
             Err(e) => {
                 self.k.finish_instance(id, abi_exit::KILLED, now);
@@ -759,22 +961,27 @@ impl<'a> HostCall<'a> {
         };
         write_i32(mem, op, ix.as_i32())?;
         let (parent, name) = (self.k.instances[self.cur].name, self.k.instances[id].name);
+        let how = match source {
+            None => "",
+            Some(_) => " from snapshot",
+        };
         match class {
             Class::Fair { .. } => println!(
-                "kalium: instance {} ({}) spawned instance {} ({}, fair)",
-                self.cur, parent, id, name
+                "kalium: instance {} ({}) spawned instance {} ({}, fair){}",
+                self.cur, parent, id, name, how
             ),
             Class::RealTime {
                 period_ns,
                 budget_ns,
             } => println!(
-                "kalium: instance {} ({}) spawned instance {} ({}, rt period {} us budget {} us)",
+                "kalium: instance {} ({}) spawned instance {} ({}, rt period {} us budget {} us){}",
                 self.cur,
                 parent,
                 id,
                 name,
                 period_ns / 1000,
-                budget_ns / 1000
+                budget_ns / 1000,
+                how
             ),
         }
         OK
@@ -783,9 +990,7 @@ impl<'a> HostCall<'a> {
     fn instance_wait(&mut self, mem: &mut Memory, cap: i32, out_code: i32) -> R {
         let idx = cap_index(cap)?;
         let id = self
-            .caps()
-            .check(idx, ObjectKind::Instance, Rights::WAIT)
-            .map_err(cap_errno)?
+            .check_cap(idx, ObjectKind::Instance, Rights::WAIT)?
             .object;
         let (op, _) = range(mem, out_code, 4)?;
         match self.k.object(id) {
@@ -803,9 +1008,7 @@ impl<'a> HostCall<'a> {
     fn instance_kill(&mut self, cap: i32) -> R {
         let idx = cap_index(cap)?;
         let id = self
-            .caps()
-            .check(idx, ObjectKind::Instance, Rights::KILL)
-            .map_err(cap_errno)?
+            .check_cap(idx, ObjectKind::Instance, Rights::KILL)?
             .object;
         let target = match self.k.object(id) {
             // Already exited: its slot may belong to another instance by
@@ -850,6 +1053,7 @@ impl Host for HostCall<'_> {
             CONSOLE_WRITE => self.console_write(mem, a.i32(0)?, a.i32(1)?, a.i32(2)?),
             CAP_DROP => self.cap_drop(a.i32(0)?),
             CAP_DERIVE => self.cap_derive(mem, a.i32(0)?, a.i64(1)?, a.i32(2)?),
+            CAP_REVOKE => self.cap_revoke(a.i32(0)?),
             CAP_INFO => self.cap_info(mem, a.i32(0)?, a.i32(1)?),
             TIME_NOW => {
                 set_result(results, Value::I64(timer::now_ns() as i64))?;
@@ -896,6 +1100,19 @@ impl Host for HostCall<'_> {
                 set_result(results, Value::I32(self.k.modules.len() as i32))?;
                 return Ok(HostOutcome::Continue);
             }
+            INSTANCE_SNAPSHOT => self.instance_snapshot(mem, a.i32(0)?, a.i32(1)?),
+            SPAWN_SNAPSHOT => self.spawn_snapshot(
+                mem,
+                a.i32(0)?,
+                a.i32(1)?,
+                a.i32(2)?,
+                a.i32(3)?,
+                a.i32(4)?,
+                a.i64(5)?,
+                a.i64(6)?,
+                a.i32(7)?,
+                a.i32(8)?,
+            ),
             _ => return Err(Trap::Host),
         };
         match step {

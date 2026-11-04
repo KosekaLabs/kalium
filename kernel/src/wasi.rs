@@ -370,8 +370,7 @@ impl HostCall<'_> {
     /// The console object behind fds 1 and 2, if the instance has one.
     fn stdout_console(&mut self) -> Option<kalium_cap::ObjectId> {
         let idx = host::cap_index(abi::STDOUT_CONSOLE_SLOT).ok()?;
-        self.caps()
-            .check(idx, ObjectKind::Console, Rights::WRITE)
+        self.check_cap(idx, ObjectKind::Console, Rights::WRITE)
             .ok()
             .map(|c| c.object)
     }
@@ -379,8 +378,7 @@ impl HostCall<'_> {
     /// The channel behind fd 0, if the instance has one.
     fn stdin_channel(&mut self) -> Option<kalium_cap::ObjectId> {
         let idx = host::cap_index(abi::STDIN_CHANNEL_SLOT).ok()?;
-        self.caps()
-            .check(idx, ObjectKind::Channel, Rights::RECV)
+        self.check_cap(idx, ObjectKind::Channel, Rights::RECV)
             .ok()
             .map(|c| c.object)
     }

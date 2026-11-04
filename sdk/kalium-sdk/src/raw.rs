@@ -109,6 +109,9 @@ namespace! {
     /// `DERIVE` unless the old had it. Writes the new index as `i32` at
     /// `out_cap`.
     fn cap_derive(cap: i32, rights: i64, out_cap: i32) -> i32;
+    /// Needs a live, unrevoked slot. Invalidates every capability derived
+    /// from it, wherever it went; the slot itself stays valid.
+    fn cap_revoke(cap: i32) -> i32;
     /// Writes `{kind: u32, rights: u64}` (12 bytes, little-endian) at `out`.
     fn cap_info(cap: i32, out: i32) -> i32;
     /// Nanoseconds since boot, monotonic.
@@ -168,6 +171,14 @@ namespace! {
     fn instance_kill(cap: i32) -> i32;
     /// Number of modules in the boot image.
     fn module_count() -> i32;
+    /// Needs `Instance` kind with `SNAPSHOT`; the instance must be parked
+    /// (blocked or sleeping; `EBUSY` otherwise, `ECLOSED` once exited).
+    /// Writes a `Snapshot` cap index (`READ|DERIVE|TRANSFER`) at `out_cap`.
+    fn instance_snapshot(cap: i32, out_cap: i32) -> i32;
+    /// Like `spawn`, from the state in `snapshot_cap` (needs `Snapshot`
+    /// kind with `READ`), starting at `entry` (`0` `_start`, `1` `resume`;
+    /// `ENOENT` if that export is missing or mistyped).
+    fn spawn_snapshot(cap: i32, snapshot_cap: i32, caps: i32, ncaps: i32, class: i32, period_ns: i64, budget_ns: i64, entry: i32, out_cap: i32) -> i32;
 }
 
 /// The linear-memory offset of `p`, as the ABI wants it.

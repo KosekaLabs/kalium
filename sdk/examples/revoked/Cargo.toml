@@ -1,0 +1,16 @@
+[package]
+name = "revoked"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Kalium boot-test example service: revoked"
+
+[lib]
+crate-type = ["cdylib"]
+test = false
+doctest = false
+bench = false
+
+[dependencies]
+kalium-sdk.workspace = true

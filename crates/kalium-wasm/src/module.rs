@@ -1,13 +1,16 @@
 //! The decoded module: every section as plain data, plus accessors over the
 //! index spaces (imports first, then definitions).
 
+use crate::code::Program;
 use crate::decode;
 use crate::error::Error;
 use crate::instr::{ConstExpr, FuncBody};
 use crate::types::{FuncType, GlobalType, MemType, RefType, TableType};
 use crate::validate;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::fmt;
 
 /// What an import provides.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -109,6 +112,47 @@ pub struct Data {
     pub bytes: Vec<u8>,
 }
 
+/// The compiled form of a module (the interpreter's private code format),
+/// built once and shared by every instance of the module.
+///
+/// [`Module::new`] fills it, so that instantiating a decoded module never
+/// compiles: the instance takes a reference to the shared program. A
+/// `Module` built any other way (a struct literal, [`crate::decode::decode`])
+/// has an empty cache, `ProgramCache::default()`, and each of its instances
+/// compiles its own copy. The cache is derived data, not part of the
+/// module's identity: it does not take part in `PartialEq`.
+#[derive(Clone, Default)]
+pub struct ProgramCache(Option<Arc<Program>>);
+
+impl ProgramCache {
+    /// The cached program, if the module has been compiled.
+    pub(crate) fn get(&self) -> Option<&Arc<Program>> {
+        self.0.as_ref()
+    }
+
+    /// Whether the cache is filled.
+    pub fn is_compiled(&self) -> bool {
+        self.0.is_some()
+    }
+}
+
+impl fmt::Debug for ProgramCache {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(if self.0.is_some() {
+            "ProgramCache(compiled)"
+        } else {
+            "ProgramCache(empty)"
+        })
+    }
+}
+
+impl PartialEq for ProgramCache {
+    /// Always equal: the cache is derived from the other fields.
+    fn eq(&self, _other: &ProgramCache) -> bool {
+        true
+    }
+}
+
 /// A decoded (and, when built through [`Module::new`], validated) module.
 ///
 /// All fields are public so the validator and interpreter can walk them
@@ -141,14 +185,47 @@ pub struct Module {
     pub data_count: Option<u32>,
     /// Code section: one body per entry of `funcs`.
     pub code: Vec<FuncBody>,
+    /// The compiled code, shared by every instance of this module (see
+    /// [`ProgramCache`]); filled by [`Module::new`].
+    pub program: ProgramCache,
 }
 
 impl Module {
-    /// Decode and validate. Never panics on malformed input.
+    /// Decode, validate and compile. Never panics on malformed input.
     pub fn new(bytes: &[u8]) -> Result<Module, Error> {
-        let module = decode::decode(bytes)?;
+        let mut module = decode::decode(bytes)?;
         validate::validate(&module)?;
+        module.program = ProgramCache(Some(module.compile()));
         Ok(module)
+    }
+
+    /// Compile the module's functions (see [`crate::code`]); never fails.
+    /// [`Module::new`] stores the result in [`Module::program`];
+    /// instantiation uses that copy when there is one.
+    pub(crate) fn compile(&self) -> Arc<Program> {
+        let imported = self.imports.iter().filter_map(|i| match i.desc {
+            ImportDesc::Func(ty) => Some(ty),
+            _ => None,
+        });
+        let num_imports = self.num_imported_funcs();
+        let arity: Vec<(u32, u32)> = imported
+            .chain(self.funcs.iter().copied())
+            .map(|ty| {
+                self.get_type(ty).map_or((0, 0), |ft| {
+                    (ft.params.len() as u32, ft.results.len() as u32)
+                })
+            })
+            .collect();
+        Arc::new(crate::code::compile_module(self, &arity, num_imports))
+    }
+
+    /// The compiled code: the cached program, or a fresh compilation for a
+    /// module that was not built through [`Module::new`].
+    pub(crate) fn program(&self) -> Arc<Program> {
+        match self.program.get() {
+            Some(p) => p.clone(),
+            None => self.compile(),
+        }
     }
 
     /// The imports, in order.

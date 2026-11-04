@@ -74,6 +74,26 @@ impl Memory {
         })
     }
 
+    /// Create a memory of type `ty` (capped like [`Memory::with_type`])
+    /// whose contents are `bytes`, which must be a whole number of pages
+    /// within the type's limits and `limit`. Returns `None` otherwise. The
+    /// bytes are taken over, not copied.
+    pub fn with_contents(ty: MemType, bytes: Vec<u8>, limit: u32) -> Option<Memory> {
+        let max_pages = ty.limits.max.map_or(limit, |m| m.min(limit)).min(MAX_PAGES);
+        if !bytes.len().is_multiple_of(PAGE_SIZE) {
+            return None;
+        }
+        let pages = u32::try_from(bytes.len() / PAGE_SIZE).ok()?;
+        if pages < ty.limits.min || pages > max_pages {
+            return None;
+        }
+        Some(Memory {
+            bytes,
+            max_pages,
+            declared_max: ty.limits.max,
+        })
+    }
+
     /// Wrap the memory in a shared handle.
     pub fn into_shared(self) -> MemoryRef {
         Rc::new(RefCell::new(self))

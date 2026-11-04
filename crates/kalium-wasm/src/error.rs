@@ -48,6 +48,11 @@ pub enum Error {
     ArgumentMismatch,
     /// Instantiation or execution needed more memory than the limits allow.
     OutOfMemory,
+    /// A snapshot does not fit the module or the limits it is restored
+    /// with (page count, number or types of globals, table lengths or
+    /// contents, segment counts), or its byte encoding is malformed.
+    /// `msg` says what.
+    Snapshot { msg: &'static str },
     /// Instantiation trapped while applying an active data or element
     /// segment (the trap carries the spec message, e.g. "out of bounds
     /// table access").
@@ -67,6 +72,7 @@ impl Error {
             Error::NoSuchFunction { .. } => "unknown function",
             Error::ArgumentMismatch => "argument type mismatch",
             Error::OutOfMemory => "out of memory",
+            Error::Snapshot { msg } => msg,
             Error::Trap(t) => t.message(),
         }
     }
@@ -100,6 +106,7 @@ impl fmt::Display for Error {
             Error::NoSuchFunction { func } => write!(f, "no such function: {func}"),
             Error::ArgumentMismatch => write!(f, "argument type mismatch"),
             Error::OutOfMemory => write!(f, "out of memory"),
+            Error::Snapshot { msg } => write!(f, "snapshot rejected: {msg}"),
             Error::Trap(t) => write!(f, "instantiation trapped: {t}"),
         }
     }

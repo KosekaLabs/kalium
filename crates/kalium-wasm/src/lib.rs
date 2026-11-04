@@ -16,6 +16,7 @@
 //! | [`validate`] | the validator |
 //! | [`exec`] | `Value`, `Execution`, `ExecResult`: the resumable interpreter |
 //! | [`instance`] | `Instance`, `Limits`, the `Host` trait, host call types, `Extern`/`ExternType` |
+//! | [`snapshot`] | `Snapshot`: the state of an instance's own objects, restorable into a new instance |
 //! | [`memory`] | `Memory`: bounds-checked linear memory, shared as `MemoryRef` |
 //! | [`table`] | `Table`: bounds-checked tables of references, shared as `TableRef` |
 //! | [`global`] | `global::Global`: typed value cells, shared as `GlobalRef` |
@@ -39,6 +40,16 @@
 //! [`Host::call_foreign`]. See [`instance`] for the design, including why
 //! the shared handles are `Rc`/`RefCell` (the kernel is single-threaded, and
 //! the types make that invariant compiler-checked).
+//!
+//! # Fast start
+//!
+//! A [`Module`] carries its compiled code ([`module::ProgramCache`], filled
+//! by [`Module::new`]), so instantiating it again never compiles. The
+//! state of an instance's own memory, tables and globals can be captured
+//! as a [`Snapshot`] ([`Instance::snapshot`]) and restored into a new
+//! instance ([`Instance::from_snapshot`]) without running the module's
+//! initialisation again; [`Snapshot::to_bytes`] / [`Snapshot::from_bytes`]
+//! let an embedder keep it in a memory object.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -58,6 +69,7 @@ pub mod instance;
 pub mod instr;
 pub mod memory;
 pub mod module;
+pub mod snapshot;
 pub mod table;
 pub mod types;
 pub mod validate;
@@ -72,8 +84,9 @@ pub use instr::{BlockType, BrTable, ConstExpr, FuncBody, Instr, MemArg};
 pub use memory::{Memory, MemoryRef};
 pub use module::{
     Data, DataMode, ElemItems, ElemMode, Element, Export, ExportDesc, Global, Import, ImportDesc,
-    Module,
+    Module, ProgramCache,
 };
+pub use snapshot::Snapshot;
 pub use table::{Table, TableRef, MAX_TABLE_ELEMENTS};
 pub use types::{
     FuncType, GlobalType, MemType, RefType, ResizableLimits, TableType, ValType, MAX_PAGES,

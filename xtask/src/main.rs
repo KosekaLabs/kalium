@@ -37,13 +37,13 @@ const QEMU_MEMORY: &str = "256M";
 const SELFTEST_ODD_MEMORY: &str = "129M";
 
 /// The SDK example modules in boot-image order (`init=0, ping=1, pong=2,
-/// rt=3, fair=4, faulty=5, park=6, greedy=7`); the kernel's `build.rs`
-/// embeds `target/wasm/<name>.wasm` in this order.
-const WASM_MODULES: [&str; 8] = [
-    "init", "ping", "pong", "rt", "fair", "faulty", "park", "greedy",
+/// rt=3, fair=4, faulty=5, park=6, greedy=7, revoked=8, shelf=9`); the
+/// kernel's `build.rs` embeds `target/wasm/<name>.wasm` in this order.
+const WASM_MODULES: [&str; 10] = [
+    "init", "ping", "pong", "rt", "fair", "faulty", "park", "greedy", "revoked", "shelf",
 ];
 /// The WASI demo programs from `demos/`, which follow the SDK modules in
-/// the boot image (`hello_std=8, hello_c=9`). `hello_std` is a Rust `std`
+/// the boot image (`hello_std=10, hello_c=11`). `hello_std` is a Rust `std`
 /// program built for `wasm32-wasip1`; `hello_c` is a C program compiled with
 /// clang and wasi-libc, or taken from `demos/hello-c/prebuilt/` when that
 /// toolchain is absent.
@@ -860,6 +860,9 @@ enum Expect {
     /// `hello_c: time() ok (N s)`: C's `time()` worked (the value is
     /// seconds since boot and varies).
     HelloCTime,
+    /// `init: shelf init N us, restore M us` with `M < N`: starting an
+    /// instance from the snapshot was faster than its initialisation.
+    ShelfRestoreFaster,
 }
 
 impl Expect {
@@ -877,6 +880,9 @@ impl Expect {
                 .strip_prefix("hello_c: time() ok (")
                 .and_then(|r| r.strip_suffix(" s)"))
                 .is_some_and(|n| n.parse::<u64>().is_ok()),
+            Expect::ShelfRestoreFaster => {
+                parse_shelf_times(line).is_some_and(|(init, restore)| restore < init)
+            }
         }
     }
 
@@ -891,8 +897,17 @@ impl Expect {
                 format!("`greedy: spawn refused (ENOMEM) after {GREEDY_CHILDREN} instances`")
             }
             Expect::HelloCTime => "`hello_c: time() ok (N s)`".into(),
+            Expect::ShelfRestoreFaster => "`init: shelf init N us, restore M us` with M < N".into(),
         }
     }
+}
+
+/// Parses `init: shelf init N us, restore M us` into `(N, M)`.
+fn parse_shelf_times(line: &str) -> Option<(u64, u64)> {
+    let rest = line.strip_prefix("init: shelf init ")?;
+    let (init, rest) = rest.split_once(" us, restore ")?;
+    let restore = rest.strip_suffix(" us")?;
+    Some((init.parse().ok()?, restore.parse().ok()?))
 }
 
 /// Parses `greedy: spawn refused (ENOMEM) after N instances` into `N`.
@@ -955,6 +970,27 @@ const ORDERED: &[Expect] = &[
     Expect::Line("hello_c: stdin read of 0 bytes got 0 at once"),
     Expect::Line("hello_c: exiting with 5"),
     Expect::Line("init: hello_c exited 5"),
+    // Revocation: `revoked` prints once through a console derived from a
+    // handle init keeps; init then revokes the handle and the receive end
+    // it gave away, drops its own receiver and finds the channel closed;
+    // `revoked` sees EBADCAP on both capabilities and exits 42.
+    Expect::Line("revoked: hello through a derived console"),
+    Expect::Line("init: send to revoked receiver: ECLOSED"),
+    Expect::Line("init: handle derives again after revoke"),
+    Expect::Line("init: revoked exited 42"),
+    // The runtime shelf: `shelf` builds its state, says so and parks; init
+    // snapshots it and starts three instances from the snapshot at
+    // `resume`, each finding the state intact; the restore is the faster
+    // start.
+    Expect::Line("shelf: initialised"),
+    Expect::Line("shelf: resumed ok"),
+    Expect::Line("init: resumed shelf exited 0"),
+    Expect::Line("shelf: resumed ok"),
+    Expect::Line("init: resumed shelf exited 0"),
+    Expect::Line("shelf: resumed ok"),
+    Expect::Line("init: resumed shelf exited 0"),
+    Expect::Line("init: shelf exited 0"),
+    Expect::ShelfRestoreFaster,
     Expect::GreedyLimit,
     Expect::Line("greedy: slot reclaimed, park exited 0"),
     Expect::Line("init: greedy exited 0"),
@@ -986,6 +1022,14 @@ fn check_scenario(out: &str) -> Vec<String> {
                             None => String::new(),
                         }
                     }
+                    Expect::ShelfRestoreFaster => {
+                        match lines.iter().find_map(|l| parse_shelf_times(l)) {
+                            Some((init, restore)) => {
+                                format!(" (found `init {init} us, restore {restore} us`)")
+                            }
+                            None => String::new(),
+                        }
+                    }
                     _ => String::new(),
                 };
                 failures.push(format!(
@@ -1014,6 +1058,8 @@ fn check_scenario(out: &str) -> Vec<String> {
         "still running",
         "kalium: unhandled",
         "kalium: kernel fault",
+        // `revoked` printing after its console was revoked.
+        "must not appear",
     ] {
         if let Some(l) = lines.iter().find(|l| l.contains(bad)) {
             failures.push(format!("unexpected console line: `{l}`"));
@@ -1186,6 +1232,32 @@ mod tests {
         hello_c: stdin read of 0 bytes got 0 at once\n\
         hello_c: exiting with 5\n\
         init: hello_c exited 5\n\
+        kalium: instance 0 (init) spawned instance 1 (revoked, fair)\n\
+        revoked: hello through a derived console\n\
+        kalium: instance 0 (init) revoked slot 16: 1 derived capability invalidated\n\
+        kalium: instance 0 (init) revoked slot 15: 1 derived capability invalidated\n\
+        init: send to revoked receiver: ECLOSED\n\
+        init: handle derives again after revoke\n\
+        kalium: instance 1 (revoked) exited 42 after 657 instructions\n\
+        init: revoked exited 42\n\
+        kalium: instance 0 (init) spawned instance 1 (shelf, fair)\n\
+        shelf: initialised\n\
+        kalium: instance 0 (init) snapshotted instance 1 (shelf): 21 pages, 1376294 bytes\n\
+        kalium: instance 0 (init) spawned instance 2 (shelf, fair) from snapshot\n\
+        shelf: resumed ok\n\
+        kalium: instance 2 (shelf) exited 0 after 1048831 instructions\n\
+        init: resumed shelf exited 0\n\
+        kalium: instance 0 (init) spawned instance 2 (shelf, fair) from snapshot\n\
+        shelf: resumed ok\n\
+        kalium: instance 2 (shelf) exited 0 after 1048831 instructions\n\
+        init: resumed shelf exited 0\n\
+        kalium: instance 0 (init) spawned instance 2 (shelf, fair) from snapshot\n\
+        shelf: resumed ok\n\
+        kalium: instance 2 (shelf) exited 0 after 1048831 instructions\n\
+        init: resumed shelf exited 0\n\
+        kalium: instance 1 (shelf) exited 0 after 11665700 instructions\n\
+        init: shelf exited 0\n\
+        init: shelf init 284494 us, restore 27429 us\n\
         kalium: instance 0 (init) spawned instance 1 (greedy, fair)\n\
         kalium: instance 1 (greedy) spawned instance 2 (park, fair)\n\
         greedy: spawn refused (ENOMEM) after 30 instances\n\
@@ -1257,6 +1329,63 @@ mod tests {
         assert_eq!(check_scenario(&no_sleep).len(), 1);
         let c_failed = GOOD.replace("init: hello_c exited 5", "init: hello_c exited -1");
         assert_eq!(check_scenario(&c_failed).len(), 1);
+        // Revocation: the console must still have worked before, must not
+        // work after, the channel must have closed, and the exit code is
+        // the instance's verdict.
+        let printed_after = GOOD.replace(
+            "init: revoked exited 42\n",
+            "revoked: this line must not appear\ninit: revoked exited 42\n",
+        );
+        assert_eq!(check_scenario(&printed_after).len(), 1);
+        let console_kept = GOOD.replace("init: revoked exited 42", "init: revoked exited 43");
+        assert_eq!(check_scenario(&console_kept).len(), 1);
+        let not_closed = GOOD.replace(
+            "init: send to revoked receiver: ECLOSED",
+            "init: send to revoked receiver succeeded",
+        );
+        assert_eq!(check_scenario(&not_closed).len(), 1);
+        let no_hello = GOOD.replace("revoked: hello through a derived console\n", "");
+        assert_eq!(check_scenario(&no_hello).len(), 1);
+    }
+
+    #[test]
+    fn shelf_restore_must_beat_init() {
+        assert_eq!(
+            parse_shelf_times("init: shelf init 400000 us, restore 40000 us"),
+            Some((400000, 40000))
+        );
+        assert_eq!(
+            parse_shelf_times("init: shelf init x us, restore 1 us"),
+            None
+        );
+        assert_eq!(parse_shelf_times("init: shelf init 1 us"), None);
+        // A restore that is not faster than the initialisation fails
+        // exactly once, with the numbers found.
+        for slow in ["284494", "500000"] {
+            let not_faster = GOOD.replace(
+                "init: shelf init 284494 us, restore 27429 us",
+                &format!("init: shelf init 284494 us, restore {slow} us"),
+            );
+            let f = check_scenario(&not_faster);
+            assert_eq!(f.len(), 1, "{f:?}");
+            assert!(f[0].contains(&format!("found `init 284494 us, restore {slow} us`")));
+        }
+        let faster = GOOD.replace(
+            "init: shelf init 284494 us, restore 27429 us",
+            "init: shelf init 284494 us, restore 284493 us",
+        );
+        assert!(check_scenario(&faster).is_empty());
+        // Every restored instance must report, and the state must check.
+        let two_resumes = GOOD.replacen("init: resumed shelf exited 0\n", "", 1);
+        assert!(!check_scenario(&two_resumes).is_empty());
+        let mismatch = GOOD.replacen("shelf: resumed ok\n", "shelf: checksum mismatch\n", 1);
+        assert!(!check_scenario(&mismatch).is_empty());
+        let no_init = GOOD.replace("shelf: initialised\n", "");
+        assert_eq!(check_scenario(&no_init).len(), 1);
+        let no_timing = GOOD.replace("init: shelf init 284494 us, restore 27429 us\n", "");
+        let f = check_scenario(&no_timing);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0].contains("M < N"));
     }
 
     #[test]

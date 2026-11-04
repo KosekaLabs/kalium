@@ -331,6 +331,12 @@ impl Channel {
     pub fn drain(&mut self) -> Vec<Message> {
         self.queue.drain(..).collect()
     }
+
+    /// The queued messages, oldest first, without removing them. The kernel
+    /// uses this to find capabilities in flight when one is revoked.
+    pub fn messages(&self) -> impl Iterator<Item = &Message> + '_ {
+        self.queue.iter()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -429,13 +435,14 @@ mod tests {
 
     use super::*;
     use alloc::vec;
-    use kalium_cap::{ObjectId, ObjectKind, Rights};
+    use kalium_cap::{NodeId, ObjectId, ObjectKind, Rights};
 
     fn cap(id: u64) -> Capability {
         Capability::new(
             ObjectId(id),
             ObjectKind::MemObj,
             Rights::READ | Rights::TRANSFER,
+            NodeId(0),
         )
     }
 

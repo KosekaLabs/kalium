@@ -2,8 +2,10 @@
 
 The M1 prototype boots on QEMU `virt` (aarch64, cortex-a72, GICv2), runs the
 boot-test scenario from [prototype-plan.md](prototype-plan.md) with the
-example services from `sdk/examples` (the six of the plan plus the hostile
-`greedy`/`park` pair, see [Testing hostile services](#testing-hostile-services))
+example services from `sdk/examples` (the six of the plan, the hostile
+`greedy`/`park` pair, see [Testing hostile services](#testing-hostile-services),
+`revoked`, see [Revoking capabilities](#revoking-capabilities), and
+`shelf`, see [The runtime shelf](#the-runtime-shelf-snapshots))
 and the two WASI demo programs from `demos/` (an ordinary Rust `std` program
 and an ordinary C program, see [The WASI demos](#the-wasi-demos)), and exits
 QEMU through semihosting with the result as the exit code.
@@ -50,8 +52,11 @@ services through their console capability (the WASI demos through their
 stdout, which is the same capability). The `rt: met` count varies a little
 from run to run; `cargo xtask test` requires at least 380 of 400. Instance
 ids are slot numbers and are reused once an instance has exited (like
-process ids), so `fair`, `faulty`, `hello_std`, `hello_c` and `greedy` all
-show up as instance 1 after `ping` is gone. The instruction count on each
+process ids), so `fair`, `faulty`, `hello_std`, `hello_c`, `revoked`,
+`shelf` and `greedy` all show up as instance 1 after `ping` is gone, and
+the three instances restored from `shelf`'s snapshot as instance 2 one
+after the other. The times on the `init: shelf init N us, restore M us`
+line vary with the host; `cargo xtask test` requires `M < N`. The instruction count on each
 exit line is the interpreter's fuel accounting for that instance (a chunk
 that ends in a trap is not counted, so `faulty` shows 0).
 
@@ -59,9 +64,9 @@ that ends in a trap is not counted, so `faulty` shows 0).
 kalium: boot
 kalium: timer frequency 62500000 Hz
 kalium: entered at EL1, dtb at 0x40000000 (1048576 bytes), RAM 0x40000000..0x50000000 (256 MiB) from the device tree
-kalium: image 0x40200000..0x403a6000 (W^X: text RX, rodata RO, data/stacks RW, guards unmapped), heap 0x403a6000..0x50000000 (252 MiB)
-kalium: boot image: 10 modules
-kalium:   module 0: init (4421 bytes)
+kalium: image 0x40200000..0x403b5000 (W^X: text RX, rodata RO, data/stacks RW, guards unmapped), heap 0x403b5000..0x50000000 (252 MiB)
+kalium: boot image: 12 modules
+kalium:   module 0: init (8373 bytes)
 kalium:   module 1: ping (1945 bytes)
 kalium:   module 2: pong (2668 bytes)
 kalium:   module 3: rt (1059 bytes)
@@ -69,8 +74,10 @@ kalium:   module 4: fair (310 bytes)
 kalium:   module 5: faulty (157 bytes)
 kalium:   module 6: park (215 bytes)
 kalium:   module 7: greedy (3782 bytes)
-kalium:   module 8: hello_std (101148 bytes)
-kalium:   module 9: hello_c (202342 bytes)
+kalium:   module 8: revoked (1110 bytes)
+kalium:   module 9: shelf (1257 bytes)
+kalium:   module 10: hello_std (101148 bytes)
+kalium:   module 11: hello_c (202342 bytes)
 kalium: instance limits: 256 pages, 65536 stack values, call depth 1024, 256 cap slots
 kalium: created instance 0 (init)
 hello from init
@@ -125,6 +132,32 @@ hello_c: stdin read of 0 bytes got 0 at once
 hello_c: exiting with 5
 kalium: instance 1 (hello_c) exited 5 after 413033 instructions
 init: hello_c exited 5
+kalium: instance 0 (init) spawned instance 1 (revoked, fair)
+revoked: hello through a derived console
+kalium: instance 0 (init) revoked slot 16: 1 derived capability invalidated
+kalium: instance 0 (init) revoked slot 15: 1 derived capability invalidated
+init: send to revoked receiver: ECLOSED
+init: handle derives again after revoke
+kalium: instance 1 (revoked) exited 42 after 657 instructions
+init: revoked exited 42
+kalium: instance 0 (init) spawned instance 1 (shelf, fair)
+shelf: initialised
+kalium: instance 0 (init) snapshotted instance 1 (shelf): 21 pages, 1376294 bytes
+kalium: instance 0 (init) spawned instance 2 (shelf, fair) from snapshot
+shelf: resumed ok
+kalium: instance 2 (shelf) exited 0 after 1048831 instructions
+init: resumed shelf exited 0
+kalium: instance 0 (init) spawned instance 2 (shelf, fair) from snapshot
+shelf: resumed ok
+kalium: instance 2 (shelf) exited 0 after 1048831 instructions
+init: resumed shelf exited 0
+kalium: instance 0 (init) spawned instance 2 (shelf, fair) from snapshot
+shelf: resumed ok
+kalium: instance 2 (shelf) exited 0 after 1048831 instructions
+init: resumed shelf exited 0
+kalium: instance 1 (shelf) exited 0 after 11665700 instructions
+init: shelf exited 0
+init: shelf init 284494 us, restore 27429 us
 kalium: instance 0 (init) spawned instance 1 (greedy, fair)
 kalium: instance 1 (greedy) spawned instance 2 (park, fair)
 kalium: instance 1 (greedy) spawned instance 3 (park, fair)
@@ -141,8 +174,8 @@ greedy: slot reclaimed, park exited 0
 kalium: instance 1 (greedy) exited 0 after 3768 instructions
 init: greedy exited 0
 init: done
-kalium: instance 0 (init) exited 0 after 4707 instructions
-kalium: interpreter ran 19023785 instructions in 1238 ms (15356057 instr/s)
+kalium: instance 0 (init) exited 0 after 9095 instructions
+kalium: interpreter ran 44926654 instructions in 1337 ms (33590266 instr/s)
 kalium: init exited 0
 ```
 
@@ -253,7 +286,11 @@ kalium: 10 ticks
 
 After `faulty`, `init` runs the two WASI demos (`hello_std`, `hello_c`), each
 with a console capability as its stdout, `hello_c` also with a channel as
-its stdin; see [The WASI demos](#the-wasi-demos).
+its stdin; see [The WASI demos](#the-wasi-demos). Then it spawns `revoked`
+and takes its capabilities back; see
+[Revoking capabilities](#revoking-capabilities). Then it shelves `shelf`:
+a snapshot of the initialised service, and three instances started from
+it; see [The runtime shelf](#the-runtime-shelf-snapshots).
 The last phase hands `init`'s `Spawn` capability to `greedy`, a deliberately
 hostile service; see [Testing hostile services](#testing-hostile-services).
 
@@ -285,9 +322,9 @@ To add it to the boot image:
    SDK workspace picks up everything under `examples/*`.
 2. Add `<name>` to the module lists in `xtask/src/main.rs` and
    `kernel/build.rs` (`MODULES`), which must agree: the SDK modules
-   (`WASM_MODULES` in `xtask`: `init=0 ... faulty=5`, `park=6`, `greedy=7`)
-   come first, then the WASI demos (`DEMO_MODULES`: `hello_std=8`,
-   `hello_c=9`). The position is the module index `spawn` takes, and the
+   (`WASM_MODULES` in `xtask`: `init=0 ... faulty=5`, `park=6`, `greedy=7`,
+   `revoked=8`, `shelf=9`) come first, then the WASI demos (`DEMO_MODULES`:
+   `hello_std=10`, `hello_c=11`). The position is the module index `spawn` takes, and the
    existing indices are hardcoded in `init` and `greedy`, so append a new
    SDK module to the end of `WASM_MODULES` and insert it before `hello_std`
    in `build.rs`, then bump `MOD_HELLO_STD`/`MOD_HELLO_C` in `init`; a
@@ -323,7 +360,7 @@ clocks), `random_get` is a non-cryptographic xorshift, and `poll_oneoff`
 sleeps on clock subscriptions. `demos/` holds two such programs, written as
 anyone would write them:
 
-- `demos/hello-std` (module 8, `hello_std`): a Rust `std` program with
+- `demos/hello-std` (module 10, `hello_std`): a Rust `std` program with
   `println!`, a `Vec`, `format!`, a `HashMap` (its hasher is seeded through
   `random_get`), floating point, `std::env::args`/`vars` (both empty),
   `thread::sleep` (through `poll_oneoff`) and `process::exit(3)`. Built by
@@ -331,7 +368,7 @@ anyone would write them:
   `cargo build --release --target wasm32-wasip1 --manifest-path demos/Cargo.toml`
   (profile: `opt-level = "s"`, LTO, `panic = "abort"`, stripped); about
   100 KB, about 1.3 M interpreted instructions.
-- `demos/hello-c` (module 9, `hello_c`): a C program with `printf` in
+- `demos/hello-c` (module 11, `hello_c`): a C program with `printf` in
   several conversions, `malloc`/`free`, `qsort`, `strtod`/`strtol`,
   `snprintf`, recursion, `time()`, stdin through `fgets`, `readv` and
   `read`, and `return 5`. Compiled with clang and
@@ -364,6 +401,121 @@ To run another WASI program: drop its `.wasm` into the boot image (see
 SDK) and spawn it with a console capability in slot 0 and, if it reads
 stdin, the receive end of a channel in slot 1; whatever the spawner sends
 on the channel is what the program reads, a message at a time.
+
+## Revoking capabilities
+
+A capability can be taken back from whoever holds it. Every capability
+carries its *lineage*, the node it occupies in the derivation tree of its
+object: capabilities the kernel mints fresh (`channel_create`,
+`memobj_create`, `spawn`, `init`'s boot capabilities) are roots,
+`cap_derive` adds a child under the source, a transfer keeps the node.
+`cap_revoke(cap)` (SDK: `cap_revoke`, `Cap::revoke`) invalidates every
+capability below `cap`'s node, and only those, wherever they are: in the
+caller's table, in another instance's, or inside a message still queued on
+a channel. `cap` itself stays valid and may derive again; its siblings and
+what it was derived from are untouched; and `cap_drop` is not revocation
+(dropping a capability leaves its derivations valid).
+
+What the holder of a revoked capability sees: the next host call that
+takes it fails with `EBADCAP`, like a slot that was never filled, whatever
+the call and whatever rights the capability had; a `recv`, `wait_any` or
+`instance_wait` already blocked on it is woken and fails the same way. The
+dead capability still occupies its slot (the kernel does not rearrange
+another instance's table) until `cap_drop`, which succeeds on it, or the
+instance's exit; nothing is leaked either way, since the object reference
+and the lineage node go with the slot. The kernel reports each revocation
+(`kalium: instance 0 (init) revoked slot 16: 1 derived capability
+invalidated`); the count includes capabilities in flight. The check costs
+a walk up the chain of at most 16 nodes (`MAX_DERIVE_DEPTH`; `cap_derive`
+fails with `ENOMEM` beyond it), never a scan of the tables; `cap_revoke`
+itself scans every table and queue once. Each revocation bumps the node's
+32-bit generation; `cap_revoke` fails with `ENOMEM`, invalidating nothing,
+once that would wrap.
+
+Channel ends are the one place revocation acts immediately rather than on
+the next call: a channel capability counts as a sender or receiver only
+while it is valid, so revoking the receive end you gave away closes the
+channel for its senders at once (`send` returns `ECLOSED` once no valid
+receiver is left; a revoked receiver cannot keep a channel open forever),
+and revoking a send end closes it for receivers once the queue drains.
+Dropping the dead capability later does not change the counts again.
+
+The idiom is a handle you keep: derive one with `DERIVE` from the
+capability you own, transfer a derivation of the handle, and revoke the
+handle when the time comes. The boot-test scenario does exactly that with
+`revoked` (module 8), spawned after the WASI demos:
+
+- `init` keeps `handle = console.derive(WRITE|DERIVE|TRANSFER)` and gives
+  `revoked` `handle.derive(WRITE|TRANSFER)` (slot 0), the receive end of a
+  `go` channel (slot 1), the send end of a `ready` channel (slot 2) and a
+  derivation `data_rx.derive(RECV|WAIT|TRANSFER)` of a data channel's
+  receive end (slot 3).
+- `revoked` prints `revoked: hello through a derived console`, sends
+  `ready` and blocks on `go`.
+- `init` receives `ready`, revokes `handle` (the console in `revoked`'s
+  slot 0 is dead; `init`'s console and `handle` are not: it derives from
+  `handle` once more and prints `init: handle derives again after revoke`)
+  and revokes `data_rx` (the receiver in slot 3 is dead), then drops its
+  own `data_rx`: the channel has no valid receiver, and `init`'s `send` on
+  it reports `init: send to revoked receiver: ECLOSED`. Then it sends `go`.
+- `revoked` wakes up, finds `console_write` failing with `EBADCAP` and
+  `recv` on slot 3 failing with `EBADCAP`, and exits 42
+  (`init: revoked exited 42`). Any other outcome is a different exit code
+  (43: the console still worked, 44: the receiver still worked, 45: the
+  setup failed), and a line printed after the revocation (`revoked: this
+  line must not appear`) fails the scenario on its own.
+
+## The runtime shelf: snapshots
+
+An instance whose initialisation is expensive (the model is an
+interpreter that parses its standard library before it can run a line)
+can be started once, captured, and started again from the capture: a
+memory copy instead of the initialisation. `instance_snapshot(cap)` (SDK:
+`Instance::snapshot`, needs the `SNAPSHOT` right every `spawn` grants)
+takes the state of an instance that is parked in a host call (blocked in
+`recv`, `wait_any` or `instance_wait`, or sleeping): the contents of its
+linear memory, its globals and tables and which segments it has dropped,
+nothing of the execution in flight, as `kalium-wasm`'s `Instance::snapshot`
+captures it. It returns a capability on a new `Snapshot` object
+(`READ|DERIVE|TRANSFER`), which remembers the module, and is freed with
+its last capability. A runnable instance, or the caller itself, is refused
+with `EBUSY` (the spawner yields and retries; the window is the few
+instructions between a service's last message and its `recv`); an exited
+one with `ECLOSED`, since the kernel frees an instance's Wasm state at
+exit. `spawn_snapshot(cap, snapshot, caps, ncaps, class, period, budget,
+entry, out)` (SDK: `spawn_snapshot`, `Snapshot::spawn`) is `spawn` from
+the snapshot: the new instance's memory, globals and tables start as
+captured (`Instance::from_snapshot`), no data or element segment and no
+start function runs, and the execution starts at `entry`: `0` runs the
+export `_start` as `spawn` does, `1` runs the export `resume`, the
+convention for continuing from a restored state (`ENOENT` if the export is
+missing or not `[] -> []`). The restored memory holds whatever the
+original stored, including the slot numbers of its capabilities, so the
+spawner passes the new instance's capabilities in the same order.
+
+The boot-test scenario does this with `shelf` (module 9), spawned after
+`revoked`:
+
+- `shelf`'s `_start` fills a 256 KiB table with a deliberately slow
+  deterministic computation (about 11.7 M instructions), records a
+  checksum, prints `shelf: initialised`, sends `ready` to `init` and parks
+  in `recv` on a `go` channel.
+- `init` takes the time from the `spawn` to `ready` as the cost of a
+  fresh start, snapshots `shelf` (`kalium: instance 0 (init) snapshotted
+  instance 1 (shelf): 21 pages, 1376294 bytes`: the table, the SDK's
+  1 MiB stack and the globals, as the plan's byte format would encode
+  them) and starts three instances from the snapshot at `resume`, timing
+  each from `spawn_snapshot` to its exit.
+- `resume` runs on the restored memory: it recomputes the checksum of the
+  table (about 1.05 M instructions, a tenth of building it), prints
+  `shelf: resumed ok` and exits 0; a mismatch exits 1, a restore without
+  the state exits 3.
+- `init` closes `go` so that the original exits 0, prints `init: shelf
+  init N us, restore M us` (M the fastest of the three) and drops the
+  snapshot. `cargo xtask test` requires `M < N`; under QEMU on a
+  laptop-class host the fresh start takes about 285 ms and a restore
+  about 27 ms, the ratio of the instruction counts, since the copy of
+  1.3 MB costs well under a millisecond.
 
 ## Testing hostile services
 

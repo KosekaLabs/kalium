@@ -66,6 +66,23 @@
 //! host call; through any other address (a function another instance
 //! stored in a shared table) it is a *foreign call*, routed to the embedder
 //! through [`Host::call_foreign`], which knows every instance of the store.
+//!
+//! # Snapshots
+//!
+//! [`Instance::snapshot`] captures the instance's own memory, tables and
+//! globals (and which segments it has dropped) as a [`Snapshot`], and
+//! [`Instance::from_snapshot`] allocates a new instance of the module with
+//! that state instead of applying the segments: the fast way to start an
+//! instance whose initialisation has been run once. A snapshot can only be
+//! taken of objects nobody else can see: the module must import no table,
+//! memory or global (those belong to their exporter), and every handle the
+//! instance holds must be the only one, `Rc::strong_count == 1`, so none
+//! has been exported to a live instance or kept by the host (either is
+//! [`Error::Unsupported`]: a memory another instance can write to has no
+//! consistent contents to capture). The interpreter releases its handle
+//! clones at the end of every `run`, so a snapshot between two runs of an
+//! execution, after a host call returned `Block` for instance, sees the
+//! memory as that execution left it. See [`crate::snapshot`].
 
 use crate::code::Program;
 use crate::error::{Error, Trap};
@@ -74,8 +91,9 @@ use crate::global::{Global, GlobalRef};
 use crate::instr::{ConstExpr, Instr};
 use crate::memory::{Memory, MemoryRef};
 use crate::module::{DataMode, ElemItems, ElemMode, ImportDesc, Module};
+use crate::snapshot::Snapshot;
 use crate::table::{Table, TableRef, MAX_TABLE_ELEMENTS};
-use crate::types::{FuncType, GlobalType, MemType, TableType};
+use crate::types::{FuncType, GlobalType, MemType, TableType, PAGE_SIZE};
 use alloc::rc::Rc;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -239,9 +257,10 @@ pub struct Instance {
     pub(crate) func_base: u32,
     /// Type index of every function (imports first), by function index.
     func_types: Vec<u32>,
-    /// The compiled code of the module (see [`crate::code`]), shared so
-    /// that the interpreter loop can hold it while it mutates the instance.
-    program: Rc<Program>,
+    /// The compiled code of the module (see [`crate::code`]): the module's
+    /// cached program, shared by every instance of the module, and held so
+    /// that the interpreter loop can keep it while it mutates the instance.
+    program: Arc<Program>,
     /// Evaluated element segments; emptied when dropped (or after an active
     /// segment has been applied).
     pub(crate) elems: Vec<Vec<Value>>,
@@ -280,6 +299,23 @@ fn busy() -> Error {
     Error::Trap(Trap::Host)
 }
 
+fn unsupported(msg: &'static str) -> Error {
+    Error::Unsupported { offset: 0, msg }
+}
+
+fn bad_snapshot(msg: &'static str) -> Error {
+    Error::Snapshot { msg }
+}
+
+/// Whether `module` imports a table, memory or global: objects that belong
+/// to their exporter and so are neither captured nor restored.
+fn imports_objects(module: &Module) -> bool {
+    module
+        .imports
+        .iter()
+        .any(|i| !matches!(i.desc, ImportDesc::Func(_)))
+}
+
 /// The function address space of an instance under construction.
 struct Addrs<'a> {
     base: u32,
@@ -288,6 +324,18 @@ struct Addrs<'a> {
 }
 
 impl Addrs<'_> {
+    /// A snapshot value as the instance holds it: a function reference by
+    /// address instead of function index (see [`crate::snapshot`]).
+    fn relocate(&self, v: Value) -> Result<Value, Error> {
+        match v {
+            Value::FuncRef(Some(f)) => self
+                .addr(f)
+                .map(|a| Value::FuncRef(Some(a)))
+                .ok_or_else(|| bad_snapshot("function reference names no function of the module")),
+            other => Ok(other),
+        }
+    }
+
     fn addr(&self, f: u32) -> Option<u32> {
         if let Some(&a) = self.import_addrs.get(f as usize) {
             return Some(a);
@@ -398,6 +446,53 @@ impl Instance {
         limits: &Limits,
         func_base: u32,
     ) -> Result<Instance, Error> {
+        Instance::build(module, resolve, limits, func_base, None)
+    }
+
+    /// Allocate an instance of `module` whose memory, tables and globals
+    /// hold the state captured in `snapshot` (see [`Instance::snapshot`]
+    /// and [`crate::snapshot`]) instead of their initial values, with the
+    /// segments the snapshot recorded as dropped already dropped, so that
+    /// no segment is applied and [`Instance::init_segments`] does nothing.
+    /// Imports are resolved exactly as in [`Instance::allocate`] (same
+    /// errors), and `func_base` may differ from the snapshotted instance's:
+    /// function references are relocated.
+    ///
+    /// The snapshot is checked against the module and the limits before
+    /// anything is built; a mismatch is [`Error::Snapshot`]: the memory's
+    /// page count must lie within the module's memory limits and
+    /// [`Limits::max_memory_pages`] (and be zero for a module without a
+    /// memory), the globals must match the module's in number and type,
+    /// each table's length must lie within its type's limits, the lengths
+    /// together within [`Limits::max_table_elements`], every table entry
+    /// must be a reference of the table's element type naming a function
+    /// of the module, and the segment flags must match the module's
+    /// segment counts. A module that imports a table, memory or global is
+    /// [`Error::Unsupported`], as for [`Instance::snapshot`].
+    pub fn from_snapshot(
+        module: Arc<Module>,
+        snapshot: &Snapshot,
+        resolve: &mut dyn FnMut(&str, &str, &ExternType<'_>) -> Option<Extern>,
+        limits: &Limits,
+        func_base: u32,
+    ) -> Result<Instance, Error> {
+        if imports_objects(&module) {
+            return Err(unsupported(
+                "restoring a snapshot into a module that imports a table, memory or global",
+            ));
+        }
+        Instance::build(module, resolve, limits, func_base, Some(snapshot))
+    }
+
+    /// [`Instance::allocate`], with the objects' contents taken from
+    /// `snapshot` when one is given (see [`Instance::from_snapshot`]).
+    fn build(
+        module: Arc<Module>,
+        resolve: &mut dyn FnMut(&str, &str, &ExternType<'_>) -> Option<Extern>,
+        limits: &Limits,
+        func_base: u32,
+        snapshot: Option<&Snapshot>,
+    ) -> Result<Instance, Error> {
         if module.funcs.len() != module.code.len() {
             return Err(invalid("function and code section lengths differ"));
         }
@@ -498,11 +593,27 @@ impl Instance {
         };
 
         // Defined globals, in order; initializers may read earlier globals.
-        for g in &module.globals {
-            let v = eval_const(&addrs, &globals, &g.init)?;
-            let global = Global::new(g.ty, v)
-                .ok_or_else(|| invalid("global initializer has the wrong type"))?;
-            globals.push(global.into_shared());
+        // From a snapshot, the captured values (which the snapshot of a
+        // module without imported globals covers completely).
+        match snapshot {
+            None => {
+                for g in &module.globals {
+                    let v = eval_const(&addrs, &globals, &g.init)?;
+                    let global = Global::new(g.ty, v)
+                        .ok_or_else(|| invalid("global initializer has the wrong type"))?;
+                    globals.push(global.into_shared());
+                }
+            }
+            Some(snap) => {
+                if snap.globals.len() != module.globals.len() || !globals.is_empty() {
+                    return Err(bad_snapshot("global count does not match the module"));
+                }
+                for (g, &v) in module.globals.iter().zip(&snap.globals) {
+                    let global = Global::new(g.ty, addrs.relocate(v)?)
+                        .ok_or_else(|| bad_snapshot("global value has the wrong type"))?;
+                    globals.push(global.into_shared());
+                }
+            }
         }
 
         // Defined tables. Each one is bounded by the smaller of the
@@ -519,11 +630,38 @@ impl Instance {
                     msg: "declared table sizes exceed the instance's table element limit",
                 })?;
         }
-        for t in &module.tables {
-            let table = Table::new(*t, per_table).ok_or(Error::Limit {
-                msg: "table size exceeds limit",
-            })?;
-            tables.push(table.into_shared());
+        match snapshot {
+            None => {
+                for t in &module.tables {
+                    let table = Table::new(*t, per_table).ok_or(Error::Limit {
+                        msg: "table size exceeds limit",
+                    })?;
+                    tables.push(table.into_shared());
+                }
+            }
+            Some(snap) => {
+                if snap.tables.len() != module.tables.len() || !tables.is_empty() {
+                    return Err(bad_snapshot("table count does not match the module"));
+                }
+                let mut total: u32 = 0;
+                for (t, entries) in module.tables.iter().zip(&snap.tables) {
+                    total = u32::try_from(entries.len())
+                        .ok()
+                        .and_then(|n| total.checked_add(n))
+                        .filter(|&n| n <= limits.max_table_elements)
+                        .ok_or_else(|| {
+                            bad_snapshot("table sizes exceed the instance's table element limit")
+                        })?;
+                    let mut relocated = Vec::with_capacity(entries.len());
+                    for &v in entries {
+                        relocated.push(addrs.relocate(v)?);
+                    }
+                    let table = Table::with_entries(*t, relocated, per_table).ok_or_else(|| {
+                        bad_snapshot("table length or entry type does not match the module")
+                    })?;
+                    tables.push(table.into_shared());
+                }
+            }
         }
 
         // Memory 0 (an empty, non-growable one when the module has none).
@@ -533,9 +671,12 @@ impl Instance {
                 msg: "multiple memories are not supported",
             });
         }
-        let memory = match (memories.pop(), module.memories.first()) {
-            (Some(imported), _) => imported,
-            (None, Some(m)) => {
+        let memory = match (memories.pop(), module.memories.first(), snapshot) {
+            (Some(imported), _, None) => imported,
+            (Some(_), _, Some(_)) => {
+                return Err(bad_snapshot("the module imports its memory"));
+            }
+            (None, Some(m), None) => {
                 let cap = m
                     .limits
                     .max
@@ -549,7 +690,38 @@ impl Instance {
                     .ok_or(Error::OutOfMemory)?
                     .into_shared()
             }
-            (None, None) => Memory::new(0, 0).ok_or(Error::OutOfMemory)?.into_shared(),
+            (None, Some(m), Some(snap)) => {
+                let cap = m
+                    .limits
+                    .max
+                    .map_or(limits.max_memory_pages, |x| x.min(limits.max_memory_pages));
+                let pages = snap.memory_pages();
+                if !snap.memory.len().is_multiple_of(PAGE_SIZE) {
+                    return Err(bad_snapshot("memory contents are not whole pages"));
+                }
+                if pages < m.limits.min {
+                    return Err(bad_snapshot("memory is smaller than the module's minimum"));
+                }
+                if pages > cap {
+                    return Err(bad_snapshot(
+                        "memory exceeds the module's maximum or the limit",
+                    ));
+                }
+                let mut bytes = Vec::new();
+                bytes
+                    .try_reserve_exact(snap.memory.len())
+                    .map_err(|_| Error::OutOfMemory)?;
+                bytes.extend_from_slice(&snap.memory);
+                Memory::with_contents(*m, bytes, limits.max_memory_pages)
+                    .ok_or_else(|| bad_snapshot("memory does not fit the module's type"))?
+                    .into_shared()
+            }
+            (None, None, Some(snap)) if !snap.memory.is_empty() => {
+                return Err(bad_snapshot(
+                    "memory contents for a module without a memory",
+                ));
+            }
+            (None, None, _) => Memory::new(0, 0).ok_or(Error::OutOfMemory)?.into_shared(),
         };
 
         // Element segments are evaluated eagerly into element instances.
@@ -581,19 +753,28 @@ impl Instance {
             elems.push(items);
         }
 
-        let func_arity: Vec<(u32, u32)> = func_types
-            .iter()
-            .map(|&t| {
-                module.get_type(t).map_or((0, 0), |ft| {
-                    (ft.params.len() as u32, ft.results.len() as u32)
-                })
-            })
-            .collect();
-        let program = Rc::new(crate::code::compile_module(
-            &module,
-            &func_arity,
-            host_funcs.len(),
-        ));
+        // The segments' drop state: from the snapshot, which also means
+        // the active segments have been applied, so `init_segments` has
+        // nothing left to do.
+        let mut data_dropped = alloc::vec![false; module.data.len()];
+        if let Some(snap) = snapshot {
+            if snap.elem_dropped.len() != elems.len() {
+                return Err(bad_snapshot(
+                    "element segment count does not match the module",
+                ));
+            }
+            if snap.data_dropped.len() != data_dropped.len() {
+                return Err(bad_snapshot("data segment count does not match the module"));
+            }
+            for (seg, &dropped) in elems.iter_mut().zip(&snap.elem_dropped) {
+                if dropped {
+                    *seg = Vec::new();
+                }
+            }
+            data_dropped.copy_from_slice(&snap.data_dropped);
+        }
+
+        let program = module.program();
 
         Ok(Instance {
             limits: *limits,
@@ -606,10 +787,87 @@ impl Instance {
             program,
             func_types,
             elems,
-            data_dropped: alloc::vec![false; module.data.len()],
-            initialized: false,
+            data_dropped,
+            initialized: snapshot.is_some(),
             module,
         })
+    }
+
+    /// Capture the instance's own memory, tables and globals, and which
+    /// data and element segments it has dropped, as a [`Snapshot`] that
+    /// [`Instance::from_snapshot`] restores into a new instance of the
+    /// module. Nothing about an execution in flight is captured.
+    ///
+    /// Allowed exactly when every object is the instance's alone:
+    ///
+    /// - the module imports no table, memory or global (an imported object
+    ///   belongs to its exporter), and
+    /// - every handle the instance holds (its memory, each table, each
+    ///   global) has `Rc::strong_count == 1`: it has not been exported to
+    ///   a live instance through [`Instance::export_memory`] and the like,
+    ///   nor kept by the host.
+    ///
+    /// Otherwise [`Error::Unsupported`] (with `offset` 0): an object
+    /// another instance may write to has no consistent contents to
+    /// capture. A table holding a reference to a function of another
+    /// instance (a foreign address) is also [`Error::Unsupported`], and a
+    /// memory or table the host has mutably borrowed is
+    /// [`Error::Trap`]`(`[`Trap::Host`]`)`.
+    pub fn snapshot(&self) -> Result<Snapshot, Error> {
+        if imports_objects(&self.module) {
+            return Err(unsupported(
+                "snapshot of an instance that imports a table, memory or global",
+            ));
+        }
+        let shared = Rc::strong_count(&self.memory) != 1
+            || self.tables.iter().any(|t| Rc::strong_count(t) != 1)
+            || self.globals.iter().any(|g| Rc::strong_count(g) != 1);
+        if shared {
+            return Err(unsupported(
+                "snapshot of an instance whose memory, table or global is shared",
+            ));
+        }
+        let memory = self.memory.try_borrow().map_err(|_| busy())?;
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(memory.size_bytes())
+            .map_err(|_| Error::OutOfMemory)?;
+        bytes.extend_from_slice(memory.as_slice());
+        drop(memory);
+        let mut globals = Vec::with_capacity(self.globals.len());
+        for g in &self.globals {
+            globals.push(self.unrelocate(g.get())?);
+        }
+        let mut tables = Vec::with_capacity(self.tables.len());
+        for t in &self.tables {
+            let t = t.try_borrow().map_err(|_| busy())?;
+            let mut entries = Vec::with_capacity(t.entries().len());
+            for &v in t.entries() {
+                entries.push(self.unrelocate(v)?);
+            }
+            tables.push(entries);
+        }
+        Ok(Snapshot {
+            memory: bytes,
+            globals,
+            tables,
+            data_dropped: self.data_dropped.clone(),
+            elem_dropped: self.elems.iter().map(Vec::is_empty).collect(),
+        })
+    }
+
+    /// A value as the snapshot stores it: a function reference by function
+    /// index instead of address (see [`crate::snapshot`]).
+    fn unrelocate(&self, v: Value) -> Result<Value, Error> {
+        match v {
+            Value::FuncRef(Some(addr)) => self
+                .local_func(addr)
+                .map(|f| Value::FuncRef(Some(f)))
+                .ok_or_else(|| {
+                    unsupported("snapshot of a reference to another instance's function")
+                }),
+            other => Ok(other),
+        }
     }
 
     /// Apply the active element and data segments (the second half of
@@ -887,7 +1145,7 @@ impl Instance {
 
     /// The compiled code of the module.
     #[inline(always)]
-    pub(crate) fn program(&self) -> &Rc<Program> {
+    pub(crate) fn program(&self) -> &Arc<Program> {
         &self.program
     }
 
@@ -1635,5 +1893,474 @@ mod tests {
             Value::I32(4)
         );
         assert!(alloc::format!("{inst:?}").contains("func_base: 0"));
+    }
+
+    #[test]
+    fn program_is_compiled_once_per_module() {
+        let m = module(EXPORTER);
+        assert!(m.program.is_compiled());
+        let a = Instance::new(m.clone(), &mut |_, _, _| Err(()), &Limits::default()).unwrap();
+        let b = Instance::new(m.clone(), &mut |_, _, _| Err(()), &Limits::default()).unwrap();
+        assert!(Arc::ptr_eq(a.program(), b.program()));
+        assert!(m.program.get().is_some_and(|p| Arc::ptr_eq(p, a.program())));
+        // A clone of the module shares the program too.
+        let c = Instance::new(
+            Arc::new((*m).clone()),
+            &mut |_, _, _| Err(()),
+            &Limits::default(),
+        )
+        .unwrap();
+        assert!(Arc::ptr_eq(a.program(), c.program()));
+        // A module built without `Module::new` has no cache; its instances
+        // compile their own, equal, programs, and it compares equal to the
+        // compiled module (the cache is not part of the module's identity).
+        let bare = Arc::new(Module {
+            program: Default::default(),
+            ..(*m).clone()
+        });
+        assert!(!bare.program.is_compiled());
+        assert_eq!(*bare, *m);
+        let d = Instance::new(bare.clone(), &mut |_, _, _| Err(()), &Limits::default()).unwrap();
+        let e = Instance::new(bare, &mut |_, _, _| Err(()), &Limits::default()).unwrap();
+        assert!(!Arc::ptr_eq(d.program(), e.program()));
+        assert_eq!(**d.program(), **a.program());
+        assert_eq!(alloc::format!("{:?}", m.program), "ProgramCache(compiled)");
+        let mut inst = a;
+        assert_eq!(
+            one(&mut inst, &mut Store::default(), "four", &[]),
+            Value::I32(4)
+        );
+    }
+
+    /// A module with every kind of state a snapshot covers.
+    const STATEFUL: &str = r#"(module
+        (type $t (func (result i32)))
+        (memory 1 4)
+        (table 4 8 funcref)
+        (global $g (mut i32) (i32.const 10))
+        (global $r (mut funcref) (ref.null func))
+        (global $f (mut f64) (f64.const 1.5))
+        (elem (i32.const 0) $one $two)
+        (elem $passive funcref (ref.func $two) (ref.func $one))
+        (elem declare funcref (ref.func $one))
+        (data (i32.const 16) "init")
+        (data $pd "passive")
+        (func $one (type $t) (i32.const 1))
+        (func $two (type $t) (i32.const 2))
+        (func (export "mutate")
+            (drop (memory.grow (i32.const 1)))
+            (i32.store8 (i32.const 65536) (i32.const 0xAB))
+            (i32.store8 (i32.const 16) (i32.const 0x55))
+            (global.set $g (i32.const 42))
+            (global.set $r (ref.func $two))
+            (global.set $f (f64.const -0.0))
+            (table.set (i32.const 3) (ref.func $one))
+            (drop (table.grow (ref.null func) (i32.const 2)))
+            (table.init $passive (i32.const 4) (i32.const 0) (i32.const 1))
+            (data.drop $pd)
+            (elem.drop $passive))
+        (func (export "size") (result i32) (memory.size))
+        (func (export "tsize") (result i32) (table.size))
+        (func (export "load8") (param i32) (result i32) (i32.load8_u (local.get 0)))
+        (func (export "g") (result i32) (global.get $g))
+        (func (export "f") (result f64) (global.get $f))
+        (func (export "call_r") (result i32)
+            (table.set (i32.const 0) (global.get $r)) (call_indirect (type $t) (i32.const 0)))
+        (func (export "call") (param i32) (result i32) (call_indirect (type $t) (local.get 0)))
+        (func (export "init_pd") (memory.init $pd (i32.const 0) (i32.const 0) (i32.const 1)))
+        (func (export "init_passive")
+            (table.init $passive (i32.const 0) (i32.const 0) (i32.const 1))))"#;
+
+    fn stateful(base: u32) -> Instance {
+        Instance::instantiate(
+            module(STATEFUL),
+            &mut |_, _, _| None,
+            &Limits::default(),
+            base,
+        )
+        .unwrap()
+    }
+
+    fn restore(snap: &Snapshot, base: u32, limits: &Limits) -> Result<Instance, Error> {
+        Instance::from_snapshot(module(STATEFUL), snap, &mut |_, _, _| None, limits, base)
+    }
+
+    #[test]
+    fn snapshot_round_trip() {
+        let mut host = Store::default();
+        let mut a = stateful(0);
+        let fresh = a.snapshot().unwrap();
+        assert_eq!(fresh.memory_pages(), 1);
+        assert_eq!(&fresh.memory()[16..20], b"init");
+        assert_eq!(fresh.data_dropped, [true, false]);
+        assert_eq!(fresh.elem_dropped, [true, false, true]);
+        assert_eq!(
+            call(&mut a, &mut host, "mutate", &[]),
+            ExecResult::Done(vec![])
+        );
+        let snap = a.snapshot().unwrap();
+        assert_eq!(snap.memory_pages(), 2);
+        assert_eq!(snap.memory()[65536], 0xAB);
+        assert_eq!(snap.num_globals(), 3);
+        assert_eq!(snap.num_tables(), 1);
+        // Function references are stored by index: $two is function 1.
+        assert_eq!(snap.globals[1], Value::FuncRef(Some(1)));
+        assert_eq!(snap.tables[0].len(), 6);
+        assert_eq!(snap.tables[0][3], Value::FuncRef(Some(0)));
+        assert_eq!(snap.tables[0][4], Value::FuncRef(Some(1)));
+        assert_eq!(snap.data_dropped, [true, true]);
+        assert_eq!(snap.elem_dropped, [true, true, true]);
+        assert_eq!(Snapshot::from_bytes(&snap.to_bytes()).unwrap(), snap);
+
+        // Restored at another function address range through the bytes.
+        let bytes = snap.to_bytes();
+        let decoded = Snapshot::from_bytes(&bytes).unwrap();
+        let mut b = restore(&decoded, 1000, &Limits::default()).unwrap();
+        assert_eq!(b.func_addr_base(), 1000);
+        // The restored instance's own snapshot is the same snapshot.
+        assert_eq!(b.snapshot().unwrap(), snap);
+        assert_eq!(one(&mut b, &mut host, "size", &[]), Value::I32(2));
+        assert_eq!(one(&mut b, &mut host, "tsize", &[]), Value::I32(6));
+        assert_eq!(
+            one(&mut b, &mut host, "load8", &[Value::I32(65536)]),
+            Value::I32(0xAB)
+        );
+        assert_eq!(
+            one(&mut b, &mut host, "load8", &[Value::I32(16)]),
+            Value::I32(0x55)
+        );
+        assert_eq!(one(&mut b, &mut host, "g", &[]), Value::I32(42));
+        assert_eq!(one(&mut b, &mut host, "f", &[]), Value::F64(-0.0));
+        assert!(matches!(one(&mut b, &mut host, "f", &[]), Value::F64(f) if f.is_sign_negative()));
+        // The relocated references call the right functions.
+        assert_eq!(b.global(1), Some(Value::FuncRef(Some(1001))));
+        assert_eq!(one(&mut b, &mut host, "call_r", &[]), Value::I32(2));
+        assert_eq!(
+            one(&mut b, &mut host, "call", &[Value::I32(3)]),
+            Value::I32(1)
+        );
+        assert_eq!(
+            one(&mut b, &mut host, "call", &[Value::I32(4)]),
+            Value::I32(2)
+        );
+        assert_eq!(
+            call(&mut b, &mut host, "call", &[Value::I32(5)]),
+            ExecResult::Trap(Trap::UninitializedElement)
+        );
+        // Dropped segments stay dropped, and nothing is re-applied.
+        assert_eq!(
+            call(&mut b, &mut host, "init_pd", &[]),
+            ExecResult::Trap(Trap::OutOfBounds)
+        );
+        assert_eq!(
+            call(&mut b, &mut host, "init_passive", &[]),
+            ExecResult::Trap(Trap::TableOutOfBounds)
+        );
+        assert_eq!(b.init_segments(), Ok(()));
+        assert_eq!(
+            one(&mut b, &mut host, "load8", &[Value::I32(16)]),
+            Value::I32(0x55)
+        );
+        // What was run since (`call_r` overwrote table entry 0) shows.
+        let after = b.snapshot().unwrap();
+        assert_eq!(after.tables[0][0], Value::FuncRef(Some(1)));
+        assert_eq!(after.memory(), snap.memory());
+
+        // A fresh instance's snapshot restores to a fresh instance, whose
+        // passive segments are still usable.
+        let mut c = restore(&fresh, 7, &Limits::default()).unwrap();
+        assert_eq!(c.snapshot().unwrap(), fresh);
+        assert_eq!(
+            call(&mut c, &mut host, "init_pd", &[]),
+            ExecResult::Done(vec![])
+        );
+        assert_eq!(
+            one(&mut c, &mut host, "load8", &[Value::I32(0)]),
+            Value::I32(b'p' as i32)
+        );
+        assert_eq!(
+            call(&mut c, &mut host, "init_passive", &[]),
+            ExecResult::Done(vec![])
+        );
+        assert_eq!(
+            one(&mut c, &mut host, "call", &[Value::I32(0)]),
+            Value::I32(2)
+        );
+    }
+
+    #[test]
+    fn snapshot_requires_unshared_objects() {
+        let inst = stateful(0);
+        let shared = |r: &Result<Snapshot, Error>| matches!(r, Err(Error::Unsupported { offset: 0, msg }) if msg.contains("shared"));
+        assert!(inst.snapshot().is_ok());
+        let held = inst.memory_ref().clone();
+        assert!(shared(&inst.snapshot()));
+        drop(held);
+        assert!(inst.snapshot().is_ok());
+        let held = inst.table_ref(0).unwrap().clone();
+        assert!(shared(&inst.snapshot()));
+        drop(held);
+        let held = inst.global_ref(2).unwrap().clone();
+        assert!(shared(&inst.snapshot()));
+        drop(held);
+        // A host borrow is reported as a trap, not a panic.
+        let guard = inst.memory_ref().borrow_mut();
+        assert_eq!(inst.snapshot(), Err(Error::Trap(Trap::Host)));
+        drop(guard);
+        assert!(inst.snapshot().is_ok());
+
+        // Exporting to another live instance shares the objects; the
+        // importer cannot be snapshotted either, since it imports them.
+        let mut store = Store::default();
+        let exporter =
+            Instance::new(module(EXPORTER), &mut |_, _, _| Err(()), &Limits::default()).unwrap();
+        assert!(exporter.snapshot().is_ok());
+        let importer = link(
+            r#"(module (import "a" "mem" (memory 1)))"#,
+            Some(&exporter),
+            100,
+            &mut store,
+        )
+        .unwrap();
+        assert!(shared(&exporter.snapshot()));
+        assert!(matches!(
+            importer.snapshot(),
+            Err(Error::Unsupported { offset: 0, msg }) if msg.contains("imports")
+        ));
+        let snap = Snapshot {
+            memory: alloc::vec![0; 65536],
+            globals: Vec::new(),
+            tables: Vec::new(),
+            data_dropped: Vec::new(),
+            elem_dropped: Vec::new(),
+        };
+        assert!(matches!(
+            Instance::from_snapshot(
+                importer.module().clone(),
+                &snap,
+                &mut |_, _, _| Some(Extern::Memory(exporter.memory_ref().clone())),
+                &Limits::default(),
+                200,
+            ),
+            Err(Error::Unsupported { offset: 0, .. })
+        ));
+        drop(importer);
+        assert!(exporter.snapshot().is_ok());
+
+        // A foreign function reference in a table cannot be captured.
+        let lone = stateful(0);
+        lone.table_ref(0)
+            .unwrap()
+            .borrow_mut()
+            .set(0, Value::FuncRef(Some(5000)))
+            .unwrap();
+        assert!(matches!(
+            lone.snapshot(),
+            Err(Error::Unsupported { offset: 0, msg }) if msg.contains("another instance")
+        ));
+        lone.table_ref(0)
+            .unwrap()
+            .borrow_mut()
+            .set(0, Value::FuncRef(None))
+            .unwrap();
+        assert!(lone.snapshot().is_ok());
+    }
+
+    #[test]
+    fn restore_validates_the_snapshot() {
+        let good = stateful(0).snapshot().unwrap();
+        assert!(restore(&good, 0, &Limits::default()).is_ok());
+        let rejected = |snap: &Snapshot, limits: &Limits, what: &str| match restore(snap, 0, limits)
+        {
+            Err(Error::Snapshot { msg }) => assert!(msg.contains(what), "{msg} / {what}"),
+            other => panic!("{what}: {other:?}"),
+        };
+        let with = |f: &dyn Fn(&mut Snapshot)| {
+            let mut s = good.clone();
+            f(&mut s);
+            s
+        };
+        let limits = Limits::default();
+        // Memory: below the minimum, above the maximum, above the limit,
+        // not whole pages.
+        rejected(&with(&|s| s.memory.clear()), &limits, "smaller");
+        rejected(
+            &with(&|s| s.memory = alloc::vec![0; 5 * 65536]),
+            &limits,
+            "exceeds",
+        );
+        rejected(
+            &with(&|s| s.memory = alloc::vec![0; 2 * 65536]),
+            &Limits {
+                max_memory_pages: 1,
+                ..limits
+            },
+            "exceeds",
+        );
+        rejected(&with(&|s| s.memory.push(0)), &limits, "whole pages");
+        // Globals: count and type, and a reference that names no function.
+        rejected(&with(&|s| s.globals.truncate(2)), &limits, "global count");
+        rejected(
+            &with(&|s| s.globals[0] = Value::I64(1)),
+            &limits,
+            "wrong type",
+        );
+        rejected(
+            &with(&|s| s.globals[1] = Value::FuncRef(Some(99))),
+            &limits,
+            "names no function",
+        );
+        // Tables: count, length under the minimum and over the maximum,
+        // the element budget, entry types, unknown functions.
+        rejected(&with(&|s| s.tables.clear()), &limits, "table count");
+        rejected(&with(&|s| s.tables[0].truncate(3)), &limits, "table length");
+        rejected(
+            &with(&|s| s.tables[0].resize(9, Value::FuncRef(None))),
+            &limits,
+            "table length",
+        );
+        rejected(
+            &with(&|s| s.tables[0].resize(5, Value::FuncRef(None))),
+            &Limits {
+                max_table_elements: 4,
+                ..limits
+            },
+            "element limit",
+        );
+        rejected(
+            &with(&|s| s.tables[0][0] = Value::ExternRef(None)),
+            &limits,
+            "entry type",
+        );
+        rejected(
+            &with(&|s| s.tables[0][0] = Value::I32(0)),
+            &limits,
+            "entry type",
+        );
+        rejected(
+            &with(&|s| s.tables[0][0] = Value::FuncRef(Some(99))),
+            &limits,
+            "names no function",
+        );
+        // Segment flags.
+        rejected(
+            &with(&|s| s.data_dropped.push(true)),
+            &limits,
+            "data segment count",
+        );
+        rejected(
+            &with(&|s| s.elem_dropped.truncate(2)),
+            &limits,
+            "element segment count",
+        );
+        // A module without a memory takes no memory contents.
+        let no_mem = module("(module)");
+        let snap = Snapshot {
+            memory: alloc::vec![0; 65536],
+            globals: Vec::new(),
+            tables: Vec::new(),
+            data_dropped: Vec::new(),
+            elem_dropped: Vec::new(),
+        };
+        assert!(matches!(
+            Instance::from_snapshot(no_mem.clone(), &snap, &mut |_, _, _| None, &limits, 0),
+            Err(Error::Snapshot { msg }) if msg.contains("without a memory")
+        ));
+        let empty = Snapshot {
+            memory: Vec::new(),
+            ..snap
+        };
+        let inst =
+            Instance::from_snapshot(no_mem, &empty, &mut |_, _, _| None, &limits, 0).unwrap();
+        assert_eq!(inst.snapshot().unwrap(), empty);
+    }
+
+    /// Blocks the first host call, then answers every call with its
+    /// argument.
+    #[derive(Default)]
+    struct BlockOnce {
+        calls: u32,
+    }
+
+    impl Host for BlockOnce {
+        fn call(
+            &mut self,
+            _ctx: &mut HostCtx<'_>,
+            _func: HostFuncId,
+            args: &[Value],
+            results: &mut [Value],
+        ) -> Result<HostOutcome, Trap> {
+            self.calls += 1;
+            if self.calls == 1 {
+                return Ok(HostOutcome::Block);
+            }
+            results[0] = args[0];
+            Ok(HostOutcome::Continue)
+        }
+    }
+
+    #[test]
+    fn snapshot_mid_execution_restores_the_state_the_execution_left() {
+        // `main` sets up state, then blocks in a host call, then returns
+        // what `probe` computes from that state.
+        let wat = r#"(module
+            (type $t (func (result i32)))
+            (import "env" "echo" (func $echo (param i32) (result i32)))
+            (memory 1)
+            (table 2 funcref)
+            (global $g (mut i32) (i32.const 0))
+            (elem declare func $seven)
+            (func $seven (type $t) (i32.const 7))
+            (func $probe (export "probe") (result i32)
+                (i32.add
+                    (i32.add (global.get $g) (i32.load (i32.const 100)))
+                    (call_indirect (type $t) (i32.const 1))))
+            (func (export "main") (result i32)
+                (global.set $g (i32.const 5))
+                (i32.store (i32.const 100) (i32.const 30))
+                (table.set (i32.const 1) (ref.func $seven))
+                (drop (call $echo (i32.const 9)))
+                (call $probe)))"#;
+        let m = module(wat);
+        let mut resolve = |_: &str, _: &str, ty: &ExternType<'_>| match ty {
+            ExternType::Func(ft) => Some(Extern::Func {
+                id: HostFuncId(0),
+                ty: (*ft).clone(),
+                addr: None,
+            }),
+            _ => None,
+        };
+        let mut a = Instance::instantiate(m.clone(), &mut resolve, &Limits::default(), 0).unwrap();
+        let mut host = BlockOnce::default();
+        let main = a.export_func("main").unwrap();
+        let mut exec = Execution::new(&a, main, &[]).unwrap();
+        assert_eq!(exec.run(&mut a, &mut host, 1 << 20), ExecResult::Blocked);
+        assert_eq!(host.calls, 1);
+
+        // Mid-execution: the interpreter holds no handles between runs.
+        let snap = a.snapshot().unwrap();
+        assert_eq!(snap.globals, [Value::I32(5)]);
+        assert_eq!(snap.tables[0][1], Value::FuncRef(Some(1)));
+        let bytes = snap.to_bytes();
+        let mut b = Instance::from_snapshot(
+            m,
+            &Snapshot::from_bytes(&bytes).unwrap(),
+            &mut resolve,
+            &Limits::default(),
+            500,
+        )
+        .unwrap();
+        let probe = b.export_func("probe").unwrap();
+        let restored = Execution::new(&b, probe, &[])
+            .unwrap()
+            .run(&mut b, &mut host, 1 << 20);
+        assert_eq!(host.calls, 1);
+
+        // The original resumes, re-issues the call, and finishes.
+        let original = exec.run(&mut a, &mut host, 1 << 20);
+        assert_eq!(host.calls, 2);
+        assert_eq!(original, ExecResult::Done(vec![Value::I32(42)]));
+        assert_eq!(restored, original);
+        assert_eq!(b.snapshot().unwrap(), a.snapshot().unwrap());
     }
 }

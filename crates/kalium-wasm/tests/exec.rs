@@ -182,6 +182,79 @@ fn rust_fixture_runs() {
     }
 }
 
+#[test]
+fn rust_fixture_snapshot_restores_its_state() {
+    // The fixture's state (its counter, scratch buffer and function table)
+    // after a few calls, restored through the byte encoding into an
+    // instance at another function address range, continues identically.
+    let mut host = LogHost::default();
+    let mut original = fixture();
+    let h = &mut host;
+    let i = &mut original;
+    assert_eq!(call(i, h, "bump", &[]), vec![Value::I32(1)]);
+    assert_eq!(call(i, h, "bump", &[]), vec![Value::I32(2)]);
+    let ptr = call(i, h, "fill_scratch", &[Value::I32(0x5a), Value::I32(32)])[0];
+    assert_eq!(call(i, h, "greet", &[]), vec![]);
+    assert_eq!(host.log, [b"hello from fixture".to_vec()]);
+
+    let snapshot = original.snapshot().expect("fixture objects are unshared");
+    assert_eq!(
+        snapshot.memory_pages(),
+        original.memory().size_pages(),
+        "the whole memory is captured"
+    );
+    let bytes = snapshot.to_bytes();
+    assert_eq!(bytes.len(), snapshot.encoded_len());
+    let decoded = kalium_wasm::Snapshot::from_bytes(&bytes).unwrap();
+    assert_eq!(decoded, snapshot);
+
+    let mut restored = Instance::from_snapshot(
+        original.module().clone(),
+        &decoded,
+        &mut |m, n, ty| match ty {
+            kalium_wasm::ExternType::Func(ft) if (m, n) == ("env", "host_log") => {
+                Some(kalium_wasm::Extern::Func {
+                    id: HostFuncId(7),
+                    ty: (*ft).clone(),
+                    addr: None,
+                })
+            }
+            _ => None,
+        },
+        &Limits::default(),
+        10_000,
+    )
+    .expect("restore");
+    assert_eq!(restored.func_addr_base(), 10_000);
+    let mut host2 = LogHost::default();
+    let (h, i) = (&mut host2, &mut restored);
+    assert_eq!(call(i, h, "bump", &[]), vec![Value::I32(3)]);
+    let mut buf = [0u8; 33];
+    restored
+        .memory()
+        .read(ptr.as_i32().unwrap() as u32, &mut buf)
+        .unwrap();
+    assert_eq!(&buf[..32], &[0x5a; 32]);
+    assert_eq!(buf[32], 0);
+    let (h, i) = (&mut host2, &mut restored);
+    // The function table's references were relocated to the new range.
+    assert_eq!(
+        call(
+            i,
+            h,
+            "dispatch",
+            &[Value::I32(1), Value::I32(6), Value::I32(7)]
+        ),
+        vec![Value::I32(42)]
+    );
+    assert_eq!(call(i, h, "greet", &[]), vec![]);
+    assert_eq!(host2.log, [b"hello from fixture".to_vec()]);
+    // The original went the same way.
+    let (h, i) = (&mut host, &mut original);
+    assert_eq!(call(i, h, "bump", &[]), vec![Value::I32(3)]);
+    assert_eq!(restored.snapshot().unwrap(), original.snapshot().unwrap());
+}
+
 // ---------------------------------------------------------------------------
 // Robustness: unvalidated modules
 // ---------------------------------------------------------------------------
@@ -464,6 +537,7 @@ fn random_module(rng: &mut XorShift) -> Module {
             .collect(),
         data_count: None,
         code,
+        program: Default::default(),
     }
 }
 

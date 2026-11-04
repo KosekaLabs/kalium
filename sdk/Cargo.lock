@@ -63,7 +63,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "revoked"
+version = "0.1.0"
+dependencies = [
+ "kalium-sdk",
+]
+
+[[package]]
 name = "rt"
+version = "0.1.0"
+dependencies = [
+ "kalium-sdk",
+]
+
+[[package]]
+name = "shelf"
 version = "0.1.0"
 dependencies = [
  "kalium-sdk",

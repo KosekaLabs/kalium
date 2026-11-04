@@ -1510,6 +1510,7 @@ fn fuzz_hand_built_bodies_never_panic() {
                     br_tables: vec![],
                 },
             ],
+            program: Default::default(),
         };
         if validate(&module).is_ok() {
             accepted += 1;

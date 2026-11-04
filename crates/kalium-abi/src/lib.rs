@@ -86,7 +86,7 @@ pub mod errno {
 /// Rights (`u64` bit flags).
 ///
 /// > `READ=1, WRITE=2, SEND=4, RECV=8, DERIVE=16, TRANSFER=32, KILL=64,
-/// > WAIT=128, SPAWN=256`.
+/// > WAIT=128, SPAWN=256, SNAPSHOT=512`.
 ///
 /// A host call that needs a right the capability lacks fails with
 /// [`errno::EPERM`].
@@ -107,8 +107,10 @@ pub mod rights {
     pub const KILL: u64 = 64;
     /// May block on the object (`wait_any`, `instance_wait`).
     pub const WAIT: u64 = 128;
-    /// May create instances (`spawn`).
+    /// May create instances (`spawn`, `spawn_snapshot`).
     pub const SPAWN: u64 = 256;
+    /// May capture the instance's state (`instance_snapshot`).
+    pub const SNAPSHOT: u64 = 512;
 
     /// Every defined right with its name, in bit order.
     pub const ALL: &[(u64, &str)] = &[
@@ -121,11 +123,13 @@ pub mod rights {
         (KILL, "KILL"),
         (WAIT, "WAIT"),
         (SPAWN, "SPAWN"),
+        (SNAPSHOT, "SNAPSHOT"),
     ];
 
     /// The union of every defined right. Bits outside this mask are not
     /// rights and a value carrying them is a bad argument.
-    pub const MASK: u64 = READ | WRITE | SEND | RECV | DERIVE | TRANSFER | KILL | WAIT | SPAWN;
+    pub const MASK: u64 =
+        READ | WRITE | SEND | RECV | DERIVE | TRANSFER | KILL | WAIT | SPAWN | SNAPSHOT;
 
     /// Rights of the send end returned by `channel_create`:
     /// > one with `SEND|DERIVE|TRANSFER`
@@ -136,9 +140,13 @@ pub mod rights {
     /// Rights of the capability returned by `memobj_create`:
     /// > cap with `READ|WRITE|DERIVE|TRANSFER`
     pub const MEMOBJ_OWNER: u64 = READ | WRITE | DERIVE | TRANSFER;
-    /// Rights of the `Instance` capability returned by `spawn`:
-    /// > Returns an `Instance` cap with `WAIT|KILL|DERIVE|TRANSFER`.
-    pub const INSTANCE_OWNER: u64 = WAIT | KILL | DERIVE | TRANSFER;
+    /// Rights of the `Instance` capability returned by `spawn` and
+    /// `spawn_snapshot`:
+    /// > Returns an `Instance` cap with `WAIT|KILL|SNAPSHOT|DERIVE|TRANSFER`.
+    pub const INSTANCE_OWNER: u64 = WAIT | KILL | SNAPSHOT | DERIVE | TRANSFER;
+    /// Rights of the `Snapshot` capability returned by `instance_snapshot`:
+    /// > a cap to a new object of kind `Snapshot` with `READ|DERIVE|TRANSFER`
+    pub const SNAPSHOT_OWNER: u64 = READ | DERIVE | TRANSFER;
     /// Rights of init's console capability:
     /// > `Console(WRITE|DERIVE|TRANSFER)`
     pub const INIT_CONSOLE: u64 = WRITE | DERIVE | TRANSFER;
@@ -149,7 +157,7 @@ pub mod rights {
 
 /// Object kinds (`u32`).
 ///
-/// > `Console=1, Channel=2, MemObj=3, Instance=4, Spawn=5`.
+/// > `Console=1, Channel=2, MemObj=3, Instance=4, Spawn=5, Snapshot=6`.
 ///
 /// `0` is reserved and never names a kind.
 pub mod kind {
@@ -160,11 +168,16 @@ pub mod kind {
     pub const CHANNEL: u32 = 2;
     /// A memory object (`memobj_*`).
     pub const MEMOBJ: u32 = 3;
-    /// A running or exited instance (`instance_wait`, `instance_kill`).
+    /// A running or exited instance (`instance_wait`, `instance_kill`,
+    /// `instance_snapshot`).
     pub const INSTANCE: u32 = 4;
     /// The authority to create instances (`spawn`). Holding one at
     /// instantiation is what makes `kalium:spawn` resolve.
     pub const SPAWN: u32 = 5;
+    /// The captured state of an instance (`instance_snapshot`), which
+    /// `spawn_snapshot` starts new instances from. Freed with its last
+    /// capability.
+    pub const SNAPSHOT: u32 = 6;
 
     /// Every defined kind with its name, in numeric order.
     pub const ALL: &[(u32, &str)] = &[
@@ -173,6 +186,7 @@ pub mod kind {
         (MEMOBJ, "MemObj"),
         (INSTANCE, "Instance"),
         (SPAWN, "Spawn"),
+        (SNAPSHOT, "Snapshot"),
     ];
 }
 
@@ -208,8 +222,17 @@ pub mod imports {
         /// `(cap: i32, rights: i64, out_cap: i32) -> i32`
         /// > Needs `DERIVE`. New cap has `rights & old.rights` and never
         /// > gains `DERIVE` unless the old had it. Writes new index as `i32`
-        /// > at `out_cap`.
+        /// > at `out_cap`. `ENOMEM` beyond `MAX_DERIVE_DEPTH` derivations
+        /// > from a fresh capability.
         pub const CAP_DERIVE: &str = "cap_derive";
+        /// `(cap: i32) -> i32`
+        /// > Needs a live, unrevoked slot; no right. Invalidates every
+        /// > capability derived from it, transitively, wherever it went;
+        /// > the slot itself stays valid and may derive again. A revoked
+        /// > channel end stops counting as an endpoint at once.
+        ///
+        /// See `docs/prototype-plan.md`, "Revocation".
+        pub const CAP_REVOKE: &str = "cap_revoke";
         /// `(cap: i32, out: i32) -> i32`
         /// > Writes `{kind: u32, rights: u64}` (12 bytes, little-endian, no
         /// > padding) at `out`.
@@ -237,6 +260,7 @@ pub mod imports {
             CONSOLE_WRITE,
             CAP_DROP,
             CAP_DERIVE,
+            CAP_REVOKE,
             CAP_INFO,
             TIME_NOW,
             YIELD,
@@ -322,7 +346,7 @@ pub mod imports {
         /// > boot image's module table. The `ncaps` caps (each needs
         /// > `TRANSFER`) are moved to the child, becoming its slots
         /// > `0..ncaps` in order. `class` is `0` fair, `1` real-time. Returns
-        /// > an `Instance` cap with `WAIT|KILL|DERIVE|TRANSFER`.
+        /// > an `Instance` cap with `WAIT|KILL|SNAPSHOT|DERIVE|TRANSFER`.
         pub const SPAWN: &str = "spawn";
         /// `(cap: i32, out_code: i32) -> i32`
         /// > Needs `WAIT`. Blocks until the instance exits; writes exit code
@@ -334,9 +358,35 @@ pub mod imports {
         /// `() -> i32`
         /// > Number of modules in the boot image.
         pub const MODULE_COUNT: &str = "module_count";
+        /// `(cap: i32, out_cap: i32) -> i32`
+        /// > Needs `Instance` kind with `SNAPSHOT`. Captures the state of
+        /// > the instance (its memory, globals and tables; nothing of the
+        /// > execution in flight) into a new `Snapshot` object and writes
+        /// > a cap on it with `READ|DERIVE|TRANSFER` at `out_cap`. The
+        /// > instance must be blocked or sleeping: `EBUSY` while it is
+        /// > runnable (or is the caller), `ECLOSED` once it has exited.
+        /// > `EBUSY` as well if its memory or tables are shared.
+        ///
+        /// See `docs/prototype-plan.md`, "Snapshots".
+        pub const INSTANCE_SNAPSHOT: &str = "instance_snapshot";
+        /// `(cap: i32, snapshot_cap: i32, caps: i32, ncaps: i32, class: i32, period_ns: i64, budget_ns: i64, entry: i32, out_cap: i32) -> i32`
+        /// > Like `spawn`, but the instance is created from the snapshot's
+        /// > module with the snapshot's state (no segment or start function
+        /// > runs) and starts at `entry` ([`crate::entry`]): `0` the export
+        /// > `_start`, `1` the export `resume`; `ENOENT` if the export is
+        /// > missing or not of type `[] -> []`, `EINVAL` for any other
+        /// > value. `snapshot_cap` needs `Snapshot` kind with `READ`.
+        pub const SPAWN_SNAPSHOT: &str = "spawn_snapshot";
 
         /// Every function in this namespace, in ABI table order.
-        pub const FUNCTIONS: &[&str] = &[SPAWN, INSTANCE_WAIT, INSTANCE_KILL, MODULE_COUNT];
+        pub const FUNCTIONS: &[&str] = &[
+            SPAWN,
+            INSTANCE_WAIT,
+            INSTANCE_KILL,
+            MODULE_COUNT,
+            INSTANCE_SNAPSHOT,
+            SPAWN_SNAPSHOT,
+        ];
     }
 
     /// Every import module name, in the order of the plan's table.
@@ -352,6 +402,7 @@ pub mod imports {
         (core::MODULE, core::CONSOLE_WRITE),
         (core::MODULE, core::CAP_DROP),
         (core::MODULE, core::CAP_DERIVE),
+        (core::MODULE, core::CAP_REVOKE),
         (core::MODULE, core::CAP_INFO),
         (core::MODULE, core::TIME_NOW),
         (core::MODULE, core::YIELD),
@@ -371,6 +422,8 @@ pub mod imports {
         (spawn::MODULE, spawn::INSTANCE_WAIT),
         (spawn::MODULE, spawn::INSTANCE_KILL),
         (spawn::MODULE, spawn::MODULE_COUNT),
+        (spawn::MODULE, spawn::INSTANCE_SNAPSHOT),
+        (spawn::MODULE, spawn::SPAWN_SNAPSHOT),
     ];
 
     /// Whether `module` is an import namespace the kernel knows about.
@@ -493,6 +546,11 @@ pub mod limits {
     /// allocate, whatever it does with the `Instance` capabilities it gets
     /// back. An exited instance's slot is reused.
     pub const MAX_INSTANCES: usize = 32;
+    /// Longest chain of derivations from a capability the kernel minted
+    /// fresh (`cap_derive` of a `cap_derive` of ...): the fresh one is at
+    /// depth 0 and `cap_derive` fails with `ENOMEM` on one at this depth.
+    /// It bounds the lineage walk a capability check makes.
+    pub const MAX_DERIVE_DEPTH: u32 = 16;
 }
 
 /// The WASI preview1 compatibility layer (`docs/prototype-plan.md`, "WASI
@@ -522,6 +580,26 @@ pub mod wasi {
     pub const FD_STDOUT: i32 = 1;
     /// See [`FD_STDIN`].
     pub const FD_STDERR: i32 = 2;
+}
+
+/// Entry points of an instance created by `spawn_snapshot`.
+///
+/// > `entry` chooses the export the instance starts at, by convention:
+/// > `0` runs the export `_start` (the WASI command convention, which
+/// > `spawn` always uses), `1` runs the export named `resume`. Either must
+/// > be of type `[] -> []`; `ENOENT` if it is missing or mistyped.
+///
+/// A service that is meant to be shelved exports both: `_start` builds its
+/// state and parks, `resume` continues from the restored state.
+pub mod entry {
+    /// Start at the export `_start`.
+    pub const START: i32 = 0;
+    /// Start at the export `resume`.
+    pub const RESUME: i32 = 1;
+    /// The export name [`START`] runs (and `spawn` always runs).
+    pub const START_EXPORT: &str = "_start";
+    /// The export name [`RESUME`] runs.
+    pub const RESUME_EXPORT: &str = "resume";
 }
 
 /// Scheduling class values passed to `spawn`.
@@ -562,8 +640,8 @@ mod tests {
                 assert_ne!(bit, other, "{name} and {other_name} share a bit");
             }
         }
-        assert_eq!(rights::ALL.len(), 9);
-        assert_eq!(rights::MASK, 0x1FF);
+        assert_eq!(rights::ALL.len(), 10);
+        assert_eq!(rights::MASK, 0x3FF);
         assert_eq!(rights::READ, 1);
         assert_eq!(rights::WRITE, 2);
         assert_eq!(rights::SEND, 4);
@@ -573,6 +651,7 @@ mod tests {
         assert_eq!(rights::KILL, 64);
         assert_eq!(rights::WAIT, 128);
         assert_eq!(rights::SPAWN, 256);
+        assert_eq!(rights::SNAPSHOT, 512);
     }
 
     #[test]
@@ -582,12 +661,15 @@ mod tests {
             rights::CHANNEL_RECV_END,
             rights::MEMOBJ_OWNER,
             rights::INSTANCE_OWNER,
+            rights::SNAPSHOT_OWNER,
             rights::INIT_CONSOLE,
             rights::INIT_SPAWN,
         ] {
             assert_eq!(preset & !rights::MASK, 0);
             assert_ne!(preset, 0);
         }
+        assert_eq!(rights::INSTANCE_OWNER & rights::SNAPSHOT, rights::SNAPSHOT);
+        assert_eq!(rights::SNAPSHOT_OWNER, 1 | 16 | 32);
     }
 
     #[test]
@@ -622,6 +704,7 @@ mod tests {
             (3, "MemObj"),
             (4, "Instance"),
             (5, "Spawn"),
+            (6, "Snapshot"),
         ];
         assert_eq!(kind::ALL, expected);
         for (i, (value, _)) in kind::ALL.iter().enumerate() {
@@ -669,7 +752,7 @@ mod tests {
             }
         }
         assert_eq!(flat_len, imports::ALL_IMPORTS.len());
-        assert_eq!(imports::ALL_IMPORTS.len(), 9 + 5 + 4 + 4);
+        assert_eq!(imports::ALL_IMPORTS.len(), 10 + 5 + 4 + 6);
 
         // Every name is unique across all namespaces, not just within one.
         for (i, (module, name)) in imports::ALL_IMPORTS.iter().enumerate() {
@@ -694,6 +777,7 @@ mod tests {
             ("kalium:core", "console_write"),
             ("kalium:core", "cap_drop"),
             ("kalium:core", "cap_derive"),
+            ("kalium:core", "cap_revoke"),
             ("kalium:core", "cap_info"),
             ("kalium:core", "time_now"),
             ("kalium:core", "yield_"),
@@ -713,6 +797,8 @@ mod tests {
             ("kalium:spawn", "instance_wait"),
             ("kalium:spawn", "instance_kill"),
             ("kalium:spawn", "module_count"),
+            ("kalium:spawn", "instance_snapshot"),
+            ("kalium:spawn", "spawn_snapshot"),
         ];
         assert_eq!(imports::ALL_IMPORTS, plan);
     }
@@ -788,8 +874,13 @@ mod tests {
         assert_eq!(limits::MAX_MESSAGE_CAPS, 4);
         assert_eq!(limits::MAX_MEMOBJ_SIZE, 16 << 20);
         assert_eq!(limits::MAX_INSTANCES, 32);
+        assert_eq!(limits::MAX_DERIVE_DEPTH, 16);
         assert_eq!(sched::CLASS_FAIR, 0);
         assert_eq!(sched::CLASS_REAL_TIME, 1);
+        assert_eq!(entry::START, 0);
+        assert_eq!(entry::RESUME, 1);
+        assert_eq!(entry::START_EXPORT, "_start");
+        assert_eq!(entry::RESUME_EXPORT, "resume");
         assert_eq!(exit::SUCCESS, 0);
         assert_eq!(exit::TRAP, -1);
         assert_eq!(exit::KILLED, -2);

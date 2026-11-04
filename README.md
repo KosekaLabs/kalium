@@ -57,6 +57,12 @@ reported by the kernel while everything else continues; hands its `Spawn`
 capability to `greedy`, a hostile service that spawns and forgets instances
 until the kernel's instance limit refuses it. `init` observes each exit
 through `instance_wait`, and the kernel exits QEMU with the result.
+Capabilities can be revoked (`cap_revoke` invalidates everything derived
+from one, wherever it went) and instances can be shelved: `init` takes a
+snapshot of a service that has finished an expensive initialisation
+(`instance_snapshot`) and starts further instances from it
+(`spawn_snapshot`, a memory copy instead of the initialisation) about ten
+times faster than the fresh start (`docs/running.md`, "The runtime shelf").
 
 The kernel also speaks WASI preview1: the `wasi_snapshot_preview1` import
 module resolves for every instance, with the standard streams mapped onto

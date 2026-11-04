@@ -3,7 +3,7 @@
 //! knows about Kalium; it is built for `wasm32-wasip1` and talks to the
 //! kernel's WASI preview1 layer through `std`.
 //!
-//! Boot image module 8 (`hello_std`); `init` spawns it with a console
+//! Boot image module 10 (`hello_std`); `init` spawns it with a console
 //! capability in slot 0 (its stdout/stderr) and expects exit code 3.
 
 use std::collections::HashMap;

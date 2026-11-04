@@ -64,6 +64,28 @@ impl Table {
         })
     }
 
+    /// Create a table of type `ty` (capped like [`Table::new`]) holding
+    /// `entries`, whose number must lie within the type's limits and
+    /// `limit` and which must all be references of the table's element
+    /// type. Returns `None` otherwise. The entries are taken over, not
+    /// copied.
+    pub fn with_entries(ty: TableType, entries: Vec<Value>, limit: u32) -> Option<Table> {
+        let max = ty.limits.max.map_or(limit, |m| m.min(limit));
+        let len = u32::try_from(entries.len()).ok()?;
+        if len < ty.limits.min || len > max {
+            return None;
+        }
+        if entries.iter().any(|v| v.ty() != ty.elem.into()) {
+            return None;
+        }
+        Some(Table {
+            elem: ty.elem,
+            entries,
+            max,
+            declared_max: ty.limits.max,
+        })
+    }
+
     /// Wrap the table in a shared handle.
     pub fn into_shared(self) -> TableRef {
         Rc::new(RefCell::new(self))

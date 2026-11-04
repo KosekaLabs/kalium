@@ -5,7 +5,7 @@ This directory is a separate Cargo workspace that targets
 the kernel's host ABI, and the example services in `examples/` that make up
 the M1 boot-test scenario (`init`, `ping`, `pong`, `rt`, `fair`, `faulty`)
 plus the hostile pair that checks the kernel's instance limit (`greedy`,
-`park`).
+`park`), the revocation victim `revoked` and the shelved service `shelf`.
 
 The ABI itself (import names, errno values, rights, kinds, wire layouts) is
 defined once, in `crates/kalium-abi`, and both the kernel and this SDK are
@@ -22,8 +22,8 @@ cargo xtask wasm
 builds every example in release mode (`opt-level = "s"`, LTO, `panic =
 "abort"`, stripped) and copies them to `target/wasm/<name>.wasm` in boot
 image order (`init=0, ping=1, pong=2, rt=3, fair=4, faulty=5, park=6,
-greedy=7`), then builds the WASI demo programs from `demos/` after them
-(`hello_std=8, hello_c=9`; they do not use the SDK, see
+greedy=7, revoked=8, shelf=9`), then builds the WASI demo programs from `demos/`
+after them (`hello_std=10, hello_c=11`; they do not use the SDK, see
 `docs/running.md`, "The WASI demos"). The kernel's `build.rs` embeds them
 all from there. To build the SDK examples by hand:
 
@@ -87,12 +87,13 @@ or receives.
 | Need | API |
 | --- | --- |
 | Print | `Console::write`, `Console::println`, `println!` / `cprintln!`, `text::Line` |
-| Capabilities | `Cap::slot`, `cap_derive` (weaker rights), `cap_info`, `cap_drop` |
+| Capabilities | `Cap::slot`, `cap_derive` (weaker rights), `cap_revoke` (cut off everything derived from one), `cap_info`, `cap_drop` |
 | Time | `time_now()` (ns since boot), `sleep(ns)`, `yield_now()` |
 | Exit | `exit(code) -> !` |
 | Messaging | `Channel::create() -> (Sender, Receiver)`, `Sender::send(bytes, &[Cap])`, `Receiver::recv` / `try_recv`, `ipc::wait_any` |
 | Shared memory | `MemObj::create(size)`, `read`, `write`, `size` |
 | Processes | `spawn(spawn_cap, module, &[Cap], Class, period_ns, budget_ns)`, `Instance::wait`, `Instance::kill`, `module_count` |
+| Snapshots | `Instance::snapshot` / `instance_snapshot` (the state of a parked instance as a `Snapshot` capability), `spawn_snapshot(spawn_cap, snapshot, &[Cap], Class, period_ns, budget_ns, Entry)` / `Snapshot::spawn` (an instance started from it at `_start` or `resume`) |
 
 Every fallible call returns `Result<_, Errno>`; `Errno` names the ABI's
 errno values (`BadCap`, `Perm`, `Again`, `Closed`, ...). Nothing in the SDK
@@ -102,14 +103,34 @@ Capability transfer: `Sender::send` and `spawn` *move* the capabilities
 they are given (each needs the `TRANSFER` right); the `Cap` values are
 stale afterwards. To hand out a console without giving it away, derive a
 copy first: `console.cap().derive(rights::WRITE | rights::TRANSFER)`.
+To be able to take it back, derive it from a handle you keep
+(`let handle = console.cap().derive(WRITE | DERIVE | TRANSFER)?;` then
+transfer `handle.derive(WRITE | TRANSFER)?`): `cap_revoke(handle)` later
+invalidates everything derived from the handle, wherever it went (the
+holder's next use fails with `Errno::BadCap`), while `console` and `handle`
+stay usable. A revoked channel end stops counting as an endpoint at once,
+so revoking the receiver you gave away closes the channel for its senders
+(`Errno::Closed`).
 
 `send` never blocks: when the channel's queue (depth 16) is full it fails
 with `Errno::Again`; `yield_now()` and retry. `recv` blocks until a message
 arrives and reports `Errno::Closed` once the queue is empty and no sender
 exists.
 
+Snapshots: `instance.snapshot()` captures the memory, globals and tables of
+an instance that is parked in a host call (blocked in `recv` or sleeping;
+`Errno::Busy` while it is still runnable, so retry after `yield_now()`)
+and returns a `Snapshot` capability; `spawn_snapshot(spawner, snapshot,
+&[caps], Class::Fair, 0, 0, Entry::Resume)` starts a new instance of the
+same module with that state, running its export `resume` (or `_start`
+with `Entry::Start`) instead of the module's initialisation. A service
+meant to be shelved exports both: `_start` builds its state and parks,
+`resume` (`#[no_mangle] pub extern "C" fn resume()`) continues from it.
+Pass the capabilities in the same order as to the original, since the
+restored memory holds the slot numbers it stored.
+
 The `kalium:spawn` imports (`spawn`, `instance_wait`, `instance_kill`,
-`module_count`) only resolve for an instance that holds a `Spawn`
+`module_count`, `instance_snapshot`, `spawn_snapshot`) only resolve for an instance that holds a `Spawn`
 capability when it is created. Since the linker only keeps imports that
 are referenced, a service that never calls them does not import them; one
 that does and is spawned without a `Spawn` capability fails to instantiate
@@ -149,7 +170,7 @@ sdk/
     src/text.rs         Line builder and integer formatting without core::fmt
     src/ipc.rs          Channel, Sender, Receiver, wait_any
     src/memobj.rs       MemObj
-    src/spawn.rs        spawn, Instance, Class
+    src/spawn.rs        spawn, Instance, Class, Snapshot, Entry, instance_snapshot, spawn_snapshot
   examples/           the boot-test services, one crate each
 ```
 
@@ -170,6 +191,18 @@ instances`), releases them by closing the channel they block on, and spawns
 once more to show the slots are reused (`greedy: slot reclaimed, park exited
 0`). Between `faulty` and `greedy`, `init` runs the two WASI demos
 (`hello_std`, exit 3, and `hello_c`, exit 5) with a console capability each,
-`hello_c` also with the receive end of a channel as its stdin.
+`hello_c` also with the receive end of a channel as its stdin, and then
+`revoked`, which prints once through a console derived from a handle `init`
+keeps, after which `init` revokes the handle and the receive end it gave
+`revoked`, drops its own receiver and finds the channel closed
+(`init: send to revoked receiver: ECLOSED`); `revoked` then sees `EBADCAP`
+on both capabilities and exits 42 (`init: revoked exited 42`). Then
+`shelf` builds a 256 KiB table with several million instructions, prints
+`shelf: initialised` and parks; `init` snapshots it and starts three
+instances from the snapshot at `resume`, each checking the table's
+checksum (`shelf: resumed ok`, `init: resumed shelf exited 0`), closes
+the original's channel (`init: shelf exited 0`) and prints
+`init: shelf init N us, restore M us`, where the restore must be the
+faster start.
 `init` waits for each instance, prints `init: <name> exited <code>` for
 each, prints `init: done` and exits with 0.
