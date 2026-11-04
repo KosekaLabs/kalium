@@ -1,7 +1,8 @@
 //! The host ABI: one [`Host`] implementation that dispatches on
 //! [`HostFuncId`] to every function of `kalium:core`, `kalium:ipc`,
 //! `kalium:memory` and `kalium:spawn` with the semantics of
-//! `docs/prototype-plan.md`.
+//! `docs/prototype-plan.md`, and hands the `wasi_snapshot_preview1` ids
+//! (the range starting at [`crate::wasi::BASE`]) to [`crate::wasi`].
 //!
 //! Conventions shared by every function:
 //!
@@ -136,8 +137,11 @@ pub fn check_table() -> Result<(), &'static str> {
         if signature(id).is_none() {
             return Err("host function without a signature");
         }
+        if crate::wasi::is_wasi(HostFuncId(id)) {
+            return Err("host function id collides with the WASI range");
+        }
     }
-    Ok(())
+    crate::wasi::check_table()
 }
 
 /// The function type of host function `id`, from the plan's ABI tables.
@@ -171,8 +175,12 @@ pub fn signature(id: u32) -> Option<FuncType> {
 
 /// Import resolver for `Instance::new`: the import must be in the ABI
 /// table with the expected type, and `kalium:spawn` resolves only when the
-/// instance holds a `Spawn` capability.
+/// instance holds a `Spawn` capability. `wasi_snapshot_preview1` is handed
+/// to [`crate::wasi`] and always resolves.
 pub fn resolve(module: &str, name: &str, ty: &FuncType, has_spawn: bool) -> Result<HostFuncId, ()> {
+    if module == crate::wasi::MODULE {
+        return crate::wasi::resolve(name, ty);
+    }
     let id = imports::lookup(module, name).ok_or(())?;
     if module == imports::spawn::MODULE && !has_spawn {
         return Err(());
@@ -205,7 +213,7 @@ pub struct HostCall<'a> {
 }
 
 /// The result of an errno-returning host function.
-enum Step {
+pub(crate) enum Step {
     Ret(i32),
     Block,
     Exit(i32),
@@ -227,13 +235,13 @@ fn mem_errno(e: MemError) -> i32 {
     }
 }
 
-fn cap_index(cap: i32) -> Result<CapIndex, i32> {
+pub(crate) fn cap_index(cap: i32) -> Result<CapIndex, i32> {
     CapIndex::try_from(cap).map_err(cap_errno)
 }
 
 /// `[ptr, ptr + len)` inside `mem`, or `EFAULT`. An empty range is accepted
 /// whatever the pointer.
-fn range(mem: &Memory, ptr: i32, len: i32) -> Result<(u32, usize), i32> {
+pub(crate) fn range(mem: &Memory, ptr: i32, len: i32) -> Result<(u32, usize), i32> {
     let len = usize::try_from(len).map_err(|_| errno::EFAULT)?;
     let ptr = ptr as u32;
     if len == 0 {
@@ -246,7 +254,12 @@ fn range(mem: &Memory, ptr: i32, len: i32) -> Result<(u32, usize), i32> {
 }
 
 /// `count` elements of `size` bytes at `ptr`; a negative count is `EINVAL`.
-fn range_n(mem: &Memory, ptr: i32, count: i32, size: usize) -> Result<(u32, usize), i32> {
+pub(crate) fn range_n(
+    mem: &Memory,
+    ptr: i32,
+    count: i32,
+    size: usize,
+) -> Result<(u32, usize), i32> {
     let count = usize::try_from(count).map_err(|_| errno::EINVAL)?;
     let bytes = count.checked_mul(size).ok_or(errno::EFAULT)?;
     let bytes = i32::try_from(bytes).map_err(|_| errno::EFAULT)?;
@@ -265,7 +278,7 @@ fn read_i32s(mem: &Memory, ptr: i32, count: i32) -> Result<Vec<i32>, i32> {
         .collect())
 }
 
-fn write_bytes(mem: &mut Memory, ptr: u32, bytes: &[u8]) -> Result<(), i32> {
+pub(crate) fn write_bytes(mem: &mut Memory, ptr: u32, bytes: &[u8]) -> Result<(), i32> {
     if bytes.is_empty() {
         return Ok(());
     }
@@ -288,14 +301,14 @@ fn restore(table: &mut CapTable, caps: Vec<Capability>) {
     }
 }
 
-struct Args<'a>(&'a [Value]);
+pub(crate) struct Args<'a>(pub(crate) &'a [Value]);
 
 impl Args<'_> {
-    fn i32(&self, i: usize) -> Result<i32, Trap> {
+    pub(crate) fn i32(&self, i: usize) -> Result<i32, Trap> {
         self.0.get(i).and_then(Value::as_i32).ok_or(Trap::Host)
     }
 
-    fn i64(&self, i: usize) -> Result<i64, Trap> {
+    pub(crate) fn i64(&self, i: usize) -> Result<i64, Trap> {
         self.0.get(i).and_then(Value::as_i64).ok_or(Trap::Host)
     }
 }
@@ -309,15 +322,15 @@ impl<'a> HostCall<'a> {
         }
     }
 
-    fn tid(&self) -> ThreadId {
+    pub(crate) fn tid(&self) -> ThreadId {
         ThreadId(self.cur as u32)
     }
 
-    fn caps(&mut self) -> &mut CapTable {
+    pub(crate) fn caps(&mut self) -> &mut CapTable {
         &mut self.k.instances[self.cur].caps
     }
 
-    fn block_on(&mut self, objects: &[kalium_cap::ObjectId]) -> Step {
+    pub(crate) fn block_on(&mut self, objects: &[kalium_cap::ObjectId]) -> Step {
         let tid = self.tid();
         for &o in objects {
             self.k.park(tid, o);
@@ -372,7 +385,7 @@ impl<'a> HostCall<'a> {
         OK
     }
 
-    fn yield_(&mut self) -> HostOutcome {
+    pub(crate) fn yield_(&mut self) -> HostOutcome {
         let inst = &mut self.k.instances[self.cur];
         if inst.yield_pending {
             inst.yield_pending = false;
@@ -829,6 +842,9 @@ impl Host for HostCall<'_> {
         // duration of the call (kalium-wasm's `HostCtx` contract).
         let mut mem = ctx.memory.borrow_mut();
         let mem: &mut Memory = &mut mem;
+        if crate::wasi::is_wasi(func) {
+            return crate::wasi::call(self, mem, func, args, results);
+        }
         let a = Args(args);
         let step = match func.0 {
             CONSOLE_WRITE => self.console_write(mem, a.i32(0)?, a.i32(1)?, a.i32(2)?),
@@ -893,7 +909,7 @@ impl Host for HostCall<'_> {
     }
 }
 
-fn set_result(results: &mut [Value], v: Value) -> Result<(), Trap> {
+pub(crate) fn set_result(results: &mut [Value], v: Value) -> Result<(), Trap> {
     match results.first_mut() {
         Some(slot) => {
             *slot = v;

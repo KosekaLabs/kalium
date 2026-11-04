@@ -61,7 +61,8 @@ crates/kalium-sched     threads, RT (EDF) and fair classes, run loop
 sdk/                    separate workspace targeting wasm32-unknown-unknown
 sdk/kalium-sdk          safe wrappers over the host ABI
 sdk/examples/*          init, ping, pong, rt, fair, faulty
-xtask/                  `cargo xtask build|run|test|wasm|clippy`
+demos/                  WASI demo programs (no SDK): hello-std (Rust std, wasm32-wasip1), hello-c (C, wasi-libc)
+xtask/                  `cargo xtask build|run|test|wasm|demos|clippy`
 ```
 
 ## Host ABI (the contract between kernel and SDK)
@@ -156,6 +157,87 @@ MMU-backed design; M1 copies.
 
 `kalium-abi` defines all of the above as constants plus the import module and
 function names, and nothing else. It has no dependencies and no `unsafe`.
+
+## WASI preview1 compatibility
+
+Beside its own host ABI the kernel offers the `wasi_snapshot_preview1`
+import module, so that ordinary programs built for `wasm32-wasip1` (Rust
+`std`, C through wasi-libc, anything else that targets WASI preview1) run on
+Kalium unchanged. It is a compatibility layer over the capabilities an
+instance holds, not a second ABI: a WASI program cannot ask for anything the
+host ABI could not give it, and gets nothing a capability does not grant.
+The implementation and its design notes live in `kernel/src/wasi.rs`;
+`kalium-abi` has the module name and slot numbers below as `wasi::*`.
+
+### Linking
+
+`wasi_snapshot_preview1` resolves for every instance, whatever capabilities
+it holds; the calls, not the imports, are checked against the capabilities
+(a `fd_write` without a console fails with `EBADF`). The kernel declares the
+complete function table of the snapshot (46 functions, `wasi/api.h` order)
+with its core-Wasm signatures: pointers, lengths, fds, flags and small enums
+are `i32`, 64-bit sizes, offsets, timestamps and rights are `i64`, every
+function returns an `i32` errno except `proc_exit`. An import that is not
+in the table, or whose type differs, is a link error (`ENOENT` to the
+spawner) like any other. The entry point is the WASI command convention,
+`_start: [] -> []`, which is also the SDK's; a `_start` that returns is
+exit 0.
+
+### File descriptors
+
+The three standard streams map onto the capability slots a spawner fills;
+nothing else is a valid fd (no preopened directories: `fd_prestat_get` is
+`EBADF` for every fd, which is how wasi-libc and Rust's `std` learn there is
+nothing to open; no files; no sockets).
+
+| fd | Backed by | Without the capability |
+| --- | --- | --- |
+| 0 | the `Channel` capability with `RECV` in slot 1 (`wasi::STDIN_CHANNEL_SLOT`); each message is a chunk of input, kept across `fd_read` calls until consumed; an empty message or a channel without senders is end of file (0 bytes); capabilities carried by a message are dropped. The iovecs have `readv` semantics: an empty iovec among others is skipped, and a call with no room at all (no iovecs, or only empty ones) returns 0 at once without taking a message or blocking, like `read(fd, buf, 0)` | `fd_read` is `EBADF` |
+| 1, 2 | the `Console` capability with `WRITE` in slot 0 (`wasi::STDOUT_CONSOLE_SLOT`) | `fd_write` is `EBADF`, the bytes are dropped |
+
+`fd_fdstat_get` on 0..2 reports a character device with `FD_READ` on 0 and
+`FD_WRITE` on 1 and 2 when the backing capability is present (so C stdio is
+line buffered); `fd_seek` and `fd_tell` on them are `ESPIPE`; `fd_close` is
+accepted and does nothing.
+
+### Functions
+
+| Function | Behaviour |
+| --- | --- |
+| `fd_write`, `fd_read` | iovec arrays and every buffer they name bounds-checked before anything is read, written or output; `fd_read` blocks on the channel through the kernel's wait queue like `recv` (the call is re-issued when a message arrives) |
+| `fd_close`, `fd_fdstat_get`, `fd_prestat_get`, `fd_prestat_dir_name`, `fd_seek`, `fd_tell` | as above |
+| `proc_exit(code)` | the instance's `exit(code)`; the spawner sees `code` through `instance_wait` |
+| `args_sizes_get`, `args_get`, `environ_sizes_get`, `environ_get` | no arguments, no variables (`spawn` passes capabilities, not strings); both counts written as 0 |
+| `clock_time_get` | `REALTIME` (0) and `MONOTONIC` (1) both return the HAL's nanosecond counter since boot (no real-time clock yet: `time()` in C counts from boot); the CPU-time clocks (2, 3) are `ENOTSUP`, other ids `EINVAL` |
+| `clock_res_get` | the counter's period for clocks 0 and 1; `ENOTSUP`/`EINVAL` as above |
+| `random_get` | a per-instance xorshift64* generator seeded from the timer counter and the instance id on first use. **Not cryptographic**: enough for `HashMap` seeds and nothing more; a real entropy source is a later milestone |
+| `sched_yield` | `yield_` |
+| `poll_oneoff` | clock subscriptions only (what `thread::sleep` and `nanosleep` issue): sleeps until the earliest deadline through the scheduler's sleep mechanism, then reports every subscription whose deadline has passed; a subscription on an fd makes the whole call `ENOTSUP`; zero subscriptions is `EINVAL` |
+| other `fd_*` | `EBADF` for an fd other than 0..2, else `ENOTSUP` |
+| `path_*`, `sock_*` | `ENOTSUP` (no file system, no sockets) |
+| `proc_raise` | `ENOSYS` |
+
+Errno values are WASI preview1's (`__WASI_ERRNO_*`: `EBADF=8`, `EFAULT=21`,
+`EINVAL=28`, `ENOSYS=52`, `ENOTSUP=58`, `ESPIPE=70`, ...), not Kalium's.
+Every pointer and length is bounds-checked like the host ABI's, with the
+same helpers; a failure is WASI `EFAULT`, a negative count `EINVAL`.
+
+### Demos
+
+`demos/` holds programs that do not use the SDK: `hello-std`, a Rust `std`
+program built with `cargo build --release --target wasm32-wasip1`, and
+`hello-c`, a C program compiled with clang against wasi-libc (a prebuilt
+binary is checked in for machines without that toolchain). They are boot
+image modules 8 (`hello_std`) and 9 (`hello_c`); `init` spawns each with a
+console capability in slot 0, and `hello_c` also with the receive end of a
+channel in slot 1 as its stdin, filled before the spawn with `hello\n`,
+`world` and an empty message (end of file) and whose sending end `init`
+keeps until `hello_c` has exited. The boot-test scenario asserts their
+output and their exit codes, 3 and 5; for `hello_c` that includes a line
+read with `fgets`, a `readv` whose empty first buffer is skipped, end of
+file, and a zero-length `read` on the drained stdin that returns at once
+(were it to block, the kernel would report a deadlock). `cargo xtask demos`
+builds them (`cargo xtask wasm` runs it); see `docs/running.md`.
 
 ## Crate contracts
 

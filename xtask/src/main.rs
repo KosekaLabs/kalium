@@ -1,4 +1,4 @@
-//! Developer tasks: `cargo xtask build|run|boot-test|selftest|wasm|test|clippy|fmt-check`.
+//! Developer tasks: `cargo xtask build|run|boot-test|selftest|wasm|demos|test|clippy|fmt-check`.
 //! See docs/prototype-plan.md and docs/running.md.
 //!
 //! Only `std` is used here. Every subcommand is a function returning the
@@ -42,7 +42,34 @@ const SELFTEST_ODD_MEMORY: &str = "129M";
 const WASM_MODULES: [&str; 8] = [
     "init", "ping", "pong", "rt", "fair", "faulty", "park", "greedy",
 ];
+/// The WASI demo programs from `demos/`, which follow the SDK modules in
+/// the boot image (`hello_std=8, hello_c=9`). `hello_std` is a Rust `std`
+/// program built for `wasm32-wasip1`; `hello_c` is a C program compiled with
+/// clang and wasi-libc, or taken from `demos/hello-c/prebuilt/` when that
+/// toolchain is absent.
+const DEMO_MODULES: [&str; 2] = ["hello_std", "hello_c"];
 const WASM_TARGET: &str = "wasm32-unknown-unknown";
+const WASIP1_TARGET: &str = "wasm32-wasip1";
+const DEMOS_MANIFEST: &str = "demos/Cargo.toml";
+/// Where the demos workspace builds (its own directory, like the SDK's).
+const DEMOS_BUILD_DIR: &str = "target/demos-build";
+const HELLO_C_SOURCE: &str = "demos/hello-c/main.c";
+const HELLO_C_PREBUILT: &str = "demos/hello-c/prebuilt/hello_c.wasm";
+/// Where a wasi-libc sysroot is looked for when `WASI_SYSROOT` is not set:
+/// wasi-sdk's layout, then Ubuntu's `wasi-libc` package (headers in
+/// `/usr/include/wasm32-wasi`, libraries in `/usr/lib/wasm32-wasi`, so the
+/// sysroot is `/usr`).
+const WASI_SYSROOT_CANDIDATES: [&str; 5] = [
+    "/usr/share/wasi-sysroot",
+    "/usr/lib/wasi-libc",
+    "/opt/wasi-sdk/share/wasi-sysroot",
+    "/usr/local/share/wasi-sysroot",
+    "/usr",
+];
+/// Compilers tried, in order, when `CLANG` is not set.
+const CLANG_CANDIDATES: [&str; 6] = [
+    "clang", "clang-20", "clang-19", "clang-18", "clang-17", "clang-16",
+];
 /// Where the SDK workspace builds (kept apart from the kernel's target dir
 /// so the two workspaces never share a lock or a profile).
 const WASM_BUILD_DIR: &str = "target/wasm-build";
@@ -72,6 +99,7 @@ fn main() {
         "boot-test" => boot_test(&root),
         "selftest" => selftest(&root),
         "wasm" => wasm(&root),
+        "demos" => demos(&root),
         "test" => test(&root),
         "clippy" => clippy(&root),
         "fmt-check" => fmt_check(&root),
@@ -93,7 +121,12 @@ fn usage() {
         "usage: cargo xtask <command>\n\
          \n\
          commands:\n\
-         \x20 wasm                   build the SDK example modules into target/wasm/\n\
+         \x20 wasm                   build the SDK example modules and the WASI demos into\n\
+         \x20                        target/wasm/\n\
+         \x20 demos                  build the WASI demo programs (demos/) into target/wasm/:\n\
+         \x20                        hello_std with cargo for {WASIP1_TARGET}, hello_c with clang and\n\
+         \x20                        wasi-libc (WASI_SYSROOT, CLANG override the search), falling\n\
+         \x20                        back to demos/hello-c/prebuilt/ without that toolchain\n\
          \x20 build [--boot-only] [--selftest]\n\
          \x20                        wasm, then the kernel for {KERNEL_TARGET} (release);\n\
          \x20                        --selftest adds the HAL hardening self-test\n\
@@ -249,16 +282,205 @@ fn wasm(root: &Path) -> i32 {
         let size = fs::metadata(&dst).map(|m| m.len()).unwrap_or(0);
         println!("module {index}: {} ({size} bytes)", dst.display());
     }
-    0
+    demos(root)
 }
 
 /// Whether every boot image module is present in `target/wasm/`.
 fn wasm_present(root: &Path) -> bool {
-    WASM_MODULES.iter().all(|name| {
+    WASM_MODULES.iter().chain(DEMO_MODULES.iter()).all(|name| {
         root.join(WASM_OUT_DIR)
             .join(format!("{name}.wasm"))
             .is_file()
     })
+}
+
+/// Copies a built module into `target/wasm/<name>.wasm` and prints its
+/// boot image line.
+fn install_module(root: &Path, index: usize, name: &str, src: &Path) -> i32 {
+    let out_dir = root.join(WASM_OUT_DIR);
+    if let Err(e) = fs::create_dir_all(&out_dir) {
+        eprintln!("xtask: cannot create {}: {e}", out_dir.display());
+        return 1;
+    }
+    let dst = out_dir.join(format!("{name}.wasm"));
+    if let Err(e) = fs::copy(src, &dst) {
+        eprintln!(
+            "xtask: cannot copy {} to {}: {e}",
+            src.display(),
+            dst.display()
+        );
+        return 1;
+    }
+    let size = fs::metadata(&dst).map(|m| m.len()).unwrap_or(0);
+    println!("module {index}: {} ({size} bytes)", dst.display());
+    0
+}
+
+/// Builds the WASI demo programs into `target/wasm/` after the SDK modules:
+/// `hello_std` with cargo for `wasm32-wasip1`, `hello_c` with clang and
+/// wasi-libc when they are installed (a fresh build is preferred and
+/// compared with the checked-in binary), else from `demos/hello-c/prebuilt/`.
+fn demos(root: &Path) -> i32 {
+    let code = run_cargo(
+        root,
+        &format!("building WASI demo hello_std for {WASIP1_TARGET}"),
+        &[
+            "build",
+            "--release",
+            "--target",
+            WASIP1_TARGET,
+            "--manifest-path",
+            DEMOS_MANIFEST,
+            "--target-dir",
+            DEMOS_BUILD_DIR,
+        ],
+    );
+    if code != 0 {
+        return code;
+    }
+    let base = WASM_MODULES.len();
+    let built = root
+        .join(DEMOS_BUILD_DIR)
+        .join(WASIP1_TARGET)
+        .join("release")
+        .join("hello_std.wasm");
+    let code = install_module(root, base, DEMO_MODULES[0], &built);
+    if code != 0 {
+        return code;
+    }
+
+    let prebuilt = root.join(HELLO_C_PREBUILT);
+    let fresh = root.join(DEMOS_BUILD_DIR).join("hello_c.wasm");
+    let source = match find_wasi_toolchain() {
+        Ok(tc) => match build_hello_c(root, &tc, &fresh) {
+            Ok(command) => {
+                eprintln!("xtask: built hello_c with: {command}");
+                match (fs::read(&fresh), fs::read(&prebuilt)) {
+                    (Ok(a), Ok(b)) if a == b => {
+                        eprintln!("xtask: hello_c matches {HELLO_C_PREBUILT}")
+                    }
+                    (Ok(a), Ok(b)) => eprintln!(
+                        "xtask: warning: freshly built hello_c ({} bytes) differs from \
+                         {HELLO_C_PREBUILT} ({} bytes): another clang or wasi-libc version, \
+                         or main.c changed; the fresh build is used (update the prebuilt \
+                         and its README if the change is intended)",
+                        a.len(),
+                        b.len()
+                    ),
+                    (Ok(_), Err(e)) => {
+                        eprintln!("xtask: warning: cannot read {HELLO_C_PREBUILT}: {e}")
+                    }
+                    (Err(e), _) => {
+                        eprintln!("xtask: cannot read the built {}: {e}", fresh.display());
+                        return 1;
+                    }
+                }
+                fresh
+            }
+            Err(e) => {
+                eprintln!("xtask: warning: building hello_c failed ({e}); using the prebuilt binary {HELLO_C_PREBUILT}");
+                prebuilt
+            }
+        },
+        Err(why) => {
+            eprintln!("xtask: skipping the hello_c build: {why}; using the prebuilt binary {HELLO_C_PREBUILT} (set CLANG and WASI_SYSROOT, or install clang, lld and wasi-libc, to rebuild it)");
+            prebuilt
+        }
+    };
+    install_module(root, base + 1, DEMO_MODULES[1], &source)
+}
+
+/// A clang that targets wasm32 plus a wasi-libc sysroot.
+struct WasiToolchain {
+    clang: String,
+    sysroot: PathBuf,
+}
+
+/// Looks for `clang` (`CLANG` or [`CLANG_CANDIDATES`]) and a wasi-libc
+/// sysroot (`WASI_SYSROOT` or [`WASI_SYSROOT_CANDIDATES`]); the error says
+/// what is missing.
+fn find_wasi_toolchain() -> Result<WasiToolchain, String> {
+    let candidates: Vec<String> = match env::var("CLANG") {
+        Ok(c) => vec![c],
+        Err(_) => CLANG_CANDIDATES.iter().map(|c| c.to_string()).collect(),
+    };
+    let clang = candidates
+        .iter()
+        .find(|c| {
+            Command::new(c)
+                .arg("--version")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
+        })
+        .cloned()
+        .ok_or_else(|| format!("no clang found (tried {})", candidates.join(", ")))?;
+    let sysroots: Vec<PathBuf> = match env::var_os("WASI_SYSROOT") {
+        Some(s) => vec![PathBuf::from(s)],
+        None => WASI_SYSROOT_CANDIDATES.iter().map(PathBuf::from).collect(),
+    };
+    let sysroot = sysroots
+        .iter()
+        .find(|s| {
+            s.join("lib/wasm32-wasi/libc.a").is_file()
+                && (s.join("include/wasm32-wasi/stdio.h").is_file()
+                    || s.join("include/stdio.h").is_file())
+        })
+        .cloned()
+        .ok_or_else(|| {
+            format!(
+                "no wasi-libc sysroot (lib/wasm32-wasi/libc.a) under {}",
+                sysroots
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })?;
+    Ok(WasiToolchain { clang, sysroot })
+}
+
+/// Compiles `demos/hello-c/main.c` to `out`. The plain wasi-sdk style
+/// command is tried first; when the only failure is a missing wasm32
+/// compiler-rt (Ubuntu's clang ships none for wasm32, and wasi-libc does not
+/// need it for this program), the link is retried with `-nodefaultlibs -lc`.
+/// Returns the command that worked.
+fn build_hello_c(root: &Path, tc: &WasiToolchain, out: &Path) -> Result<String, String> {
+    let base = [
+        "--target=wasm32-wasi".to_string(),
+        format!("--sysroot={}", tc.sysroot.display()),
+        "-O2".into(),
+        "-Wall".into(),
+        "-Wextra".into(),
+        "-o".into(),
+        out.display().to_string(),
+        HELLO_C_SOURCE.into(),
+    ];
+    let variants: [&[&str]; 2] = [&[], &["-nodefaultlibs", "-lc"]];
+    let mut last_err = String::new();
+    for extra in variants {
+        let mut args: Vec<String> = base.to_vec();
+        args.extend(extra.iter().map(|s| s.to_string()));
+        let command = format!("{} {}", tc.clang, args.join(" "));
+        eprintln!("xtask: compiling hello_c");
+        eprintln!("xtask:   {command}");
+        let output = Command::new(&tc.clang)
+            .current_dir(root)
+            .args(&args)
+            .output()
+            .map_err(|e| format!("cannot run {}: {e}", tc.clang))?;
+        if output.status.success() {
+            return Ok(command);
+        }
+        last_err = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let missing_rt = last_err.contains("libclang_rt.builtins");
+        if !missing_rt {
+            break;
+        }
+        eprintln!("xtask:   no wasm32 compiler-rt; retrying without default libraries");
+    }
+    Err(last_err)
 }
 
 /// `cargo build -p kalium-kernel --target aarch64-unknown-none --release`,
@@ -588,6 +810,10 @@ fn test(root: &Path) -> i32 {
     if code != 0 {
         return code;
     }
+    let code = run_cargo(root, "running xtask's own tests", &["test", "-p", "xtask"]);
+    if code != 0 {
+        return code;
+    }
     // The self-test before the full build, so the binary left behind is the
     // full kernel.
     let code = selftest(root);
@@ -631,6 +857,9 @@ enum Expect {
     /// `greedy: spawn refused (ENOMEM) after N instances` with
     /// `N == GREEDY_CHILDREN`: the instance limit held exactly.
     GreedyLimit,
+    /// `hello_c: time() ok (N s)`: C's `time()` worked (the value is
+    /// seconds since boot and varies).
+    HelloCTime,
 }
 
 impl Expect {
@@ -644,6 +873,10 @@ impl Expect {
             Expect::RtMet => parse_rt_met(line)
                 .is_some_and(|(met, total)| total == RT_PERIODS && met >= RT_MIN_MET),
             Expect::GreedyLimit => parse_greedy_refused(line) == Some(GREEDY_CHILDREN),
+            Expect::HelloCTime => line
+                .strip_prefix("hello_c: time() ok (")
+                .and_then(|r| r.strip_suffix(" s)"))
+                .is_some_and(|n| n.parse::<u64>().is_ok()),
         }
     }
 
@@ -657,6 +890,7 @@ impl Expect {
             Expect::GreedyLimit => {
                 format!("`greedy: spawn refused (ENOMEM) after {GREEDY_CHILDREN} instances`")
             }
+            Expect::HelloCTime => "`hello_c: time() ok (N s)`".into(),
         }
     }
 }
@@ -689,6 +923,38 @@ const ORDERED: &[Expect] = &[
     Expect::Line("init: fair exited 0"),
     Expect::FaultyTrap,
     Expect::Line("init: faulty exited -1"),
+    // The WASI demos: a Rust std program and a C program, each printing
+    // through fd 1 and leaving through proc_exit.
+    Expect::Line("hello_std: hello from Rust std on Kalium"),
+    Expect::Line("hello_std: vec sum 55, len 10, squares [1, 4, 9, 16, 25]"),
+    Expect::Line("hello_std: fmt   Kalium|Kalium  |0042|0xff|+7"),
+    Expect::Line("hello_std: map [(\"one\", 1), (\"three\", 3), (\"two\", 2)] total 6"),
+    Expect::Line("hello_std: sqrt(2) = 1.414214, leibniz pi ~ 3.1416, 1e3 ln = 6.908"),
+    Expect::Line("hello_std: args [], env vars 0, HOME None"),
+    Expect::Line("hello_std: slept 10 ms (clock advanced)"),
+    Expect::Line("hello_std: exiting with 3"),
+    Expect::Line("init: hello_std exited 3"),
+    Expect::Line("hello_c: hello from C on Kalium"),
+    Expect::Line("hello_c: printf 42|   42|42   |ff|10|K|str| 3.14|1.234500e+03|0.0001|%"),
+    Expect::Line("hello_c: argc=0 argv0=(none)"),
+    Expect::Line("hello_c: malloc/free ok (3 blocks)"),
+    Expect::Line("hello_c: qsort [1, 2, 3, 5, 8, 13, 21]"),
+    Expect::Line("hello_c: strtod 3.14159 rest \" tail\", strtol 42 -17 255"),
+    Expect::Line("hello_c: snprintf \"x=7 y=3.50 z=end\" (16), \"truncat\" (9)"),
+    Expect::Line("hello_c: fact(10)=3628800 fib(20)=6765"),
+    Expect::HelloCTime,
+    // stdin is a channel init filled with "hello\n", "world" and an empty
+    // message: a stdio line, a readv with an empty first buffer (the empty
+    // one is skipped, not reported as end of file), the empty message as
+    // end of file, and a zero-length read with nothing queued, which must
+    // return 0 at once instead of waiting for input (init holds the sender
+    // and waits for hello_c: waiting there deadlocks the kernel).
+    Expect::Line("hello_c: stdin fgets \"hello\""),
+    Expect::Line("hello_c: stdin readv (empty, 15) got 5 \"world\""),
+    Expect::Line("hello_c: stdin read got 0 (end of file)"),
+    Expect::Line("hello_c: stdin read of 0 bytes got 0 at once"),
+    Expect::Line("hello_c: exiting with 5"),
+    Expect::Line("init: hello_c exited 5"),
     Expect::GreedyLimit,
     Expect::Line("greedy: slot reclaimed, park exited 0"),
     Expect::Line("init: greedy exited 0"),
@@ -757,7 +1023,7 @@ fn check_scenario(out: &str) -> Vec<String> {
 }
 
 /// `cargo clippy` with `-D warnings` on the host crates (all targets), the
-/// kernel (aarch64) and the SDK (wasm32).
+/// kernel (aarch64), the SDK (wasm32) and the WASI demos (wasm32-wasip1).
 fn clippy(root: &Path) -> i32 {
     let code = run_cargo(
         root,
@@ -799,7 +1065,7 @@ fn clippy(root: &Path) -> i32 {
     if code != 0 {
         return code;
     }
-    run_cargo(
+    let code = run_cargo(
         root,
         "clippy: SDK",
         &[
@@ -815,10 +1081,30 @@ fn clippy(root: &Path) -> i32 {
             "-D",
             "warnings",
         ],
+    );
+    if code != 0 {
+        return code;
+    }
+    run_cargo(
+        root,
+        "clippy: WASI demos",
+        &[
+            "clippy",
+            "--manifest-path",
+            DEMOS_MANIFEST,
+            "--workspace",
+            "--target",
+            WASIP1_TARGET,
+            "--target-dir",
+            DEMOS_BUILD_DIR,
+            "--",
+            "-D",
+            "warnings",
+        ],
     )
 }
 
-/// `cargo fmt --all -- --check` on both workspaces.
+/// `cargo fmt --all -- --check` on the three workspaces (root, SDK, demos).
 fn fmt_check(root: &Path) -> i32 {
     let code = run_cargo(
         root,
@@ -828,7 +1114,7 @@ fn fmt_check(root: &Path) -> i32 {
     if code != 0 {
         return code;
     }
-    run_cargo(
+    let code = run_cargo(
         root,
         "fmt-check: SDK",
         &[
@@ -836,6 +1122,21 @@ fn fmt_check(root: &Path) -> i32 {
             "--all",
             "--manifest-path",
             SDK_MANIFEST,
+            "--",
+            "--check",
+        ],
+    );
+    if code != 0 {
+        return code;
+    }
+    run_cargo(
+        root,
+        "fmt-check: WASI demos",
+        &[
+            "fmt",
+            "--all",
+            "--manifest-path",
+            DEMOS_MANIFEST,
             "--",
             "--check",
         ],
@@ -859,8 +1160,32 @@ mod tests {
         init: fair exited 0\n\
         init: fair exited 0\n\
         kalium: instance 1 (faulty) trapped: out of bounds memory access\n\
-        kalium: instance 1 (faulty) exited -1\n\
+        kalium: instance 1 (faulty) exited -1 after 3 instructions\n\
         init: faulty exited -1\n\
+        hello_std: hello from Rust std on Kalium\n\
+        hello_std: vec sum 55, len 10, squares [1, 4, 9, 16, 25]\n\
+        hello_std: fmt   Kalium|Kalium  |0042|0xff|+7\n\
+        hello_std: map [(\"one\", 1), (\"three\", 3), (\"two\", 2)] total 6\n\
+        hello_std: sqrt(2) = 1.414214, leibniz pi ~ 3.1416, 1e3 ln = 6.908\n\
+        hello_std: args [], env vars 0, HOME None\n\
+        hello_std: slept 10 ms (clock advanced)\n\
+        hello_std: exiting with 3\n\
+        init: hello_std exited 3\n\
+        hello_c: hello from C on Kalium\n\
+        hello_c: printf 42|   42|42   |ff|10|K|str| 3.14|1.234500e+03|0.0001|%\n\
+        hello_c: argc=0 argv0=(none)\n\
+        hello_c: malloc/free ok (3 blocks)\n\
+        hello_c: qsort [1, 2, 3, 5, 8, 13, 21]\n\
+        hello_c: strtod 3.14159 rest \" tail\", strtol 42 -17 255\n\
+        hello_c: snprintf \"x=7 y=3.50 z=end\" (16), \"truncat\" (9)\n\
+        hello_c: fact(10)=3628800 fib(20)=6765\n\
+        hello_c: time() ok (2 s)\n\
+        hello_c: stdin fgets \"hello\"\n\
+        hello_c: stdin readv (empty, 15) got 5 \"world\"\n\
+        hello_c: stdin read got 0 (end of file)\n\
+        hello_c: stdin read of 0 bytes got 0 at once\n\
+        hello_c: exiting with 5\n\
+        init: hello_c exited 5\n\
         kalium: instance 0 (init) spawned instance 1 (greedy, fair)\n\
         kalium: instance 1 (greedy) spawned instance 2 (park, fair)\n\
         greedy: spawn refused (ENOMEM) after 30 instances\n\
@@ -915,6 +1240,23 @@ mod tests {
              kalium: kernel fault: data abort (permission fault, level 3, write) at FAR_EL1 = 0x1, ELR_EL1 = 0x2\n"
         );
         assert_eq!(check_scenario(&faulted).len(), 2);
+    }
+
+    #[test]
+    fn wasi_demos_are_checked() {
+        let wrong_code = GOOD.replace("init: hello_std exited 3", "init: hello_std exited 0");
+        assert_eq!(check_scenario(&wrong_code).len(), 1);
+        let no_time = GOOD.replace(
+            "hello_c: time() ok (2 s)\n",
+            "hello_c: time() failed (-1 s)\n",
+        );
+        let f = check_scenario(&no_time);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0].contains("time() ok"));
+        let no_sleep = GOOD.replace("(clock advanced)", "(clock did not advance)");
+        assert_eq!(check_scenario(&no_sleep).len(), 1);
+        let c_failed = GOOD.replace("init: hello_c exited 5", "init: hello_c exited -1");
+        assert_eq!(check_scenario(&c_failed).len(), 1);
     }
 
     #[test]

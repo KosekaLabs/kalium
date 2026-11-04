@@ -10,6 +10,7 @@
 //! | [`types`] | static types: `ValType`, `FuncType`, `TableType`, ... |
 //! | [`module`] | the decoded module IR (`Module`, `Import`, `Export`, segments) |
 //! | [`instr`] | the instruction enum and function bodies (control flow pre-resolved) |
+//! | `code` | the interpreter's compiled form of a module (private; see its docs) |
 //! | [`decode`] | the binary decoder |
 //! | [`error`] | `Error` (decode/validate/instantiate) and `Trap` (runtime) |
 //! | [`validate`] | the validator |
@@ -48,6 +49,7 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+mod code;
 pub mod decode;
 pub mod error;
 pub mod exec;

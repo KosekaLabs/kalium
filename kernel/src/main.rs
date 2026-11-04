@@ -13,6 +13,7 @@
 //! | [`boot_image`] | the Wasm modules embedded by `build.rs` from `target/wasm/` |
 //! | [`kernel`] | the data model: object registry (`Object`: console, spawn authority, channels, memory objects, instances), instances (`Inst`: cap table, Wasm instance + execution, thread state), capability reference counting, parking/waking, instance creation and exit |
 //! | [`host`] | the host ABI: one `kalium_wasm::Host` implementation dispatching on `HostFuncId` to every function in `kalium:core`, `kalium:ipc`, `kalium:memory` and `kalium:spawn` |
+//! | [`wasi`] | the WASI preview1 compatibility layer: `wasi_snapshot_preview1` resolved for every instance, standard streams mapped onto the console and channel capabilities in slots 0 and 1 |
 //! | [`run`] | the run loop: `pick_next` → fuel from the slice → `Execution::run` in chunks → `RunOutcome` → `account`; timer programming; fuel/time calibration; shutdown |
 //!
 //! # Concurrency model
@@ -58,6 +59,8 @@ mod host;
 mod kernel;
 #[cfg(all(target_arch = "aarch64", not(feature = "boot-only")))]
 mod run;
+#[cfg(all(target_arch = "aarch64", not(feature = "boot-only")))]
+mod wasi;
 
 #[cfg(target_arch = "aarch64")]
 mod imp {

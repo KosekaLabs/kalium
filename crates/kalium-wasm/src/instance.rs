@@ -67,6 +67,7 @@
 //! stored in a shared table) it is a *foreign call*, routed to the embedder
 //! through [`Host::call_foreign`], which knows every instance of the store.
 
+use crate::code::Program;
 use crate::error::{Error, Trap};
 use crate::exec::Value;
 use crate::global::{Global, GlobalRef};
@@ -75,6 +76,7 @@ use crate::memory::{Memory, MemoryRef};
 use crate::module::{DataMode, ElemItems, ElemMode, ImportDesc, Module};
 use crate::table::{Table, TableRef, MAX_TABLE_ELEMENTS};
 use crate::types::{FuncType, GlobalType, MemType, TableType};
+use alloc::rc::Rc;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cell::{Ref, RefMut};
@@ -237,10 +239,9 @@ pub struct Instance {
     pub(crate) func_base: u32,
     /// Type index of every function (imports first), by function index.
     func_types: Vec<u32>,
-    /// Parameter and result counts of every function, by function index:
-    /// what the interpreter needs on every call, without walking to the
-    /// `FuncType`.
-    func_arity: Vec<(u32, u32)>,
+    /// The compiled code of the module (see [`crate::code`]), shared so
+    /// that the interpreter loop can hold it while it mutates the instance.
+    program: Rc<Program>,
     /// Evaluated element segments; emptied when dropped (or after an active
     /// segment has been applied).
     pub(crate) elems: Vec<Vec<Value>>,
@@ -580,6 +581,20 @@ impl Instance {
             elems.push(items);
         }
 
+        let func_arity: Vec<(u32, u32)> = func_types
+            .iter()
+            .map(|&t| {
+                module.get_type(t).map_or((0, 0), |ft| {
+                    (ft.params.len() as u32, ft.results.len() as u32)
+                })
+            })
+            .collect();
+        let program = Rc::new(crate::code::compile_module(
+            &module,
+            &func_arity,
+            host_funcs.len(),
+        ));
+
         Ok(Instance {
             limits: *limits,
             memory,
@@ -588,14 +603,7 @@ impl Instance {
             host_funcs,
             import_addrs,
             func_base,
-            func_arity: func_types
-                .iter()
-                .map(|&t| {
-                    module.get_type(t).map_or((0, 0), |ft| {
-                        (ft.params.len() as u32, ft.results.len() as u32)
-                    })
-                })
-                .collect(),
+            program,
             func_types,
             elems,
             data_dropped: alloc::vec![false; module.data.len()],
@@ -877,12 +885,10 @@ impl Instance {
         self.func_types.get(func as usize).copied()
     }
 
-    /// Parameter and result counts of function `func`.
+    /// The compiled code of the module.
     #[inline(always)]
-    pub(crate) fn func_arity(&self, func: u32) -> Option<(usize, usize)> {
-        self.func_arity
-            .get(func as usize)
-            .map(|&(p, r)| (p as usize, r as usize))
+    pub(crate) fn program(&self) -> &Rc<Program> {
+        &self.program
     }
 
     /// The type of function `func` (function index space).

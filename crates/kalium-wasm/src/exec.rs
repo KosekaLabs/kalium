@@ -2,11 +2,17 @@
 //!
 //! # Design
 //!
-//! [`Execution`] owns the value stack, the call frames and the label stack.
-//! Wasm calls never recurse on the Rust stack: a call pushes a frame and the
-//! loop continues in the callee, so call depth is bounded by
-//! [`Limits::max_call_depth`] (`Trap::CallDepth`) and the value stack by
-//! [`Limits::max_stack_values`] (`Trap::StackOverflow`).
+//! [`Execution`] owns the value stack and the call frames. Wasm calls
+//! never recurse on the Rust stack: a call pushes a frame and the loop
+//! continues in the callee, so call depth is bounded by
+//! [`crate::Limits::max_call_depth`] (`Trap::CallDepth`) and the value stack by
+//! [`crate::Limits::max_stack_values`] (`Trap::StackOverflow`).
+//!
+//! The loop runs the compiled form of the module (see [`crate::code`]):
+//! one `u64` word per instruction with the opcode in the low byte, all
+//! function bodies in one array, branches resolved to absolute targets
+//! and stack heights, and common instruction sequences fused into
+//! superinstructions. Everything that follows is about running that.
 //!
 //! ## Value stack
 //!
@@ -17,10 +23,19 @@
 //! helpers (`push_as`/`pop_as` through the [`Bits`] trait, `bin`/`un` for
 //! operators that rewrite the top of the stack in place) are the only way
 //! the loop touches it. The logical height `sp` lives in a local of the
-//! interpreter loop; the `Vec` is only ever grown (in cold code, doubling up
-//! to the limit) so that a push is one bounds check and a store. Values are
-//! converted to [`Value`] only at the edges: host call arguments and
-//! results, globals, tables, and the final results.
+//! interpreter loop. Values are converted to [`Value`] only at the edges:
+//! host call arguments and results, globals, tables, and the final
+//! results.
+//!
+//! The loop never grows the buffer. The compiler knows the static maximum
+//! of every function's operand stack, so a call reserves the callee's
+//! whole frame (parameters, locals and operands, [`crate::code::Func::stack`])
+//! in one comparison; when the buffer is too short the loop leaves
+//! (`Flow::Grow`), the buffer is grown (or the limit reported) and the
+//! call re-issued. Inside the loop the buffer is therefore a fixed slice
+//! ([`View`]) whose pointer and length are loop invariants, and a push is
+//! one bounds check and a store; a slot past the end is `Trap::Invalid`,
+//! which only an invalid module reaches.
 //!
 //! In debug builds the stack carries a shadow `Vec<ValType>` and every
 //! typed access checks it, reporting a mismatch as [`Trap::Invalid`] (a
@@ -33,30 +48,24 @@
 //! Locals live on the value stack. When a function is entered its arguments
 //! are already on top of the stack and become the first locals; the declared
 //! locals are pushed after them (zero / null) and the frame's operand stack
-//! grows above that. A [`Frame`] records the function, the saved pc, the
-//! stack index of local 0 (`base`), the label stack height at entry and the
-//! result count, all as `u32` (so `Limits::max_stack_values` is clamped to
-//! [`MAX_STACK`]). Returning moves the results down to `base`, truncates
-//! the stack to `base + arity` and drops the frame's labels. The loop caches
-//! the current frame's `base`, `label_base`, instruction slice and pc in
-//! locals and reloads them only when the frame changes; everything needed
-//! only on rare paths (the frame index, the `br_table` side table, the
-//! number of imports) is re-read from `self`/`inst` instead, because every
-//! extra loop-carried value costs a spill in the dispatch sequence. The
-//! frame and label stacks themselves stay as `Vec`s in `self`: measured
-//! against moving them into loop locals too, that was 15% faster.
+//! grows above that. A [`Frame`] records the saved pc, the stack index of
+//! local 0 (`base`) and the result count, all as `u32` (so
+//! `Limits::max_stack_values` is clamped to [`MAX_STACK`]). Returning moves
+//! the results down to `base` and truncates the stack to `base + arity`.
+//! `self.frames` holds every frame including the current one; the loop
+//! keeps the current frame's `pc` and `base` in locals and writes the pc
+//! back on a call and on every exit. Every extra loop-carried value costs
+//! a spill in the dispatch sequence, so the loop carries exactly `pc`,
+//! `sp`, `fuel` and `base`; everything else it needs (the code slice, the
+//! function table, the stack and memory slices) is invariant.
 //!
-//! ## Labels and branches
+//! ## Control flow
 //!
-//! A [`Label`] records the continuation pc, the number of values a branch
-//! carries and the stack height to unwind to. Structured instructions carry
-//! their matching `end`/`else` indices (see [`crate::instr`]), so branching
-//! is a truncate-and-jump without scanning. A `loop` label is marked as
-//! such: branching to it keeps the label and jumps to the first instruction
-//! of the body, so a back-edge costs no label push and no re-dispatch of the
-//! `loop` instruction. Labels are stored in a `Vec` that is allocated once
-//! per execution and reused; no per-instruction allocation happens anywhere
-//! on the hot path.
+//! A branch is a resolved [`crate::code::Branch`]: the stack is unwound to
+//! `base + height` keeping the carried values ([`View::unwind`]) and the
+//! pc set to the target. `block`, `loop` and the `end` of a block do
+//! nothing but cost their fuel; the `end` of a function and a branch to
+//! the function's own label return. There is no label stack.
 //!
 //! ## Fuel
 //!
@@ -64,13 +73,15 @@
 //! instruction (a register decrement and a never-taken branch), so
 //! [`Execution::run`] with a budget of `n` executes exactly `n`
 //! instructions before returning `OutOfFuel`, and `run(0)` executes
-//! nothing. The structural `end` of a block or function, `else` reached
-//! from a then-arm and `loop` on first entry each count as one instruction;
-//! a back-edge to a `loop` counts only the branch. The granularity is
-//! therefore exact: the scheduler never overshoots its budget. (Batching
-//! the check per back-edge was considered and rejected: the per-instruction
-//! check is two instructions out of about thirty-five per Wasm instruction
-//! and measures as noise, while the kernel's accounting stays exact.)
+//! nothing. Every instruction of the binary format counts, the structural
+//! `block`, `loop`, `end` and `else` included (a back-edge counts only the
+//! branch). A superinstruction charges one unit per instruction it covers
+//! and decays to its plain first instruction when the budget cannot pay
+//! for all of them, so the granularity stays exact: the scheduler never
+//! overshoots its budget. (Batching the check per back-edge was
+//! considered and rejected: the per-instruction check is two instructions
+//! out of about fifteen per dispatch and measures as noise, while the
+//! kernel's accounting stays exact.)
 //!
 //! ## Host calls
 //!
@@ -86,25 +97,16 @@
 //! ## Shared memory
 //!
 //! The instance's memory is a shared object ([`crate::MemoryRef`]). The
-//! interpreter loop never borrows it itself: its caller (`run_slices`)
-//! takes the mutable borrow and hands the loop a plain `&mut Memory`, so a
-//! load or store is one bounds check against the `Vec` inside and the loop
-//! carries no extra state. For a host call the loop saves its state and
-//! *returns* (`Flow::HostCall`); the caller drops the borrow, makes the
-//! call, takes the borrow again and re-enters the loop. The host (and any
+//! loop takes the mutable borrow when it starts and keeps a plain
+//! `&mut Memory` (so a load or store is one bounds check against the
+//! `Vec` inside); around a host call it drops the borrow, makes the call
+//! out of line ([`host_call`]) and borrows again. The host (and any
 //! instance it runs that shares the memory) may therefore use and grow the
-//! memory, and every `run` and every re-entry starts with a fresh borrow,
-//! so a grow by another instance between two runs is seen. Leaving the
-//! loop costs a host call about a hundred extra machine instructions
-//! (+17% on the host-call benchmark, which calls every 11 instructions),
-//! but the loop no longer carries the `host` fat pointer or a memory guard,
-//! and every other workload executes 5-10% fewer instructions than before
-//! (cachegrind). The alternatives were measured and rejected: a `RefMut`
-//! live inside the loop cost +6-8% on every workload, an `Option<RefMut>`
-//! slot released around host calls +8-14%. Tables are borrowed for one
-//! instruction at a time; globals are `Cell`s and need no borrow. A borrow
-//! that fails (the host kept one across a call) ends the execution with
-//! [`Trap::Host`] rather than panicking.
+//! memory, and every `run` and every host call starts with a fresh borrow,
+//! so a grow by another instance between two runs is seen. Tables are
+//! borrowed for one instruction at a time; globals are `Cell`s and need no
+//! borrow. A borrow that fails (the host kept one across a call) ends the
+//! execution with [`Trap::Host`] rather than panicking.
 //!
 //! ## Untrusted state
 //!
@@ -113,11 +115,55 @@
 //! or a frame without a body end the execution with [`Trap::Invalid`].
 //! Type confusion on the stack is detected in debug builds only (see
 //! above); in release builds it yields wrong values, never memory unsafety.
+//!
+//! # Performance notes
+//!
+//! Measured with `cargo run -p kalium-wasm --release --example bench`
+//! (interleaved best-of-N against the previous binary, and
+//! `valgrind --tool=cachegrind` for deterministic instruction counts), on
+//! the x86-64 host used for development. Against the previous `match`
+//! over the decoded [`crate::Instr`] (fib 340, loop 470, memcpy 480,
+//! mandel 475, call_indirect 420, host_call 255 M instr/s), this design
+//! runs fib 1.7x, loop 2.7x, memcpy 1.75x, mandel 1.3x, call_indirect
+//! 1.85x and host_call 1.6x faster (fib 570, loop 1250, memcpy 840,
+//! mandel 610, call_indirect 740, host_call 360 M instr/s), executing
+//! 1.6x, 2.4x, 1.7x, 1.27x, 1.6x and 1.75x fewer machine instructions.
+//! What each part bought, and what was tried and rejected:
+//!
+//! - The dense word encoding alone (no fusion, runtime labels still) cut
+//!   instruction counts by 10-25%: the enum's niche-tag remap, the
+//!   16-byte stride and the block-arity lookups were in every dispatch.
+//! - Superinstructions are the largest single win on loop-shaped code
+//!   (loop 1.6x on their own); the `local.get i32.const <op>` family then
+//!   took fib from 1.3x to 1.65x.
+//! - One flat code array with the current frame in locals (instead of
+//!   reloading a per-function slice on every call and return) and the
+//!   static control flow (no label stack) were worth 10-15% each on fib.
+//! - Reserving a frame's whole extent at the call, so that the stack
+//!   buffer is a loop invariant, was worth 7% on loop and 5% on memcpy and
+//!   cost nothing on fib.
+//! - Making the host call inside the loop, with the memory borrow
+//!   released around it, instead of leaving the loop: 1.34x on host_call
+//!   and, unexpectedly, 2-11% on everything else, because the loop lost
+//!   its exit paths and allocated registers better. (The earlier design
+//!   had measured the opposite with the enum-based loop.)
+//! - Rejected: caching the memory's byte slice in a loop local, refreshed
+//!   after `memory.grow` and host calls. It saves two loads per memory
+//!   access but makes the slice a loop-carried value, and memcpy ran 13%
+//!   *more* instructions; everything else was unchanged.
+//! - Rejected: dropping the bounds check on every push with the static
+//!   heights. In safe Rust every slice access is checked anyway; what the
+//!   static heights could remove was the grow path, which is what the
+//!   frame reservation does.
+//! - Not needed: a table of handler function pointers (threaded code) or
+//!   an explicit hot/cold split of the arms. With the loop carrying four
+//!   values the dispatch is fifteen instructions with no spill, and LLVM
+//!   already outlines the cold paths.
 
+use crate::code::{imm_a, imm_b, imm_c, op, opcode, Func, Program, Word, IMPORTED, RETURN};
 use crate::error::{Error, Trap};
 use crate::instance::{Host, HostCtx, HostFuncId, HostOutcome, Instance};
-use crate::instr::{BlockType, FuncBody, Instr};
-use crate::memory::Memory;
+use crate::memory::{Memory, MemoryRef};
 use crate::module::Module;
 use crate::types::{RefType, ValType};
 use alloc::rc::Rc;
@@ -258,7 +304,7 @@ impl From<f64> for Value {
 
 /// The stack encoding of a null reference. Indices are `u32`, so this never
 /// collides with a non-null one.
-const NULL_REF: u64 = u64::MAX;
+pub(crate) const NULL_REF: u64 = u64::MAX;
 
 #[inline(always)]
 fn ref_to_bits(r: Option<u32>) -> u64 {
@@ -392,27 +438,31 @@ fn shadow_is_ref(_s: Shadow) -> bool {
     true
 }
 
-/// Grow the stack buffer whose slot `i == buf.len()` is about to be
-/// written, doubling up to `max` entries. The buffer is moved in and out
-/// rather than borrowed so that the address of the (register-resident)
-/// stack header never escapes into this cold call.
+/// Grow the stack buffer to at least `len` entries, doubling up to `max`.
+/// The buffer is moved in and out rather than borrowed so that the address
+/// of the (register-resident) stack header never escapes into this cold
+/// call.
 #[cold]
 #[inline(never)]
-fn grow_buf<T: Copy + Default>(mut buf: Vec<T>, i: usize, max: usize) -> Result<Vec<T>, Trap> {
-    if i >= max {
+fn grow_buf<T: Copy + Default>(mut buf: Vec<T>, len: usize, max: usize) -> Result<Vec<T>, Trap> {
+    if len > max {
         return Err(Trap::StackOverflow);
     }
-    let new_len = buf.len().max(64).saturating_mul(2).min(max);
-    debug_assert!(new_len > i);
+    let new_len = buf.len().max(64).saturating_mul(2).min(max).max(len);
     buf.try_reserve_exact(new_len - buf.len())
         .map_err(|_| Trap::StackOverflow)?;
     buf.resize(new_len, T::default());
     Ok(buf)
 }
 
-/// The value stack: raw bits, grown on demand up to a limit. The logical
-/// height is passed in by the caller (`sp`), which lets the interpreter
-/// loop keep it in a register; the invariant is `sp <= buf.len()`.
+/// The value stack: raw bits in a buffer grown on demand up to a limit.
+/// The logical height is passed in by the caller (`sp`), which lets the
+/// interpreter loop keep it in a register; the invariant is `sp <=
+/// buf.len()`. The loop never grows the buffer: a call reserves the
+/// callee's whole frame (its locals and the static maximum of its operand
+/// stack, see [`crate::code::Func::stack`]), leaving the loop to grow it
+/// when that fails, so that inside the loop the buffer is a fixed slice
+/// ([`View`]) and a push is one bounds check and a store.
 #[derive(Default)]
 struct Stack {
     buf: Vec<u64>,
@@ -430,28 +480,70 @@ impl Stack {
         }
     }
 
-    /// Make room for a value at index `sp == buf.len()`.
+    /// Make the buffer at least `len` slots long (`Trap::StackOverflow`
+    /// past the limit).
     #[inline(always)]
-    fn grow(&mut self, sp: usize) -> Result<(), Trap> {
-        let buf = core::mem::take(&mut self.buf);
-        self.buf = grow_buf(buf, sp, self.max)?;
-        #[cfg(debug_assertions)]
-        {
-            self.tys.resize(self.buf.len(), ValType::I32);
+    fn reserve(&mut self, len: usize) -> Result<(), Trap> {
+        if len > self.buf.len() {
+            let buf = core::mem::take(&mut self.buf);
+            self.buf = grow_buf(buf, len, self.max)?;
+            #[cfg(debug_assertions)]
+            {
+                self.tys.resize(self.buf.len(), ValType::I32);
+            }
         }
         Ok(())
     }
 
+    /// The buffer as the interpreter loop sees it.
+    #[inline(always)]
+    fn view(&mut self) -> View<'_> {
+        View {
+            buf: &mut self.buf,
+            #[cfg(debug_assertions)]
+            tys: &mut self.tys,
+        }
+    }
+
+    /// Push a value, growing the buffer if needed (outside the loop:
+    /// arguments and host results).
+    fn push_value(&mut self, sp: &mut usize, v: Value) -> Result<(), Trap> {
+        self.reserve(sp.saturating_add(1))?;
+        self.view().push_value(sp, v)
+    }
+
+    /// Push an `i32`, growing the buffer if needed.
+    fn push_i32(&mut self, sp: &mut usize, v: i32) -> Result<(), Trap> {
+        self.reserve(sp.saturating_add(1))?;
+        self.view().push_as(sp, v)
+    }
+
+    /// The `n` values below `sp` as typed values, appended to `out`.
+    fn read_values(
+        &mut self,
+        sp: usize,
+        tys: &[ValType],
+        out: &mut Vec<Value>,
+    ) -> Result<(), Trap> {
+        self.view().read_values(sp, tys, out)
+    }
+}
+
+/// The stack buffer during an interpreter loop: a fixed slice (two words
+/// in release builds) that every typed access bounds-checks. A slot past
+/// the end is [`Trap::Invalid`]: the frame's whole extent was reserved on
+/// entry, so only an invalid module reaches it.
+struct View<'a> {
+    buf: &'a mut [u64],
+    #[cfg(debug_assertions)]
+    tys: &'a mut [ValType],
+}
+
+impl View<'_> {
     #[inline(always)]
     fn push_raw(&mut self, sp: &mut usize, v: u64, ty: Shadow) -> Result<(), Trap> {
         let i = *sp;
-        match self.buf.get_mut(i) {
-            Some(slot) => *slot = v,
-            None => {
-                self.grow(i)?;
-                *self.buf.get_mut(i).ok_or(Trap::Invalid)? = v;
-            }
-        }
+        *self.buf.get_mut(i).ok_or(Trap::Invalid)? = v;
         #[cfg(debug_assertions)]
         {
             self.tys[i] = ty;
@@ -512,8 +604,8 @@ impl Stack {
     #[inline(always)]
     fn pop2<A: Bits, B: Bits>(&mut self, sp: &mut usize) -> Result<(A, B), Trap> {
         let i = sp.wrapping_sub(2);
-        let s = self.buf.get(i..i.wrapping_add(2)).ok_or(Trap::Invalid)?;
-        let (a, b) = (s[0], s[1]);
+        let b = *self.buf.get(i.wrapping_add(1)).ok_or(Trap::Invalid)?;
+        let a = *self.buf.get(i).ok_or(Trap::Invalid)?;
         self.check(i, A::TY)?;
         self.check(i + 1, B::TY)?;
         *sp = i;
@@ -582,12 +674,9 @@ impl Stack {
         let i = sp.wrapping_sub(2);
         self.check(i, A::TY)?;
         self.check(i.wrapping_add(1), B::TY)?;
-        let s = self
-            .buf
-            .get_mut(i..i.wrapping_add(2))
-            .ok_or(Trap::Invalid)?;
-        let (a, b) = (A::from_bits(s[0]), B::from_bits(s[1]));
-        s[0] = f(a, b)?.to_bits();
+        let b = *self.buf.get(i.wrapping_add(1)).ok_or(Trap::Invalid)?;
+        let slot = self.buf.get_mut(i).ok_or(Trap::Invalid)?;
+        *slot = f(A::from_bits(*slot), B::from_bits(b))?.to_bits();
         #[cfg(debug_assertions)]
         {
             self.tys[i] = R::TY;
@@ -683,7 +772,6 @@ impl Stack {
     }
 
     /// The `n` values below `sp` as typed values, appended to `out`.
-    #[inline(always)]
     fn read_values(&self, sp: usize, tys: &[ValType], out: &mut Vec<Value>) -> Result<(), Trap> {
         let start = sp.checked_sub(tys.len()).ok_or(Trap::Invalid)?;
         let bits = self.buf.get(start..sp).ok_or(Trap::Invalid)?;
@@ -692,6 +780,109 @@ impl Stack {
             out.push(Value::from_bits(b, t));
         }
         Ok(())
+    }
+
+    /// Push the initial values of a function's declared locals.
+    #[inline(always)]
+    fn push_locals(&mut self, sp: &mut usize, locals: &[ValType]) -> Result<(), Trap> {
+        if locals.is_empty() {
+            return Ok(());
+        }
+        let start = *sp;
+        let end = start.checked_add(locals.len()).ok_or(Trap::Invalid)?;
+        let slots = self.buf.get_mut(start..end).ok_or(Trap::Invalid)?;
+        for (slot, &t) in slots.iter_mut().zip(locals) {
+            *slot = default_bits(t);
+        }
+        #[cfg(debug_assertions)]
+        {
+            self.tys[start..end].copy_from_slice(locals);
+        }
+        *sp = end;
+        Ok(())
+    }
+
+    // ---- superinstruction helpers ------------------------------------
+    //
+    // A fused handler computes what a sequence of instructions would have
+    // left on the stack without materializing the intermediate values.
+
+    /// Read local `idx` as a `T`.
+    #[inline(always)]
+    fn local_as<T: Bits>(&self, idx: usize) -> Result<T, Trap> {
+        let v = *self.buf.get(idx).ok_or(Trap::Invalid)?;
+        self.check(idx, T::TY)?;
+        Ok(T::from_bits(v))
+    }
+
+    /// `local.get a; local.get b; <binop>`: push `f(a, b)`.
+    #[inline(always)]
+    fn local2_bin<A: Bits, B: Bits, R: Bits>(
+        &mut self,
+        sp: &mut usize,
+        ia: usize,
+        ib: usize,
+        f: impl FnOnce(A, B) -> R,
+    ) -> Result<(), Trap> {
+        let a = self.local_as::<A>(ia)?;
+        let b = self.local_as::<B>(ib)?;
+        self.push_as(sp, f(a, b))
+    }
+
+    /// `local.get a; <const>; <binop>`: push `f(a)`.
+    #[inline(always)]
+    fn local_bin<A: Bits, R: Bits>(
+        &mut self,
+        sp: &mut usize,
+        ia: usize,
+        f: impl FnOnce(A) -> R,
+    ) -> Result<(), Trap> {
+        let a = self.local_as::<A>(ia)?;
+        self.push_as(sp, f(a))
+    }
+
+    /// `local.get a; local.get b; <binop>; local.set d`: `d = f(a, b)`.
+    #[inline(always)]
+    fn local2_bin_set<A: Bits, B: Bits, R: Bits>(
+        &mut self,
+        ia: usize,
+        ib: usize,
+        id: usize,
+        f: impl FnOnce(A, B) -> R,
+    ) -> Result<(), Trap> {
+        let a = self.local_as::<A>(ia)?;
+        let b = self.local_as::<B>(ib)?;
+        self.set_slot(id, f(a, b).to_bits(), shadow(R::TY))
+    }
+
+    /// `local.get a; <const>; <binop>; local.set d`: `d = f(a)`.
+    #[inline(always)]
+    fn local_bin_set<A: Bits, R: Bits>(
+        &mut self,
+        ia: usize,
+        id: usize,
+        f: impl FnOnce(A) -> R,
+    ) -> Result<(), Trap> {
+        let a = self.local_as::<A>(ia)?;
+        self.set_slot(id, f(a).to_bits(), shadow(R::TY))
+    }
+
+    /// `<const>; local.set d`: `d = v`.
+    #[inline(always)]
+    fn const_set<T: Bits>(&mut self, id: usize, v: T) -> Result<(), Trap> {
+        self.set_slot(id, v.to_bits(), shadow(T::TY))
+    }
+
+    /// `<binop>; local.set d`: pop `a b`, `d = f(a, b)`.
+    #[inline(always)]
+    fn bin_set<A: Bits, B: Bits, R: Bits>(
+        &mut self,
+        sp: &mut usize,
+        id: usize,
+        f: impl FnOnce(A, B) -> R,
+    ) -> Result<(), Trap> {
+        let (a, b) = self.pop2::<A, B>(sp)?;
+        self.set_slot(id, f(a, b).to_bits(), shadow(R::TY))
     }
 }
 
@@ -711,40 +902,22 @@ pub enum ExecResult {
     Trap(Trap),
 }
 
-/// A call frame (20 bytes: stack and label heights are bounded by
-/// [`MAX_STACK`], so they fit in `u32`).
+/// A call frame (12 bytes: stack heights are bounded by [`MAX_STACK`], so
+/// they fit in `u32`).
 #[derive(Clone, Copy, Debug, Default)]
 struct Frame {
-    /// Function index.
-    func: u32,
     /// Saved pc: the resume point while another frame is active, or the
     /// point to resume at after `OutOfFuel`/`Blocked`.
     pc: u32,
     /// Stack index of local 0.
     base: u32,
-    /// Index into the label stack of this frame's first label.
-    label_base: u32,
     /// Number of results.
     arity: u32,
 }
 
-/// A control label (16 bytes).
-#[derive(Clone, Copy, Debug, Default)]
-struct Label {
-    /// pc to continue at when branching to this label: after the `end` of a
-    /// block, the first body instruction of a loop.
-    cont: u32,
-    /// Number of values a branch carries to the continuation.
-    arity: u32,
-    /// Stack height to unwind to before pushing the carried values.
-    height: u32,
-    /// A `loop` label survives branches to it.
-    is_loop: bool,
-}
-
 /// Upper bound on `Limits::max_stack_values` as applied by the interpreter:
-/// stack heights are stored as `u32` in frames and labels. (Larger limits
-/// are clamped; 4 G values is 32 GiB of stack.)
+/// stack heights are stored as `u32` in frames and branch immediates.
+/// (Larger limits are clamped; 4 G values is 32 GiB of stack.)
 const MAX_STACK: usize = u32::MAX as usize;
 
 #[derive(Clone, Debug)]
@@ -753,26 +926,24 @@ enum State {
     Finished(ExecResult),
 }
 
-/// Where control goes after a branch.
-enum Jump {
-    To(u32),
-    Return,
-}
-
 /// How `run_inner` stopped.
 enum Flow {
     Done,
     OutOfFuel,
     Blocked,
     Exited(i32),
-    /// The loop stopped at a call that the host must make (state saved,
-    /// arguments on the stack, pc after the call instruction); only
-    /// `run_loop` returns this. `restore` is what the instruction popped
+    /// The loop stopped at a call whose frame does not fit the stack
+    /// buffer (state saved, pc after the call); only `run_loop` returns
+    /// this. The caller grows the buffer to `len` slots
+    /// (`Trap::StackOverflow` past the limit) and re-enters the loop at the
+    /// call, which is re-issued: `restore` is what the instruction popped
     /// before the call (the table index of `call_indirect`), to be pushed
-    /// back if the host blocks.
-    HostCall {
-        target: HostTarget,
+    /// back, `width` the instruction's size in words, to rewind the pc by,
+    /// and the call's fuel unit is refunded.
+    Grow {
+        len: usize,
         restore: Option<i32>,
+        width: u32,
     },
 }
 
@@ -790,18 +961,14 @@ enum HostTarget {
 /// A resumable execution of one function: value stack, call frames and
 /// program counter. See the module documentation.
 pub struct Execution {
-    /// The value stack. The interpreter loop moves it into a local for its
-    /// duration (see the module documentation).
+    /// The value stack (see the module documentation).
     stack: Stack,
     /// Logical stack height between `run` calls.
     sp: usize,
     frames: Vec<Frame>,
-    labels: Vec<Label>,
     state: State,
     /// `Limits::max_call_depth`.
     max_depth: usize,
-    /// `Limits::max_stack_values`, which also bounds the label stack.
-    max_stack: usize,
     /// Reused buffers for host call arguments and results.
     host_args: Vec<Value>,
     host_results: Vec<Value>,
@@ -820,7 +987,6 @@ impl fmt::Debug for Execution {
         f.debug_struct("Execution")
             .field("stack_len", &self.sp)
             .field("call_depth", &self.frames.len())
-            .field("labels", &self.labels.len())
             .field("finished", &matches!(self.state, State::Finished(_)))
             .finish_non_exhaustive()
     }
@@ -1087,16 +1253,59 @@ fn i64_div_s(a: i64, b: i64) -> Result<i64, Trap> {
     }
 }
 
-#[inline(always)]
-fn block_arity(module: &Module, ty: BlockType) -> Result<(usize, usize), Trap> {
-    Ok(match ty {
-        BlockType::Empty => (0, 0),
-        BlockType::Val(_) => (0, 1),
-        BlockType::Type(idx) => {
-            let t = module.types.get(idx as usize).ok_or(Trap::Invalid)?;
-            (t.params.len(), t.results.len())
+/// Call an imported or foreign function through the host, with the
+/// arguments on top of the stack; they stay there until the host returns
+/// `Continue`, when the results replace them. The caller has released its
+/// borrow of the instance's memory. Kept out of line so that the
+/// interpreter loop stays small.
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn host_call(
+    stack: &mut View<'_>,
+    sp: &mut usize,
+    args: &mut Vec<Value>,
+    results: &mut Vec<Value>,
+    module: &Module,
+    inst: &mut Instance,
+    host: &mut dyn Host,
+    target: HostTarget,
+) -> Result<HostOutcome, Trap> {
+    let (id, ty): (Result<HostFuncId, u32>, _) = match target {
+        HostTarget::Import(func) => (
+            Ok(inst.host_func(func).ok_or(Trap::Invalid)?),
+            inst.func_type_index(func)
+                .and_then(|t| module.types.get(t as usize))
+                .ok_or(Trap::Invalid)?,
+        ),
+        HostTarget::Foreign { addr, ty } => (
+            Err(addr),
+            module.types.get(ty as usize).ok_or(Trap::Invalid)?,
+        ),
+    };
+    let start = sp.checked_sub(ty.params.len()).ok_or(Trap::Invalid)?;
+    args.clear();
+    results.clear();
+    stack.read_values(*sp, &ty.params, args)?;
+    results.extend(ty.results.iter().map(|&t| Value::default_for(t)));
+    let mut ctx = HostCtx {
+        memory: &inst.memory,
+    };
+    let outcome = match id {
+        Ok(id) => host.call(&mut ctx, id, args, results),
+        Err(addr) => host.call_foreign(&mut ctx, addr, ty, args, results),
+    }?;
+    if outcome == HostOutcome::Continue {
+        let well_typed = results.len() == ty.results.len()
+            && results.iter().zip(&ty.results).all(|(v, &t)| v.ty() == t);
+        if !well_typed {
+            return Err(Trap::Host);
         }
-    })
+        *sp = start;
+        for &v in results.iter() {
+            stack.push_value(sp, v)?;
+        }
+    }
+    Ok(outcome)
 }
 
 // ---------------------------------------------------------------------------
@@ -1122,10 +1331,8 @@ impl Execution {
             stack: Stack::new(limits.max_stack_values.min(MAX_STACK)),
             sp: 0,
             frames: Vec::new(),
-            labels: Vec::new(),
             state: State::Running,
             max_depth: limits.max_call_depth.min(MAX_STACK),
-            max_stack: limits.max_stack_values.min(MAX_STACK),
             host_args: Vec::new(),
             host_results: Vec::new(),
             fuel_used: 0,
@@ -1133,15 +1340,31 @@ impl Execution {
             entry_import: inst.is_imported_func(func),
         };
         let setup = (|| {
-            let mut stack = core::mem::take(&mut exec.stack);
             let mut sp = 0;
             for &a in args {
-                stack.push_value(&mut sp, a)?;
+                exec.stack.push_value(&mut sp, a)?;
             }
-            if !exec.entry_import {
-                exec.push_frame(&mut stack, inst.module(), inst, func, &mut sp)?;
+            if exec.entry_import {
+                // The one host call replaces the arguments by the results.
+                exec.stack.reserve(ty.results.len())?;
+            } else {
+                let program = inst.program().clone();
+                let f = *program.funcs.get(func as usize).ok_or(Trap::Invalid)?;
+                if exec.max_depth == 0 {
+                    return Err(Trap::CallDepth);
+                }
+                let locals = program
+                    .locals
+                    .get(f.locals_start as usize..f.locals_end as usize)
+                    .ok_or(Trap::Invalid)?;
+                exec.stack.reserve(f.stack as usize)?;
+                exec.stack.view().push_locals(&mut sp, locals)?;
+                exec.frames.push(Frame {
+                    pc: f.entry,
+                    base: 0,
+                    arity: f.nresults,
+                });
             }
-            exec.stack = stack;
             exec.sp = sp;
             Ok(())
         })();
@@ -1203,7 +1426,7 @@ impl Execution {
         let result = match flow {
             Ok(Flow::OutOfFuel) => return ExecResult::OutOfFuel,
             Ok(Flow::Blocked) => return ExecResult::Blocked,
-            Ok(Flow::HostCall { .. }) => ExecResult::Trap(Trap::Invalid),
+            Ok(Flow::Grow { .. }) => ExecResult::Trap(Trap::Invalid),
             Ok(Flow::Done) => match self.results(inst) {
                 Ok(values) => ExecResult::Done(values),
                 Err(trap) => ExecResult::Trap(trap),
@@ -1213,7 +1436,6 @@ impl Execution {
         };
         self.stack = Stack::default();
         self.frames = Vec::new();
-        self.labels = Vec::new();
         self.sp = 0;
         self.host_args = Vec::new();
         self.host_results = Vec::new();
@@ -1222,7 +1444,7 @@ impl Execution {
     }
 
     /// The results left on the stack by a finished execution.
-    fn results(&self, inst: &Instance) -> Result<Vec<Value>, Trap> {
+    fn results(&mut self, inst: &Instance) -> Result<Vec<Value>, Trap> {
         let ty = inst.func_type(self.entry).ok_or(Trap::Invalid)?;
         if self.sp != ty.results.len() {
             return Err(Trap::Invalid);
@@ -1245,7 +1467,16 @@ impl Execution {
             return Ok(Flow::OutOfFuel);
         }
         self.fuel_used += 1;
-        let outcome = self.host_call(module, inst, host, HostTarget::Import(self.entry));
+        let outcome = host_call(
+            &mut self.stack.view(),
+            &mut self.sp,
+            &mut self.host_args,
+            &mut self.host_results,
+            module,
+            inst,
+            host,
+            HostTarget::Import(self.entry),
+        );
         Ok(match outcome? {
             HostOutcome::Continue => Flow::Done,
             HostOutcome::Block => Flow::Blocked,
@@ -1254,180 +1485,6 @@ impl Execution {
     }
 
     // ---- frames and labels ----------------------------------------------
-
-    #[inline(always)]
-    fn body_of<'m>(module: &'m Module, inst: &Instance, func: u32) -> Result<&'m FuncBody, Trap> {
-        let defined = (func as usize)
-            .checked_sub(inst.num_imported_funcs())
-            .ok_or(Trap::Invalid)?;
-        module.code.get(defined).ok_or(Trap::Invalid)
-    }
-
-    /// Save the pc of the current (innermost) frame.
-    #[inline(always)]
-    fn save_pc(&mut self, pc: usize) {
-        if let Some(f) = self.frames.last_mut() {
-            f.pc = pc as u32;
-        }
-    }
-
-    /// Enter defined function `func`; its arguments are the top of the stack.
-    /// Returns the callee's body and the new frame.
-    #[inline(always)]
-    fn push_frame<'m>(
-        &mut self,
-        stack: &mut Stack,
-        module: &'m Module,
-        inst: &Instance,
-        func: u32,
-        sp: &mut usize,
-    ) -> Result<(&'m FuncBody, Frame), Trap> {
-        if self.frames.len() >= self.max_depth {
-            return Err(Trap::CallDepth);
-        }
-        let (nparams, nresults) = inst.func_arity(func).ok_or(Trap::Invalid)?;
-        let body = Self::body_of(module, inst, func)?;
-        let base = sp.checked_sub(nparams).ok_or(Trap::Invalid)?;
-        for &l in &body.locals {
-            stack.push_raw(sp, default_bits(l), shadow(l))?;
-        }
-        let frame = Frame {
-            func,
-            pc: 0,
-            base: base as u32,
-            label_base: self.labels.len() as u32,
-            arity: nresults as u32,
-        };
-        self.frames.push(frame);
-        Ok((body, frame))
-    }
-
-    /// Leave the current frame, moving its results to the frame base.
-    /// Returns the caller's frame, or `None` if this was the outermost one.
-    #[inline(always)]
-    fn do_return(&mut self, stack: &mut Stack, sp: &mut usize) -> Result<Option<Frame>, Trap> {
-        let frame = self.frames.pop().ok_or(Trap::Invalid)?;
-        stack.unwind(sp, frame.base as usize, frame.arity as usize)?;
-        self.labels.truncate(frame.label_base as usize);
-        Ok(self.frames.last().copied())
-    }
-
-    #[inline(always)]
-    fn push_label(
-        &mut self,
-        cont: u32,
-        arity: usize,
-        nparams: usize,
-        is_loop: bool,
-        sp: usize,
-    ) -> Result<(), Trap> {
-        if self.labels.len() >= self.max_stack {
-            return Err(Trap::StackOverflow);
-        }
-        let height = sp.checked_sub(nparams).ok_or(Trap::Invalid)?;
-        self.labels.push(Label {
-            cont,
-            arity: arity as u32,
-            height: height as u32,
-            is_loop,
-        });
-        Ok(())
-    }
-
-    /// Pop the innermost label (`else` reached from a then-arm).
-    #[inline(always)]
-    fn pop_label(&mut self) -> Result<(), Trap> {
-        self.labels.pop().map(|_| ()).ok_or(Trap::Invalid)
-    }
-
-    /// `end`: pop the innermost label of the frame whose labels start at
-    /// `label_base`, or report that the frame itself ends (no label left).
-    #[inline(always)]
-    fn end_label(&mut self, label_base: usize) -> bool {
-        if self.labels.len() > label_base {
-            self.labels.pop();
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Branch to the label `depth` levels out in the frame whose labels
-    /// start at `label_base`.
-    #[inline(always)]
-    fn branch(
-        &mut self,
-        stack: &mut Stack,
-        label_base: usize,
-        depth: u32,
-        sp: &mut usize,
-    ) -> Result<Jump, Trap> {
-        let n_labels = self.labels.len();
-        let in_frame = n_labels.saturating_sub(label_base);
-        if depth as usize >= in_frame {
-            return Ok(Jump::Return);
-        }
-        let li = n_labels - 1 - depth as usize;
-        let label = *self.labels.get(li).ok_or(Trap::Invalid)?;
-        stack.unwind(sp, label.height as usize, label.arity as usize)?;
-        // A loop label stays: the branch re-enters the loop body.
-        self.labels.truncate(li + label.is_loop as usize);
-        Ok(Jump::To(label.cont))
-    }
-
-    /// Call an imported or foreign function through the host, with the
-    /// arguments on top of `self.stack`; they stay there until the host
-    /// returns `Continue`. The interpreter loop is not running (its state is
-    /// in `self`) and nobody holds a borrow of the instance's memory.
-    fn host_call(
-        &mut self,
-        module: &Module,
-        inst: &mut Instance,
-        host: &mut dyn Host,
-        target: HostTarget,
-    ) -> Result<HostOutcome, Trap> {
-        let (id, ty): (Result<HostFuncId, u32>, _) = match target {
-            HostTarget::Import(func) => (
-                Ok(inst.host_func(func).ok_or(Trap::Invalid)?),
-                inst.func_type_index(func)
-                    .and_then(|t| module.types.get(t as usize))
-                    .ok_or(Trap::Invalid)?,
-            ),
-            HostTarget::Foreign { addr, ty } => (
-                Err(addr),
-                module.types.get(ty as usize).ok_or(Trap::Invalid)?,
-            ),
-        };
-        let start = self.sp.checked_sub(ty.params.len()).ok_or(Trap::Invalid)?;
-        self.host_args.clear();
-        self.host_results.clear();
-        self.stack
-            .read_values(self.sp, &ty.params, &mut self.host_args)?;
-        self.host_results
-            .extend(ty.results.iter().map(|&t| Value::default_for(t)));
-        let mut ctx = HostCtx {
-            memory: &inst.memory,
-        };
-        let outcome = match id {
-            Ok(id) => host.call(&mut ctx, id, &self.host_args, &mut self.host_results),
-            Err(addr) => {
-                host.call_foreign(&mut ctx, addr, ty, &self.host_args, &mut self.host_results)
-            }
-        }?;
-        if outcome == HostOutcome::Continue {
-            let results = &self.host_results;
-            let well_typed = results.len() == ty.results.len()
-                && results.iter().zip(&ty.results).all(|(v, &t)| v.ty() == t);
-            if !well_typed {
-                return Err(Trap::Host);
-            }
-            self.sp = start;
-            for &v in results {
-                self.stack.push_value(&mut self.sp, v)?;
-            }
-        }
-        Ok(outcome)
-    }
 
     // ---- the interpreter loop -------------------------------------------
 
@@ -1444,9 +1501,8 @@ impl Execution {
         r
     }
 
-    /// Run the interpreter loop, making the host calls it stops at: the
-    /// memory is borrowed for each slice of the loop and released around
-    /// every host call (see the module documentation).
+    /// Run the interpreter loop, growing the value stack when a call needs
+    /// more than it has (see [`Stack`]).
     fn run_slices(
         &mut self,
         module: &Module,
@@ -1455,27 +1511,23 @@ impl Execution {
         fuel: &mut u64,
     ) -> Result<Flow, Trap> {
         let memory = inst.memory.clone();
+        let program = inst.program().clone();
         loop {
-            let flow = {
-                let mut mem = memory.try_borrow_mut().map_err(|_| Trap::Host)?;
-                self.run_loop(module, inst, &mut mem, fuel)?
-            };
-            let Flow::HostCall { target, restore } = flow else {
-                return Ok(flow);
-            };
-            match self.host_call(module, inst, host, target)? {
-                HostOutcome::Continue => {}
-                HostOutcome::Block => {
-                    // Rewind to the call so that resuming re-issues it with
-                    // the stack exactly as it was.
+            match self.run_loop(&program, module, inst, host, &memory, fuel)? {
+                Flow::Grow {
+                    len,
+                    restore,
+                    width,
+                } => {
+                    self.stack.reserve(len)?;
                     if let Some(v) = restore {
-                        self.stack.push_as::<i32>(&mut self.sp, v)?;
+                        self.stack.push_i32(&mut self.sp, v)?;
                     }
                     let frame = self.frames.last_mut().ok_or(Trap::Invalid)?;
-                    frame.pc = frame.pc.checked_sub(1).ok_or(Trap::Invalid)?;
-                    return Ok(Flow::Blocked);
+                    frame.pc = frame.pc.checked_sub(width).ok_or(Trap::Invalid)?;
+                    *fuel = fuel.saturating_add(1);
                 }
-                HostOutcome::Exit(code) => return Ok(Flow::Exited(code)),
+                other => return Ok(other),
             }
         }
     }
@@ -1484,100 +1536,187 @@ impl Execution {
     #[inline(never)]
     fn run_loop(
         &mut self,
+        program: &Program,
         module: &Module,
         inst: &mut Instance,
-        mem: &mut Memory,
+        host: &mut dyn Host,
+        memory: &MemoryRef,
         fuel_ref: &mut u64,
     ) -> Result<Flow, Trap> {
         let mut fuel = *fuel_ref;
         let mut sp = self.sp;
-        // The stack is a local for the duration of the loop so that its
-        // buffer pointer and length can live in registers (see the module
-        // documentation); it goes back into `self` on every exit that can
-        // be resumed. A trap ends the execution, so losing it there is fine.
-        let mut stack = core::mem::take(&mut self.stack);
-        let frame = *self.frames.last().ok_or(Trap::Invalid)?;
-        // Only the instruction slice of the current function is kept in a
-        // local; everything else about the frame that is needed rarely
-        // (`br_table` side tables, the saved pc) is re-read from
-        // `self.frames.last()` to keep the loop's register pressure low.
-        let mut code: &[Instr] = &Self::body_of(module, inst, frame.func)?.instrs;
-        let mut pc = frame.pc as usize;
-        let mut base = frame.base as usize;
-        let mut label_base = frame.label_base as usize;
+        // The memory is borrowed for the duration of the loop and released
+        // around every host call (see the module documentation).
+        let mut guard = memory.try_borrow_mut().map_err(|_| Trap::Host)?;
+        let mut mem: &mut Memory = &mut guard;
+        // The stack buffer is a fixed slice for the duration of the loop
+        // (see [`Stack`]); its pointer and length are loop invariants.
+        let mut stack = self.stack.view();
+        let max_depth = self.max_depth;
+        let frames = &mut self.frames;
+        let cur = *frames.last().ok_or(Trap::Invalid)?;
+        let code: &[Word] = &program.words;
+        let funcs: &[Func] = &program.funcs;
+        let mut pc = cur.pc as usize;
+        let mut base = cur.base as usize;
 
         // Save the loop state into `self` before leaving the loop.
         macro_rules! save {
             () => {{
-                self.save_pc(pc);
-                self.stack = stack;
+                if let Some(f) = frames.last_mut() {
+                    f.pc = pc as u32;
+                }
                 self.sp = sp;
                 *fuel_ref = fuel;
             }};
         }
-        // Switch to the caller's frame after a return.
+        // Leave the current frame, moving its results to its base, and
+        // switch to the caller's.
         macro_rules! ret {
-            () => {
-                match self.do_return(&mut stack, &mut sp)? {
+            () => {{
+                let cur = frames.pop().ok_or(Trap::Invalid)?;
+                stack.unwind(&mut sp, cur.base as usize, cur.arity as usize)?;
+                match frames.last() {
                     Some(frame) => {
-                        code = &Self::body_of(module, inst, frame.func)?.instrs;
                         pc = frame.pc as usize;
                         base = frame.base as usize;
-                        label_base = frame.label_base as usize;
                     }
                     None => {
-                        self.stack = stack;
                         self.sp = sp;
                         *fuel_ref = fuel;
                         return Ok(Flow::Done);
                     }
                 }
-            };
-        }
-        macro_rules! jump {
-            ($j:expr) => {
-                match $j {
-                    Jump::To(target) => pc = target as usize,
-                    Jump::Return => ret!(),
-                }
-            };
-        }
-        // `$restore` is what the instruction popped before the call (the
-        // table index of `call_indirect`): it goes back on the stack when the
-        // host blocks, so that the re-issued instruction finds the stack as
-        // it was and calls the same function with the same arguments.
-        // A call through the host: leave the loop with the state saved;
-        // `run_slices` makes the call and re-enters.
-        macro_rules! host_dispatch {
-            ($target:expr, $restore:expr) => {{
-                save!();
-                return Ok(Flow::HostCall {
-                    target: $target,
-                    restore: $restore,
-                });
             }};
         }
+        // A resolved branch: unwind the stack to the target's height
+        // (relative to the frame base), keeping the carried values, and
+        // continue at the target.
+        macro_rules! br {
+            ($target:expr, $height:expr, $arity:expr) => {{
+                stack.unwind(
+                    &mut sp,
+                    base.wrapping_add($height as usize),
+                    $arity as usize,
+                )?;
+                pc = $target as usize;
+            }};
+        }
+        macro_rules! br_wide {
+            ($target:expr) => {{
+                let x = word_at!(0);
+                br!($target, x as u32, (x >> 32) as u32)
+            }};
+        }
+        // A call through the host, with the memory borrow released around
+        // it. `$restore` is what the instruction popped before the call
+        // (the table index of `call_indirect`): it goes back on the stack
+        // when the host blocks, so that the re-issued instruction finds the
+        // stack as it was and calls the same function with the same
+        // arguments; `$width` is the instruction's size in words, to rewind
+        // the pc by.
+        macro_rules! host_dispatch {
+            ($target:expr, $restore:expr, $width:expr) => {{
+                drop(guard);
+                let outcome = host_call(
+                    &mut stack,
+                    &mut sp,
+                    &mut self.host_args,
+                    &mut self.host_results,
+                    module,
+                    inst,
+                    host,
+                    $target,
+                );
+                guard = memory.try_borrow_mut().map_err(|_| Trap::Host)?;
+                mem = &mut guard;
+                match outcome? {
+                    HostOutcome::Continue => {}
+                    HostOutcome::Block => {
+                        if let Some(v) = $restore {
+                            stack.push_as::<i32>(&mut sp, v)?;
+                        }
+                        pc -= $width as usize;
+                        save!();
+                        return Ok(Flow::Blocked);
+                    }
+                    HostOutcome::Exit(code) => {
+                        save!();
+                        return Ok(Flow::Exited(code));
+                    }
+                }
+            }};
+        }
+        // Enter function `$f`: its arguments are the top of the stack and
+        // become its first locals. The callee's whole frame (locals and
+        // the static maximum of its operand stack) must fit the buffer;
+        // when it does not, the loop leaves so that `run_slices` can grow
+        // the buffer and re-issue the call.
         macro_rules! call {
             ($f:expr) => {
-                call!($f, None)
+                call!($f, None, 1)
             };
-            ($f:expr, $restore:expr) => {{
-                let f: u32 = $f;
-                if inst.is_imported_func(f) {
-                    host_dispatch!(HostTarget::Import(f), $restore);
+            ($f:expr, $restore:expr, $width:expr) => {{
+                let func: u32 = $f;
+                let f = funcs.get(func as usize).ok_or(Trap::Invalid)?;
+                if f.entry == IMPORTED {
+                    host_dispatch!(HostTarget::Import(func), $restore, $width);
                 } else {
-                    self.save_pc(pc);
-                    let (callee, frame) = self.push_frame(&mut stack, module, inst, f, &mut sp)?;
-                    code = &callee.instrs;
-                    pc = 0;
-                    base = frame.base as usize;
-                    label_base = frame.label_base as usize;
+                    call_defined!(f, $restore, $width);
                 }
+            }};
+        }
+        macro_rules! call_defined {
+            ($f:expr, $restore:expr, $width:expr) => {{
+                let f: &Func = $f;
+                if frames.len() >= max_depth {
+                    return Err(Trap::CallDepth);
+                }
+                let callee_base = sp.checked_sub(f.nparams as usize).ok_or(Trap::Invalid)?;
+                let extent = callee_base.saturating_add(f.stack as usize);
+                if extent > stack.buf.len() {
+                    save!();
+                    return Ok(Flow::Grow {
+                        len: extent,
+                        restore: $restore,
+                        width: $width,
+                    });
+                }
+                let locals = program
+                    .locals
+                    .get(f.locals_start as usize..f.locals_end as usize)
+                    .ok_or(Trap::Invalid)?;
+                stack.push_locals(&mut sp, locals)?;
+                if let Some(caller) = frames.last_mut() {
+                    caller.pc = pc as u32;
+                }
+                frames.push(Frame {
+                    pc: f.entry,
+                    base: callee_base as u32,
+                    arity: f.nresults,
+                });
+                pc = f.entry as usize;
+                base = callee_base;
             }};
         }
         macro_rules! local {
             ($idx:expr) => {
                 base.wrapping_add($idx as usize)
+            };
+        }
+        // The next word (a wide immediate), consumed.
+        macro_rules! next_word {
+            () => {{
+                let v = *code.get(pc).ok_or(Trap::Invalid)?;
+                pc += 1;
+                v
+            }};
+        }
+        // The `$k`-th word after the current one (an instruction a
+        // superinstruction covers), not consumed.
+        macro_rules! word_at {
+            ($k:literal) => {
+                *code.get(pc.wrapping_add($k)).ok_or(Trap::Invalid)?
             };
         }
         // A table, borrowed for the current instruction.
@@ -1622,17 +1761,105 @@ impl Execution {
         }
         // A load replaces the address on top of the stack by the value.
         macro_rules! load {
-            ($n:literal, $m:expr, $conv:expr) => {{
-                let marg = $m;
+            ($n:literal, $offset:expr, $conv:expr) => {{
+                let offset: u32 = $offset;
                 let m = &*mem;
-                un_try!(|addr: i32| m.load::<$n>(addr as u32, marg.offset).map($conv))
+                un_try!(|addr: i32| m.load::<$n>(addr as u32, offset).map($conv))
             }};
         }
         macro_rules! store {
-            ($t:ty, $m:expr, |$v:ident| $bytes:expr) => {{
-                let marg = $m;
+            ($t:ty, $offset:expr, |$v:ident| $bytes:expr) => {{
+                let offset: u32 = $offset;
                 let (addr, $v) = stack.pop2::<i32, $t>(&mut sp)?;
-                mem.store(addr as u32, marg.offset, &$bytes)?;
+                mem.store(addr as u32, offset, &$bytes)?;
+            }};
+        }
+        // A conditional branch, `$w` being the `br_if` word.
+        macro_rules! br_if {
+            ($cond:expr, $w:expr) => {{
+                let w: Word = $w;
+                if $cond {
+                    br!(imm_a(w), imm_b(w), imm_c(w));
+                }
+            }};
+        }
+        // `<relop>; br_if` fused: pops two `i32`.
+        macro_rules! relop_br_if {
+            ($f:expr) => {{
+                if fuel < 1 {
+                    bin!($f)
+                } else {
+                    fuel -= 1;
+                    let bw = word_at!(0);
+                    pc += 1;
+                    let (x, y) = stack.pop2::<i32, i32>(&mut sp)?;
+                    let f = $f;
+                    br_if!(f(x, y), bw);
+                }
+            }};
+        }
+        // The plain instructions superinstructions decay to when the fuel
+        // cannot pay for the whole sequence.
+        macro_rules! local_get {
+            ($idx:expr) => {
+                stack.local_get(&mut sp, local!($idx))?
+            };
+        }
+        macro_rules! i32_const {
+            ($bits:expr) => {
+                push!($bits as i32)
+            };
+        }
+        macro_rules! i32_add {
+            () => {
+                bin!(|a: i32, b: i32| a.wrapping_add(b))
+            };
+        }
+        // Enter a fused handler covering `$n` more instructions, or decay
+        // to the plain first one.
+        macro_rules! fused {
+            ($n:literal, $plain:expr, $body:expr) => {{
+                if fuel < $n {
+                    $plain
+                } else {
+                    fuel -= $n;
+                    $body
+                }
+            }};
+        }
+        // `local.get a; i32.const c; <binop>`: push `f(a, c)`.
+        macro_rules! local_get_const_binop {
+            ($a:expr, $f:expr) => {{
+                let a = $a;
+                fused!(2, local_get!(a), {
+                    let c = imm_a(word_at!(0)) as i32;
+                    pc += 2;
+                    let f = $f;
+                    stack.local_bin(&mut sp, local!(a), |x: i32| f(x, c))?;
+                })
+            }};
+        }
+        // `i32.const c; <binop>`: replace the top `x` by `f(x, c)`.
+        macro_rules! const_binop {
+            ($a:expr, $f:expr) => {{
+                let a = $a;
+                fused!(1, i32_const!(a), {
+                    pc += 1;
+                    let c = a as i32;
+                    let f = $f;
+                    un!(|x: i32| f(x, c));
+                })
+            }};
+        }
+        // `local.get a; local.get b; <binop>`: push `f(a, b)`.
+        macro_rules! local2_binop {
+            ($a:expr, $f:expr) => {{
+                let a = $a;
+                fused!(2, local_get!(a), {
+                    let b = imm_a(word_at!(0));
+                    pc += 2;
+                    stack.local2_bin(&mut sp, local!(a), local!(b), $f)?;
+                })
             }};
         }
 
@@ -1642,65 +1869,60 @@ impl Execution {
                 return Ok(Flow::OutOfFuel);
             }
             fuel -= 1;
-            let instr = *code.get(pc).ok_or(Trap::Invalid)?;
+            let w = *code.get(pc).ok_or(Trap::Invalid)?;
             pc += 1;
+            let a = imm_a(w);
 
-            match instr {
+            match opcode(w) {
                 // ---- control ------------------------------------------
-                Instr::Unreachable => return Err(Trap::Unreachable),
-                Instr::Nop => {}
-                Instr::Block { ty, end } => {
-                    let (np, nr) = block_arity(module, ty)?;
-                    self.push_label(end + 1, nr, np, false, sp)?;
-                }
-                Instr::Loop { ty, .. } => {
-                    let (np, _) = block_arity(module, ty)?;
-                    self.push_label(pc as u32, np, np, true, sp)?;
-                }
-                Instr::If { ty, else_, end } => {
-                    let cond = pop!(i32);
-                    let (np, nr) = block_arity(module, ty)?;
-                    if cond != 0 {
-                        self.push_label(end + 1, nr, np, false, sp)?;
-                    } else if else_ != end {
-                        self.push_label(end + 1, nr, np, false, sp)?;
-                        pc = else_ as usize + 1;
-                    } else {
-                        pc = end as usize + 1;
+                op::UNREACHABLE => return Err(Trap::Unreachable),
+                // Structured control is resolved at compile time (see
+                // `crate::code`): entering or leaving a block costs its
+                // fuel and nothing else.
+                op::NOP | op::BLOCK | op::LOOP | op::END => {}
+                op::IF => {
+                    if pop!(i32) == 0 {
+                        pc = a as usize;
                     }
                 }
-                Instr::Else { end } => {
-                    // Reached from the then arm: the block is complete.
-                    self.pop_label()?;
-                    pc = end as usize + 1;
+                op::ELSE => pc = a as usize,
+                op::BR => br!(a, imm_b(w), imm_c(w)),
+                op::BR_W => br_wide!(a),
+                op::BR_IF => br_if!(pop!(i32) != 0, w),
+                op::BR_IF_W => {
+                    let x = next_word!();
+                    if pop!(i32) != 0 {
+                        br!(a, x as u32, (x >> 32) as u32);
+                    }
                 }
-                Instr::End => {
-                    if !self.end_label(label_base) {
+                op::BR_IF_RETURN => {
+                    if pop!(i32) != 0 {
                         ret!();
                     }
                 }
-                Instr::Br(depth) => jump!(self.branch(&mut stack, label_base, depth, &mut sp)?),
-                Instr::BrIf(depth) => {
-                    if pop!(i32) != 0 {
-                        jump!(self.branch(&mut stack, label_base, depth, &mut sp)?);
-                    }
-                }
-                Instr::BrTable(idx) => {
+                op::BR_TABLE => {
                     let i = pop!(i32) as u32;
-                    let func = self.frames.last().ok_or(Trap::Invalid)?.func;
-                    let table = Self::body_of(module, inst, func)?
-                        .br_table(idx)
-                        .ok_or(Trap::Invalid)?;
-                    let depth = table
+                    let table = program.br_tables.get(a as usize).ok_or(Trap::Invalid)?;
+                    let b = table
                         .targets
                         .get(i as usize)
                         .copied()
                         .unwrap_or(table.default);
-                    jump!(self.branch(&mut stack, label_base, depth, &mut sp)?);
+                    if b.target == RETURN {
+                        ret!();
+                    } else {
+                        br!(b.target, b.height, b.arity);
+                    }
                 }
-                Instr::Return => ret!(),
-                Instr::Call(f) => call!(f),
-                Instr::CallIndirect { ty, table } => {
+                op::RETURN => ret!(),
+                op::CALL => call!(a),
+                op::CALL_INDIRECT | op::CALL_INDIRECT_W => {
+                    let (table, width) = if opcode(w) == op::CALL_INDIRECT {
+                        (imm_b(w), 1)
+                    } else {
+                        (next_word!() as u32, 2)
+                    };
+                    let ty = a;
                     let i = pop!(i32) as u32;
                     let entry = inst
                         .tables
@@ -1719,47 +1941,52 @@ impl Execution {
                     // common case, one subtraction and two compares), one
                     // of its imports, or a foreign function.
                     let f = addr.wrapping_sub(inst.func_base);
-                    let f = if (f as usize) < inst.num_funcs()
+                    let local = if (f as usize) < inst.num_funcs()
                         && (f as usize) >= inst.num_imported_funcs()
                     {
-                        f
+                        Some(f)
                     } else {
-                        match inst.import_by_addr(addr) {
-                            Some(f) => f,
-                            None => {
-                                host_dispatch!(HostTarget::Foreign { addr, ty }, Some(i as i32))
-                            }
-                        }
+                        inst.import_by_addr(addr)
                     };
-                    let actual = inst.func_type_index(f).ok_or(Trap::Invalid)?;
-                    if actual != ty {
-                        let expected = module.types.get(ty as usize).ok_or(Trap::Invalid)?;
-                        let got = module.types.get(actual as usize).ok_or(Trap::Invalid)?;
-                        if expected != got {
-                            return Err(Trap::IndirectCallTypeMismatch);
+                    match local {
+                        Some(f) => {
+                            let actual = inst.func_type_index(f).ok_or(Trap::Invalid)?;
+                            if actual != ty {
+                                let module = inst.module();
+                                let expected =
+                                    module.types.get(ty as usize).ok_or(Trap::Invalid)?;
+                                let got = module.types.get(actual as usize).ok_or(Trap::Invalid)?;
+                                if expected != got {
+                                    return Err(Trap::IndirectCallTypeMismatch);
+                                }
+                            }
+                            // The popped index is restored if the host blocks.
+                            call!(f, Some(i as i32), width);
+                        }
+                        None => {
+                            host_dispatch!(HostTarget::Foreign { addr, ty }, Some(i as i32), width)
                         }
                     }
-                    // The popped index is restored if the host blocks.
-                    call!(f, Some(i as i32));
                 }
+                op::TRAP_INVALID => return Err(Trap::Invalid),
 
                 // ---- parametric ---------------------------------------
-                Instr::Drop => {
+                op::DROP => {
                     stack.pop_raw(&mut sp)?;
                 }
-                Instr::Select | Instr::SelectT(_) => stack.select(&mut sp)?,
+                op::SELECT => stack.select(&mut sp)?,
 
                 // ---- variables ----------------------------------------
-                Instr::LocalGet(i) => stack.local_get(&mut sp, local!(i))?,
-                Instr::LocalSet(i) => stack.local_set(&mut sp, local!(i))?,
-                Instr::LocalTee(i) => stack.local_tee(sp, local!(i))?,
-                Instr::GlobalGet(i) => {
-                    let v = inst.globals.get(i as usize).ok_or(Trap::Invalid)?.get();
+                op::LOCAL_GET => local_get!(a),
+                op::LOCAL_SET => stack.local_set(&mut sp, local!(a))?,
+                op::LOCAL_TEE => stack.local_tee(sp, local!(a))?,
+                op::GLOBAL_GET => {
+                    let v = inst.globals.get(a as usize).ok_or(Trap::Invalid)?.get();
                     stack.push_value(&mut sp, v)?;
                 }
-                Instr::GlobalSet(i) => {
+                op::GLOBAL_SET => {
                     let (bits, ty) = stack.pop_raw(&mut sp)?;
-                    let g = inst.globals.get(i as usize).ok_or(Trap::Invalid)?;
+                    let g = inst.globals.get(a as usize).ok_or(Trap::Invalid)?;
                     let gty = g.ty().ty;
                     if shadow(gty) != ty {
                         return Err(Trap::Invalid);
@@ -1768,55 +1995,63 @@ impl Execution {
                 }
 
                 // ---- references ---------------------------------------
-                Instr::RefNull(t) => stack.push_ref(&mut sp, t, None)?,
-                Instr::RefIsNull => {
+                op::REF_NULL => {
+                    let t = if a == 0 {
+                        RefType::FuncRef
+                    } else {
+                        RefType::ExternRef
+                    };
+                    stack.push_ref(&mut sp, t, None)?;
+                }
+                op::REF_IS_NULL => {
                     let r = stack.pop_ref(&mut sp)?;
                     push!(r.is_none());
                 }
-                Instr::RefFunc(f) => {
-                    let addr = inst.func_addr(f).ok_or(Trap::Invalid)?;
+                op::REF_FUNC => {
+                    let addr = inst.func_addr(a).ok_or(Trap::Invalid)?;
                     stack.push_ref(&mut sp, RefType::FuncRef, Some(addr))?;
                 }
 
                 // ---- tables -------------------------------------------
-                Instr::TableGet(t) => {
+                op::TABLE_GET => {
                     let i = pop!(i32) as u32;
-                    let v = table!(t).get(i)?;
+                    let v = table!(a).get(i)?;
                     stack.push_value(&mut sp, v)?;
                 }
-                Instr::TableSet(t) => {
+                op::TABLE_SET => {
                     let r = stack.pop_ref(&mut sp)?;
                     let i = pop!(i32) as u32;
-                    let mut tb = table!(t);
+                    let mut tb = table!(a);
                     let elem = tb.elem_type();
                     tb.set(i, ref_value(elem, r))?;
                 }
-                Instr::TableSize(t) => {
-                    let n = table!(t).size();
+                op::TABLE_SIZE => {
+                    let n = table!(a).size();
                     push!(n as i32);
                 }
-                Instr::TableGrow(t) => {
+                op::TABLE_GROW => {
                     let n = pop!(i32) as u32;
                     let init = stack.pop_ref(&mut sp)?;
-                    let elem = table!(t).elem_type();
+                    let elem = table!(a).elem_type();
                     let r = inst
-                        .grow_table(t, n, ref_value(elem, init))?
+                        .grow_table(a, n, ref_value(elem, init))?
                         .map_or(-1, |old| old as i32);
                     push!(r);
                 }
-                Instr::TableFill(t) => {
+                op::TABLE_FILL => {
                     let n = pop!(i32) as u32;
                     let v = stack.pop_ref(&mut sp)?;
                     let i = pop!(i32) as u32;
-                    let mut tb = table!(t);
+                    let mut tb = table!(a);
                     let elem = tb.elem_type();
                     tb.fill(i, ref_value(elem, v), n)?;
                 }
-                Instr::TableCopy { dst, src } => {
+                op::TABLE_COPY => {
+                    let src = next_word!() as u32;
                     let n = pop!(i32) as u32;
                     let (d, s) = stack.pop2::<i32, i32>(&mut sp)?;
                     let (d, s) = (d as u32, s as u32);
-                    let dt = inst.tables.get(dst as usize).ok_or(Trap::Invalid)?;
+                    let dt = inst.tables.get(a as usize).ok_or(Trap::Invalid)?;
                     let st = inst.tables.get(src as usize).ok_or(Trap::Invalid)?;
                     // Two table indices may name one shared table.
                     if Rc::ptr_eq(dt, st) {
@@ -1830,65 +2065,67 @@ impl Execution {
                             .init(d, st.entries(), s, n)?;
                     }
                 }
-                Instr::TableInit { elem, table } => {
+                op::TABLE_INIT => {
+                    let table = next_word!() as u32;
                     let n = pop!(i32) as u32;
                     let (d, s) = stack.pop2::<i32, i32>(&mut sp)?;
-                    let seg = inst.elems.get(elem as usize).ok_or(Trap::Invalid)?;
+                    let seg = inst.elems.get(a as usize).ok_or(Trap::Invalid)?;
                     table!(table).init(d as u32, seg, s as u32, n)?;
                 }
-                Instr::ElemDrop(e) => {
-                    *inst.elems.get_mut(e as usize).ok_or(Trap::Invalid)? = Vec::new();
+                op::ELEM_DROP => {
+                    *inst.elems.get_mut(a as usize).ok_or(Trap::Invalid)? = Vec::new();
                 }
 
                 // ---- memory -------------------------------------------
-                Instr::I32Load(m) => load!(4, m, i32::from_le_bytes),
-                Instr::I64Load(m) => load!(8, m, i64::from_le_bytes),
-                Instr::F32Load(m) => load!(4, m, f32::from_le_bytes),
-                Instr::F64Load(m) => load!(8, m, f64::from_le_bytes),
-                Instr::I32Load8S(m) => load!(1, m, |b| b[0] as i8 as i32),
-                Instr::I32Load8U(m) => load!(1, m, |b| b[0] as i32),
-                Instr::I32Load16S(m) => load!(2, m, |b| i16::from_le_bytes(b) as i32),
-                Instr::I32Load16U(m) => load!(2, m, |b| u16::from_le_bytes(b) as i32),
-                Instr::I64Load8S(m) => load!(1, m, |b| b[0] as i8 as i64),
-                Instr::I64Load8U(m) => load!(1, m, |b| b[0] as i64),
-                Instr::I64Load16S(m) => load!(2, m, |b| i16::from_le_bytes(b) as i64),
-                Instr::I64Load16U(m) => load!(2, m, |b| u16::from_le_bytes(b) as i64),
-                Instr::I64Load32S(m) => load!(4, m, |b| i32::from_le_bytes(b) as i64),
-                Instr::I64Load32U(m) => load!(4, m, |b| u32::from_le_bytes(b) as i64),
-                Instr::I32Store(m) => store!(i32, m, |v| v.to_le_bytes()),
-                Instr::I64Store(m) => store!(i64, m, |v| v.to_le_bytes()),
-                Instr::F32Store(m) => store!(f32, m, |v| v.to_le_bytes()),
-                Instr::F64Store(m) => store!(f64, m, |v| v.to_le_bytes()),
-                Instr::I32Store8(m) => store!(i32, m, |v| [v as u8]),
-                Instr::I32Store16(m) => store!(i32, m, |v| (v as u16).to_le_bytes()),
-                Instr::I64Store8(m) => store!(i64, m, |v| [v as u8]),
-                Instr::I64Store16(m) => store!(i64, m, |v| (v as u16).to_le_bytes()),
-                Instr::I64Store32(m) => store!(i64, m, |v| (v as u32).to_le_bytes()),
-                Instr::MemorySize => {
+                op::I32_LOAD => load!(4, a, i32::from_le_bytes),
+                op::I64_LOAD => load!(8, a, i64::from_le_bytes),
+                op::F32_LOAD => load!(4, a, f32::from_le_bytes),
+                op::F64_LOAD => load!(8, a, f64::from_le_bytes),
+                op::I32_LOAD8_S => load!(1, a, |b| b[0] as i8 as i32),
+                op::I32_LOAD8_U => load!(1, a, |b| b[0] as i32),
+                op::I32_LOAD16_S => load!(2, a, |b| i16::from_le_bytes(b) as i32),
+                op::I32_LOAD16_U => load!(2, a, |b| u16::from_le_bytes(b) as i32),
+                op::I64_LOAD8_S => load!(1, a, |b| b[0] as i8 as i64),
+                op::I64_LOAD8_U => load!(1, a, |b| b[0] as i64),
+                op::I64_LOAD16_S => load!(2, a, |b| i16::from_le_bytes(b) as i64),
+                op::I64_LOAD16_U => load!(2, a, |b| u16::from_le_bytes(b) as i64),
+                op::I64_LOAD32_S => load!(4, a, |b| i32::from_le_bytes(b) as i64),
+                op::I64_LOAD32_U => load!(4, a, |b| u32::from_le_bytes(b) as i64),
+                op::I32_STORE => store!(i32, a, |v| v.to_le_bytes()),
+                op::I64_STORE => store!(i64, a, |v| v.to_le_bytes()),
+                op::F32_STORE => store!(f32, a, |v| v.to_le_bytes()),
+                op::F64_STORE => store!(f64, a, |v| v.to_le_bytes()),
+                op::I32_STORE8 => store!(i32, a, |v| [v as u8]),
+                op::I32_STORE16 => store!(i32, a, |v| (v as u16).to_le_bytes()),
+                op::I64_STORE8 => store!(i64, a, |v| [v as u8]),
+                op::I64_STORE16 => store!(i64, a, |v| (v as u16).to_le_bytes()),
+                op::I64_STORE32 => store!(i64, a, |v| (v as u32).to_le_bytes()),
+                op::MEMORY_SIZE => {
                     let n = mem.size_pages();
                     push!(n as i32);
                 }
-                Instr::MemoryGrow => {
+                op::MEMORY_GROW => {
                     un!(|n: i32| mem.grow(n as u32).map_or(-1, |old| old as i32));
                 }
-                Instr::MemoryFill => {
+                op::MEMORY_FILL => {
                     let n = pop!(i32) as u32;
                     let (d, v) = stack.pop2::<i32, i32>(&mut sp)?;
                     mem.fill(d as u32, v as u8, n)?;
                 }
-                Instr::MemoryCopy => {
+                op::MEMORY_COPY => {
                     let n = pop!(i32) as u32;
                     let (d, s) = stack.pop2::<i32, i32>(&mut sp)?;
                     mem.copy_within(d as u32, s as u32, n)?;
                 }
-                Instr::MemoryInit(seg) => {
+                op::MEMORY_INIT => {
                     let n = pop!(i32) as u32;
                     let (d, s) = stack.pop2::<i32, i32>(&mut sp)?;
-                    let dropped = *inst.data_dropped.get(seg as usize).ok_or(Trap::Invalid)?;
+                    let dropped = *inst.data_dropped.get(a as usize).ok_or(Trap::Invalid)?;
+                    let module = inst.module();
                     let data: &[u8] = if dropped {
                         &[]
                     } else {
-                        &module.data.get(seg as usize).ok_or(Trap::Invalid)?.bytes
+                        &module.data.get(a as usize).ok_or(Trap::Invalid)?.bytes
                     };
                     let start = s as u32 as usize;
                     let end = start.checked_add(n as usize).ok_or(Trap::OutOfBounds)?;
@@ -1898,204 +2135,346 @@ impl Execution {
                     // `write` checks the destination before touching memory.
                     mem.write(d as u32, &data[start..end])?;
                 }
-                Instr::DataDrop(seg) => {
-                    *inst
-                        .data_dropped
-                        .get_mut(seg as usize)
-                        .ok_or(Trap::Invalid)? = true;
+                op::DATA_DROP => {
+                    *inst.data_dropped.get_mut(a as usize).ok_or(Trap::Invalid)? = true;
                 }
 
                 // ---- constants ----------------------------------------
-                Instr::I32Const(v) => push!(v),
-                Instr::I64Const(v) => push!(v),
-                Instr::F32Const(bits) => push!(f32::from_bits(bits)),
-                Instr::F64Const(bits) => push!(f64::from_bits(bits)),
+                op::I32_CONST => i32_const!(a),
+                op::I64_CONST => push!(next_word!() as i64),
+                op::F32_CONST => push!(f32::from_bits(a)),
+                op::F64_CONST => push!(f64::from_bits(next_word!())),
 
                 // ---- i32 ----------------------------------------------
-                Instr::I32Eqz => un!(|a: i32| a == 0),
-                Instr::I32Eq => bin!(|a: i32, b: i32| a == b),
-                Instr::I32Ne => bin!(|a: i32, b: i32| a != b),
-                Instr::I32LtS => bin!(|a: i32, b: i32| a < b),
-                Instr::I32LtU => bin!(|a: i32, b: i32| (a as u32) < (b as u32)),
-                Instr::I32GtS => bin!(|a: i32, b: i32| a > b),
-                Instr::I32GtU => bin!(|a: i32, b: i32| (a as u32) > (b as u32)),
-                Instr::I32LeS => bin!(|a: i32, b: i32| a <= b),
-                Instr::I32LeU => bin!(|a: i32, b: i32| (a as u32) <= (b as u32)),
-                Instr::I32GeS => bin!(|a: i32, b: i32| a >= b),
-                Instr::I32GeU => bin!(|a: i32, b: i32| (a as u32) >= (b as u32)),
-                Instr::I32Clz => un!(|a: i32| a.leading_zeros() as i32),
-                Instr::I32Ctz => un!(|a: i32| a.trailing_zeros() as i32),
-                Instr::I32Popcnt => un!(|a: i32| a.count_ones() as i32),
-                Instr::I32Add => bin!(|a: i32, b: i32| a.wrapping_add(b)),
-                Instr::I32Sub => bin!(|a: i32, b: i32| a.wrapping_sub(b)),
-                Instr::I32Mul => bin!(|a: i32, b: i32| a.wrapping_mul(b)),
-                Instr::I32DivS => bin_try!(i32_div_s),
-                Instr::I32DivU => bin_try!(|a: i32, b: i32| {
+                op::I32_EQZ => un!(|a: i32| a == 0),
+                op::I32_EQ => bin!(|a: i32, b: i32| a == b),
+                op::I32_NE => bin!(|a: i32, b: i32| a != b),
+                op::I32_LT_S => bin!(|a: i32, b: i32| a < b),
+                op::I32_LT_U => bin!(|a: i32, b: i32| (a as u32) < (b as u32)),
+                op::I32_GT_S => bin!(|a: i32, b: i32| a > b),
+                op::I32_GT_U => bin!(|a: i32, b: i32| (a as u32) > (b as u32)),
+                op::I32_LE_S => bin!(|a: i32, b: i32| a <= b),
+                op::I32_LE_U => bin!(|a: i32, b: i32| (a as u32) <= (b as u32)),
+                op::I32_GE_S => bin!(|a: i32, b: i32| a >= b),
+                op::I32_GE_U => bin!(|a: i32, b: i32| (a as u32) >= (b as u32)),
+                op::I32_CLZ => un!(|a: i32| a.leading_zeros() as i32),
+                op::I32_CTZ => un!(|a: i32| a.trailing_zeros() as i32),
+                op::I32_POPCNT => un!(|a: i32| a.count_ones() as i32),
+                op::I32_ADD => i32_add!(),
+                op::I32_SUB => bin!(|a: i32, b: i32| a.wrapping_sub(b)),
+                op::I32_MUL => bin!(|a: i32, b: i32| a.wrapping_mul(b)),
+                op::I32_DIV_S => bin_try!(i32_div_s),
+                op::I32_DIV_U => bin_try!(|a: i32, b: i32| {
                     (a as u32)
                         .checked_div(b as u32)
                         .map(|v| v as i32)
                         .ok_or(Trap::IntegerDivideByZero)
                 }),
-                Instr::I32RemS => bin_try!(|a: i32, b: i32| {
+                op::I32_REM_S => bin_try!(|a: i32, b: i32| {
                     if b == 0 {
                         Err(Trap::IntegerDivideByZero)
                     } else {
                         Ok(a.wrapping_rem(b))
                     }
                 }),
-                Instr::I32RemU => bin_try!(|a: i32, b: i32| {
+                op::I32_REM_U => bin_try!(|a: i32, b: i32| {
                     (a as u32)
                         .checked_rem(b as u32)
                         .map(|v| v as i32)
                         .ok_or(Trap::IntegerDivideByZero)
                 }),
-                Instr::I32And => bin!(|a: i32, b: i32| a & b),
-                Instr::I32Or => bin!(|a: i32, b: i32| a | b),
-                Instr::I32Xor => bin!(|a: i32, b: i32| a ^ b),
-                Instr::I32Shl => bin!(|a: i32, b: i32| a.wrapping_shl(b as u32)),
-                Instr::I32ShrS => bin!(|a: i32, b: i32| a.wrapping_shr(b as u32)),
-                Instr::I32ShrU => {
+                op::I32_AND => bin!(|a: i32, b: i32| a & b),
+                op::I32_OR => bin!(|a: i32, b: i32| a | b),
+                op::I32_XOR => bin!(|a: i32, b: i32| a ^ b),
+                op::I32_SHL => bin!(|a: i32, b: i32| a.wrapping_shl(b as u32)),
+                op::I32_SHR_S => bin!(|a: i32, b: i32| a.wrapping_shr(b as u32)),
+                op::I32_SHR_U => {
                     bin!(|a: i32, b: i32| (a as u32).wrapping_shr(b as u32) as i32)
                 }
-                Instr::I32Rotl => bin!(|a: i32, b: i32| a.rotate_left(b as u32 & 31)),
-                Instr::I32Rotr => bin!(|a: i32, b: i32| a.rotate_right(b as u32 & 31)),
+                op::I32_ROTL => bin!(|a: i32, b: i32| a.rotate_left(b as u32 & 31)),
+                op::I32_ROTR => bin!(|a: i32, b: i32| a.rotate_right(b as u32 & 31)),
 
                 // ---- i64 ----------------------------------------------
-                Instr::I64Eqz => un!(|a: i64| a == 0),
-                Instr::I64Eq => bin!(|a: i64, b: i64| a == b),
-                Instr::I64Ne => bin!(|a: i64, b: i64| a != b),
-                Instr::I64LtS => bin!(|a: i64, b: i64| a < b),
-                Instr::I64LtU => bin!(|a: i64, b: i64| (a as u64) < (b as u64)),
-                Instr::I64GtS => bin!(|a: i64, b: i64| a > b),
-                Instr::I64GtU => bin!(|a: i64, b: i64| (a as u64) > (b as u64)),
-                Instr::I64LeS => bin!(|a: i64, b: i64| a <= b),
-                Instr::I64LeU => bin!(|a: i64, b: i64| (a as u64) <= (b as u64)),
-                Instr::I64GeS => bin!(|a: i64, b: i64| a >= b),
-                Instr::I64GeU => bin!(|a: i64, b: i64| (a as u64) >= (b as u64)),
-                Instr::I64Clz => un!(|a: i64| a.leading_zeros() as i64),
-                Instr::I64Ctz => un!(|a: i64| a.trailing_zeros() as i64),
-                Instr::I64Popcnt => un!(|a: i64| a.count_ones() as i64),
-                Instr::I64Add => bin!(|a: i64, b: i64| a.wrapping_add(b)),
-                Instr::I64Sub => bin!(|a: i64, b: i64| a.wrapping_sub(b)),
-                Instr::I64Mul => bin!(|a: i64, b: i64| a.wrapping_mul(b)),
-                Instr::I64DivS => bin_try!(i64_div_s),
-                Instr::I64DivU => bin_try!(|a: i64, b: i64| {
+                op::I64_EQZ => un!(|a: i64| a == 0),
+                op::I64_EQ => bin!(|a: i64, b: i64| a == b),
+                op::I64_NE => bin!(|a: i64, b: i64| a != b),
+                op::I64_LT_S => bin!(|a: i64, b: i64| a < b),
+                op::I64_LT_U => bin!(|a: i64, b: i64| (a as u64) < (b as u64)),
+                op::I64_GT_S => bin!(|a: i64, b: i64| a > b),
+                op::I64_GT_U => bin!(|a: i64, b: i64| (a as u64) > (b as u64)),
+                op::I64_LE_S => bin!(|a: i64, b: i64| a <= b),
+                op::I64_LE_U => bin!(|a: i64, b: i64| (a as u64) <= (b as u64)),
+                op::I64_GE_S => bin!(|a: i64, b: i64| a >= b),
+                op::I64_GE_U => bin!(|a: i64, b: i64| (a as u64) >= (b as u64)),
+                op::I64_CLZ => un!(|a: i64| a.leading_zeros() as i64),
+                op::I64_CTZ => un!(|a: i64| a.trailing_zeros() as i64),
+                op::I64_POPCNT => un!(|a: i64| a.count_ones() as i64),
+                op::I64_ADD => bin!(|a: i64, b: i64| a.wrapping_add(b)),
+                op::I64_SUB => bin!(|a: i64, b: i64| a.wrapping_sub(b)),
+                op::I64_MUL => bin!(|a: i64, b: i64| a.wrapping_mul(b)),
+                op::I64_DIV_S => bin_try!(i64_div_s),
+                op::I64_DIV_U => bin_try!(|a: i64, b: i64| {
                     (a as u64)
                         .checked_div(b as u64)
                         .map(|v| v as i64)
                         .ok_or(Trap::IntegerDivideByZero)
                 }),
-                Instr::I64RemS => bin_try!(|a: i64, b: i64| {
+                op::I64_REM_S => bin_try!(|a: i64, b: i64| {
                     if b == 0 {
                         Err(Trap::IntegerDivideByZero)
                     } else {
                         Ok(a.wrapping_rem(b))
                     }
                 }),
-                Instr::I64RemU => bin_try!(|a: i64, b: i64| {
+                op::I64_REM_U => bin_try!(|a: i64, b: i64| {
                     (a as u64)
                         .checked_rem(b as u64)
                         .map(|v| v as i64)
                         .ok_or(Trap::IntegerDivideByZero)
                 }),
-                Instr::I64And => bin!(|a: i64, b: i64| a & b),
-                Instr::I64Or => bin!(|a: i64, b: i64| a | b),
-                Instr::I64Xor => bin!(|a: i64, b: i64| a ^ b),
-                Instr::I64Shl => bin!(|a: i64, b: i64| a.wrapping_shl(b as u32)),
-                Instr::I64ShrS => bin!(|a: i64, b: i64| a.wrapping_shr(b as u32)),
-                Instr::I64ShrU => {
+                op::I64_AND => bin!(|a: i64, b: i64| a & b),
+                op::I64_OR => bin!(|a: i64, b: i64| a | b),
+                op::I64_XOR => bin!(|a: i64, b: i64| a ^ b),
+                op::I64_SHL => bin!(|a: i64, b: i64| a.wrapping_shl(b as u32)),
+                op::I64_SHR_S => bin!(|a: i64, b: i64| a.wrapping_shr(b as u32)),
+                op::I64_SHR_U => {
                     bin!(|a: i64, b: i64| (a as u64).wrapping_shr(b as u32) as i64)
                 }
-                Instr::I64Rotl => bin!(|a: i64, b: i64| a.rotate_left(b as u32 & 63)),
-                Instr::I64Rotr => bin!(|a: i64, b: i64| a.rotate_right(b as u32 & 63)),
+                op::I64_ROTL => bin!(|a: i64, b: i64| a.rotate_left(b as u32 & 63)),
+                op::I64_ROTR => bin!(|a: i64, b: i64| a.rotate_right(b as u32 & 63)),
 
                 // ---- f32 ----------------------------------------------
-                Instr::F32Eq => bin!(|a: f32, b: f32| a == b),
-                Instr::F32Ne => bin!(|a: f32, b: f32| a != b),
-                Instr::F32Lt => bin!(|a: f32, b: f32| a < b),
-                Instr::F32Gt => bin!(|a: f32, b: f32| a > b),
-                Instr::F32Le => bin!(|a: f32, b: f32| a <= b),
-                Instr::F32Ge => bin!(|a: f32, b: f32| a >= b),
-                Instr::F32Abs => un!(f32_abs),
-                Instr::F32Neg => un!(f32_neg),
-                Instr::F32Ceil => un!(|a: f32| round_f32(a, libm::ceilf)),
-                Instr::F32Floor => un!(|a: f32| round_f32(a, libm::floorf)),
-                Instr::F32Trunc => un!(|a: f32| round_f32(a, libm::truncf)),
-                Instr::F32Nearest => un!(|a: f32| round_f32(a, libm::rintf)),
-                Instr::F32Sqrt => un!(f32_sqrt),
-                Instr::F32Add => bin!(|a: f32, b: f32| a + b),
-                Instr::F32Sub => bin!(|a: f32, b: f32| a - b),
-                Instr::F32Mul => bin!(|a: f32, b: f32| a * b),
-                Instr::F32Div => bin!(|a: f32, b: f32| a / b),
-                Instr::F32Min => bin!(f32_min),
-                Instr::F32Max => bin!(f32_max),
-                Instr::F32Copysign => bin!(f32_copysign),
+                op::F32_EQ => bin!(|a: f32, b: f32| a == b),
+                op::F32_NE => bin!(|a: f32, b: f32| a != b),
+                op::F32_LT => bin!(|a: f32, b: f32| a < b),
+                op::F32_GT => bin!(|a: f32, b: f32| a > b),
+                op::F32_LE => bin!(|a: f32, b: f32| a <= b),
+                op::F32_GE => bin!(|a: f32, b: f32| a >= b),
+                op::F32_ABS => un!(f32_abs),
+                op::F32_NEG => un!(f32_neg),
+                op::F32_CEIL => un!(|a: f32| round_f32(a, libm::ceilf)),
+                op::F32_FLOOR => un!(|a: f32| round_f32(a, libm::floorf)),
+                op::F32_TRUNC => un!(|a: f32| round_f32(a, libm::truncf)),
+                op::F32_NEAREST => un!(|a: f32| round_f32(a, libm::rintf)),
+                op::F32_SQRT => un!(f32_sqrt),
+                op::F32_ADD => bin!(|a: f32, b: f32| a + b),
+                op::F32_SUB => bin!(|a: f32, b: f32| a - b),
+                op::F32_MUL => bin!(|a: f32, b: f32| a * b),
+                op::F32_DIV => bin!(|a: f32, b: f32| a / b),
+                op::F32_MIN => bin!(f32_min),
+                op::F32_MAX => bin!(f32_max),
+                op::F32_COPYSIGN => bin!(f32_copysign),
 
                 // ---- f64 ----------------------------------------------
-                Instr::F64Eq => bin!(|a: f64, b: f64| a == b),
-                Instr::F64Ne => bin!(|a: f64, b: f64| a != b),
-                Instr::F64Lt => bin!(|a: f64, b: f64| a < b),
-                Instr::F64Gt => bin!(|a: f64, b: f64| a > b),
-                Instr::F64Le => bin!(|a: f64, b: f64| a <= b),
-                Instr::F64Ge => bin!(|a: f64, b: f64| a >= b),
-                Instr::F64Abs => un!(f64_abs),
-                Instr::F64Neg => un!(f64_neg),
-                Instr::F64Ceil => un!(|a: f64| round_f64(a, libm::ceil)),
-                Instr::F64Floor => un!(|a: f64| round_f64(a, libm::floor)),
-                Instr::F64Trunc => un!(|a: f64| round_f64(a, libm::trunc)),
-                Instr::F64Nearest => un!(|a: f64| round_f64(a, libm::rint)),
-                Instr::F64Sqrt => un!(f64_sqrt),
-                Instr::F64Add => bin!(|a: f64, b: f64| a + b),
-                Instr::F64Sub => bin!(|a: f64, b: f64| a - b),
-                Instr::F64Mul => bin!(|a: f64, b: f64| a * b),
-                Instr::F64Div => bin!(|a: f64, b: f64| a / b),
-                Instr::F64Min => bin!(f64_min),
-                Instr::F64Max => bin!(f64_max),
-                Instr::F64Copysign => bin!(f64_copysign),
+                op::F64_EQ => bin!(|a: f64, b: f64| a == b),
+                op::F64_NE => bin!(|a: f64, b: f64| a != b),
+                op::F64_LT => bin!(|a: f64, b: f64| a < b),
+                op::F64_GT => bin!(|a: f64, b: f64| a > b),
+                op::F64_LE => bin!(|a: f64, b: f64| a <= b),
+                op::F64_GE => bin!(|a: f64, b: f64| a >= b),
+                op::F64_ABS => un!(f64_abs),
+                op::F64_NEG => un!(f64_neg),
+                op::F64_CEIL => un!(|a: f64| round_f64(a, libm::ceil)),
+                op::F64_FLOOR => un!(|a: f64| round_f64(a, libm::floor)),
+                op::F64_TRUNC => un!(|a: f64| round_f64(a, libm::trunc)),
+                op::F64_NEAREST => un!(|a: f64| round_f64(a, libm::rint)),
+                op::F64_SQRT => un!(f64_sqrt),
+                op::F64_ADD => bin!(|a: f64, b: f64| a + b),
+                op::F64_SUB => bin!(|a: f64, b: f64| a - b),
+                op::F64_MUL => bin!(|a: f64, b: f64| a * b),
+                op::F64_DIV => bin!(|a: f64, b: f64| a / b),
+                op::F64_MIN => bin!(f64_min),
+                op::F64_MAX => bin!(f64_max),
+                op::F64_COPYSIGN => bin!(f64_copysign),
 
                 // ---- conversions --------------------------------------
-                Instr::I32WrapI64 => un!(|a: i64| a as i32),
-                Instr::I32TruncF32S => un_try!(i32_trunc_f32_s),
-                Instr::I32TruncF32U => un_try!(|a: f32| i32_trunc_f32_u(a).map(|v| v as i32)),
-                Instr::I32TruncF64S => un_try!(i32_trunc_f64_s),
-                Instr::I32TruncF64U => un_try!(|a: f64| i32_trunc_f64_u(a).map(|v| v as i32)),
-                Instr::I64ExtendI32S => un!(|a: i32| a as i64),
-                Instr::I64ExtendI32U => un!(|a: i32| a as u32 as i64),
-                Instr::I64TruncF32S => un_try!(i64_trunc_f32_s),
-                Instr::I64TruncF32U => un_try!(|a: f32| i64_trunc_f32_u(a).map(|v| v as i64)),
-                Instr::I64TruncF64S => un_try!(i64_trunc_f64_s),
-                Instr::I64TruncF64U => un_try!(|a: f64| i64_trunc_f64_u(a).map(|v| v as i64)),
-                Instr::F32ConvertI32S => un!(|a: i32| a as f32),
-                Instr::F32ConvertI32U => un!(|a: i32| a as u32 as f32),
-                Instr::F32ConvertI64S => un!(|a: i64| a as f32),
-                Instr::F32ConvertI64U => un!(|a: i64| a as u64 as f32),
-                Instr::F32DemoteF64 => un!(f32_demote),
-                Instr::F64ConvertI32S => un!(|a: i32| a as f64),
-                Instr::F64ConvertI32U => un!(|a: i32| a as u32 as f64),
-                Instr::F64ConvertI64S => un!(|a: i64| a as f64),
-                Instr::F64ConvertI64U => un!(|a: i64| a as u64 as f64),
-                Instr::F64PromoteF32 => un!(f64_promote),
-                Instr::I32ReinterpretF32 => un!(|a: f32| a.to_bits() as i32),
-                Instr::I64ReinterpretF64 => un!(|a: f64| a.to_bits() as i64),
-                Instr::F32ReinterpretI32 => un!(|a: i32| f32::from_bits(a as u32)),
-                Instr::F64ReinterpretI64 => un!(|a: i64| f64::from_bits(a as u64)),
+                op::I32_WRAP_I64 => un!(|a: i64| a as i32),
+                op::I32_TRUNC_F32_S => un_try!(i32_trunc_f32_s),
+                op::I32_TRUNC_F32_U => un_try!(|a: f32| i32_trunc_f32_u(a).map(|v| v as i32)),
+                op::I32_TRUNC_F64_S => un_try!(i32_trunc_f64_s),
+                op::I32_TRUNC_F64_U => un_try!(|a: f64| i32_trunc_f64_u(a).map(|v| v as i32)),
+                op::I64_EXTEND_I32_S => un!(|a: i32| a as i64),
+                op::I64_EXTEND_I32_U => un!(|a: i32| a as u32 as i64),
+                op::I64_TRUNC_F32_S => un_try!(i64_trunc_f32_s),
+                op::I64_TRUNC_F32_U => un_try!(|a: f32| i64_trunc_f32_u(a).map(|v| v as i64)),
+                op::I64_TRUNC_F64_S => un_try!(i64_trunc_f64_s),
+                op::I64_TRUNC_F64_U => un_try!(|a: f64| i64_trunc_f64_u(a).map(|v| v as i64)),
+                op::F32_CONVERT_I32_S => un!(|a: i32| a as f32),
+                op::F32_CONVERT_I32_U => un!(|a: i32| a as u32 as f32),
+                op::F32_CONVERT_I64_S => un!(|a: i64| a as f32),
+                op::F32_CONVERT_I64_U => un!(|a: i64| a as u64 as f32),
+                op::F32_DEMOTE_F64 => un!(f32_demote),
+                op::F64_CONVERT_I32_S => un!(|a: i32| a as f64),
+                op::F64_CONVERT_I32_U => un!(|a: i32| a as u32 as f64),
+                op::F64_CONVERT_I64_S => un!(|a: i64| a as f64),
+                op::F64_CONVERT_I64_U => un!(|a: i64| a as u64 as f64),
+                op::F64_PROMOTE_F32 => un!(f64_promote),
+                op::I32_REINTERPRET_F32 => un!(|a: f32| a.to_bits() as i32),
+                op::I64_REINTERPRET_F64 => un!(|a: f64| a.to_bits() as i64),
+                op::F32_REINTERPRET_I32 => un!(|a: i32| f32::from_bits(a as u32)),
+                op::F64_REINTERPRET_I64 => un!(|a: i64| f64::from_bits(a as u64)),
 
                 // ---- sign extension -----------------------------------
-                Instr::I32Extend8S => un!(|a: i32| a as i8 as i32),
-                Instr::I32Extend16S => un!(|a: i32| a as i16 as i32),
-                Instr::I64Extend8S => un!(|a: i64| a as i8 as i64),
-                Instr::I64Extend16S => un!(|a: i64| a as i16 as i64),
-                Instr::I64Extend32S => un!(|a: i64| a as i32 as i64),
+                op::I32_EXTEND8_S => un!(|a: i32| a as i8 as i32),
+                op::I32_EXTEND16_S => un!(|a: i32| a as i16 as i32),
+                op::I64_EXTEND8_S => un!(|a: i64| a as i8 as i64),
+                op::I64_EXTEND16_S => un!(|a: i64| a as i16 as i64),
+                op::I64_EXTEND32_S => un!(|a: i64| a as i32 as i64),
 
                 // ---- saturating truncation (Rust `as` semantics) -------
-                Instr::I32TruncSatF32S => un!(|a: f32| a as i32),
-                Instr::I32TruncSatF32U => un!(|a: f32| a as u32 as i32),
-                Instr::I32TruncSatF64S => un!(|a: f64| a as i32),
-                Instr::I32TruncSatF64U => un!(|a: f64| a as u32 as i32),
-                Instr::I64TruncSatF32S => un!(|a: f32| a as i64),
-                Instr::I64TruncSatF32U => un!(|a: f32| a as u64 as i64),
-                Instr::I64TruncSatF64S => un!(|a: f64| a as i64),
-                Instr::I64TruncSatF64U => un!(|a: f64| a as u64 as i64),
+                op::I32_TRUNC_SAT_F32_S => un!(|a: f32| a as i32),
+                op::I32_TRUNC_SAT_F32_U => un!(|a: f32| a as u32 as i32),
+                op::I32_TRUNC_SAT_F64_S => un!(|a: f64| a as i32),
+                op::I32_TRUNC_SAT_F64_U => un!(|a: f64| a as u32 as i32),
+                op::I64_TRUNC_SAT_F32_S => un!(|a: f32| a as i64),
+                op::I64_TRUNC_SAT_F32_U => un!(|a: f32| a as u64 as i64),
+                op::I64_TRUNC_SAT_F64_S => un!(|a: f64| a as i64),
+                op::I64_TRUNC_SAT_F64_U => un!(|a: f64| a as u64 as i64),
+
+                // ---- superinstructions (see `crate::code`) ------------
+                op::LOCAL_GET_LOCAL_GET => fused!(1, local_get!(a), {
+                    let b = imm_a(word_at!(0));
+                    pc += 1;
+                    stack.local_get(&mut sp, local!(a))?;
+                    stack.local_get(&mut sp, local!(b))?;
+                }),
+                op::LOCAL_GET_I32_CONST => fused!(1, local_get!(a), {
+                    let c = imm_a(word_at!(0));
+                    pc += 1;
+                    stack.local_get(&mut sp, local!(a))?;
+                    push!(c as i32);
+                }),
+                op::I32_CONST_I32_CONST => fused!(1, i32_const!(a), {
+                    let c = imm_a(word_at!(0));
+                    pc += 1;
+                    push!(a as i32);
+                    push!(c as i32);
+                }),
+                op::LOCAL_GET_LOCAL_GET_I32_ADD => {
+                    local2_binop!(a, |x: i32, y: i32| x.wrapping_add(y))
+                }
+                op::LOCAL_GET_LOCAL_GET_I32_SUB => {
+                    local2_binop!(a, |x: i32, y: i32| x.wrapping_sub(y))
+                }
+                op::LOCAL_GET_LOCAL_GET_I32_LT_U => {
+                    local2_binop!(a, |x: i32, y: i32| (x as u32) < (y as u32))
+                }
+                op::LOCAL_GET_LOCAL_GET_I32_GT_U => {
+                    local2_binop!(a, |x: i32, y: i32| (x as u32) > (y as u32))
+                }
+                op::LOCAL_GET_LOCAL_GET_I32_EQ => local2_binop!(a, |x: i32, y: i32| x == y),
+                op::LOCAL_GET_I32_CONST_I32_ADD => {
+                    local_get_const_binop!(a, |x: i32, c: i32| x.wrapping_add(c))
+                }
+                op::LOCAL_GET_I32_CONST_I32_SUB => {
+                    local_get_const_binop!(a, |x: i32, c: i32| x.wrapping_sub(c))
+                }
+                op::LOCAL_GET_I32_CONST_I32_AND => {
+                    local_get_const_binop!(a, |x: i32, c: i32| x & c)
+                }
+                op::LOCAL_GET_I32_CONST_I32_OR => local_get_const_binop!(a, |x: i32, c: i32| x | c),
+                op::LOCAL_GET_I32_CONST_I32_SHL => {
+                    local_get_const_binop!(a, |x: i32, c: i32| x.wrapping_shl(c as u32))
+                }
+                op::LOCAL_GET_I32_CONST_I32_SHR_U => {
+                    local_get_const_binop!(a, |x: i32, c: i32| (x as u32).wrapping_shr(c as u32)
+                        as i32)
+                }
+                op::LOCAL_GET_I32_CONST_I32_LT_U => {
+                    local_get_const_binop!(a, |x: i32, c: i32| (x as u32) < (c as u32))
+                }
+                op::LOCAL_GET_I32_CONST_I32_GT_U => {
+                    local_get_const_binop!(a, |x: i32, c: i32| (x as u32) > (c as u32))
+                }
+                op::LOCAL_GET_I32_CONST_I32_LT_S => {
+                    local_get_const_binop!(a, |x: i32, c: i32| x < c)
+                }
+                op::LOCAL_GET_I32_CONST_I32_GT_S => {
+                    local_get_const_binop!(a, |x: i32, c: i32| x > c)
+                }
+                op::LOCAL_GET_I32_CONST_I32_EQ => {
+                    local_get_const_binop!(a, |x: i32, c: i32| x == c)
+                }
+                op::LOCAL_GET_I32_CONST_I32_NE => {
+                    local_get_const_binop!(a, |x: i32, c: i32| x != c)
+                }
+                op::LOCAL_GET_LOCAL_GET_I32_ADD_LOCAL_SET => fused!(3, local_get!(a), {
+                    let b = imm_a(word_at!(0));
+                    let d = imm_a(word_at!(2));
+                    pc += 3;
+                    stack.local2_bin_set(local!(a), local!(b), local!(d), |x: i32, y: i32| {
+                        x.wrapping_add(y)
+                    })?;
+                }),
+                op::LOCAL_GET_I32_CONST_I32_ADD_LOCAL_SET => fused!(3, local_get!(a), {
+                    let c = imm_a(word_at!(0)) as i32;
+                    let d = imm_a(word_at!(2));
+                    pc += 3;
+                    stack.local_bin_set(local!(a), local!(d), |x: i32| x.wrapping_add(c))?;
+                }),
+                op::I32_CONST_I32_ADD => const_binop!(a, |x: i32, c: i32| x.wrapping_add(c)),
+                op::I32_CONST_I32_SUB => const_binop!(a, |x: i32, c: i32| x.wrapping_sub(c)),
+                op::I32_CONST_I32_AND => const_binop!(a, |x: i32, c: i32| x & c),
+                op::I32_CONST_I32_OR => const_binop!(a, |x: i32, c: i32| x | c),
+                op::I32_CONST_I32_SHL => const_binop!(a, |x: i32, c: i32| x.wrapping_shl(c as u32)),
+                op::I32_CONST_I32_SHR_U => {
+                    const_binop!(a, |x: i32, c: i32| (x as u32).wrapping_shr(c as u32) as i32)
+                }
+                op::I32_CONST_I32_LT_U => const_binop!(a, |x: i32, c: i32| (x as u32) < (c as u32)),
+                op::I32_CONST_I32_GT_U => const_binop!(a, |x: i32, c: i32| (x as u32) > (c as u32)),
+                op::I32_CONST_I32_LT_S => const_binop!(a, |x: i32, c: i32| x < c),
+                op::I32_CONST_I32_GT_S => const_binop!(a, |x: i32, c: i32| x > c),
+                op::I32_CONST_I32_EQ => const_binop!(a, |x: i32, c: i32| x == c),
+                op::I32_CONST_I32_NE => const_binop!(a, |x: i32, c: i32| x != c),
+                op::I32_CONST_LOCAL_SET => fused!(1, i32_const!(a), {
+                    let d = imm_a(word_at!(0));
+                    pc += 1;
+                    stack.const_set(local!(d), a as i32)?;
+                }),
+                op::I32_ADD_LOCAL_SET => fused!(1, i32_add!(), {
+                    let d = imm_a(word_at!(0));
+                    pc += 1;
+                    stack.bin_set(&mut sp, local!(d), |x: i32, y: i32| x.wrapping_add(y))?;
+                }),
+                op::LOCAL_GET_I32_LOAD => fused!(1, local_get!(a), {
+                    let offset = imm_a(word_at!(0));
+                    pc += 1;
+                    let addr = stack.local_as::<i32>(local!(a))?;
+                    let v = i32::from_le_bytes(mem.load::<4>(addr as u32, offset)?);
+                    push!(v);
+                }),
+                op::LOCAL_GET_LOCAL_GET_I32_STORE => fused!(2, local_get!(a), {
+                    let b = imm_a(word_at!(0));
+                    let offset = imm_a(word_at!(1));
+                    pc += 2;
+                    let addr = stack.local_as::<i32>(local!(a))?;
+                    let v = stack.local_as::<i32>(local!(b))?;
+                    mem.store(addr as u32, offset, &v.to_le_bytes())?;
+                }),
+                op::LOCAL_GET_I32_CONST_I32_STORE => fused!(2, local_get!(a), {
+                    let v = imm_a(word_at!(0));
+                    let offset = imm_a(word_at!(1));
+                    pc += 2;
+                    let addr = stack.local_as::<i32>(local!(a))?;
+                    mem.store(addr as u32, offset, &v.to_le_bytes())?;
+                }),
+                op::I32_EQZ_BR_IF => fused!(1, un!(|a: i32| a == 0), {
+                    let bw = word_at!(0);
+                    pc += 1;
+                    br_if!(pop!(i32) == 0, bw);
+                }),
+                op::I32_EQ_BR_IF => relop_br_if!(|a: i32, b: i32| a == b),
+                op::I32_NE_BR_IF => relop_br_if!(|a: i32, b: i32| a != b),
+                op::I32_LT_S_BR_IF => relop_br_if!(|a: i32, b: i32| a < b),
+                op::I32_LT_U_BR_IF => relop_br_if!(|a: i32, b: i32| (a as u32) < (b as u32)),
+                op::I32_GT_S_BR_IF => relop_br_if!(|a: i32, b: i32| a > b),
+                op::I32_GT_U_BR_IF => relop_br_if!(|a: i32, b: i32| (a as u32) > (b as u32)),
+                op::I32_LE_S_BR_IF => relop_br_if!(|a: i32, b: i32| a <= b),
+                op::I32_LE_U_BR_IF => relop_br_if!(|a: i32, b: i32| (a as u32) <= (b as u32)),
+                op::I32_GE_S_BR_IF => relop_br_if!(|a: i32, b: i32| a >= b),
+                op::I32_GE_U_BR_IF => relop_br_if!(|a: i32, b: i32| (a as u32) >= (b as u32)),
+
+                op::COUNT..=u8::MAX => return Err(Trap::Invalid),
             }
         }
     }

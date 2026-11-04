@@ -1,4 +1,4 @@
 [toolchain]
 channel = "stable"
 components = ["rust-src", "llvm-tools"]
-targets = ["aarch64-unknown-none", "wasm32-unknown-unknown"]
+targets = ["aarch64-unknown-none", "wasm32-unknown-unknown", "wasm32-wasip1"]

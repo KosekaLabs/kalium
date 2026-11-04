@@ -195,10 +195,14 @@ fn run_slice(k: &mut Kernel, meter: &mut FuelMeter, tid: ThreadId, slice_ns: u64
     loop {
         let chunk = chunk_fuel.min(slice_fuel.saturating_sub(used)).max(1);
         let t0 = timer::now_ns();
+        let fuel_before = run.exec.fuel_used();
         let mut host = HostCall::new(k, idx);
         let result = run.exec.run(&mut run.wasm, &mut host, chunk);
         let effect = host.effect;
         let t1 = timer::now_ns();
+        k.instances[idx].instructions = k.instances[idx]
+            .instructions
+            .saturating_add(run.exec.fuel_used().saturating_sub(fuel_before));
         match result {
             ExecResult::OutOfFuel => {
                 meter.observe(chunk, t1.saturating_sub(t0));

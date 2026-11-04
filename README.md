@@ -58,6 +58,18 @@ capability to `greedy`, a hostile service that spawns and forgets instances
 until the kernel's instance limit refuses it. `init` observes each exit
 through `instance_wait`, and the kernel exits QEMU with the result.
 
+The kernel also speaks WASI preview1: the `wasi_snapshot_preview1` import
+module resolves for every instance, with the standard streams mapped onto
+the instance's console and channel capabilities, `proc_exit` onto the
+instance's exit, the clocks onto the HAL's counter, and no files, sockets
+or preopens (`docs/prototype-plan.md`, "WASI preview1 compatibility"). So
+ordinary programs built for `wasm32-wasip1` run unchanged: the boot image
+carries two of them from `demos/`, a Rust `std` program (`println!`, `Vec`,
+`HashMap`, floats, `thread::sleep`, `process::exit(3)`, about 100 KB) and a
+C program compiled with clang and wasi-libc (`printf`, `malloc`, `qsort`,
+`strtod`, `snprintf`, `time()`, exit code 5, about 190 KB), and `cargo xtask
+test` asserts their output and exit codes.
+
 The interpreter runs at roughly 11 to 16 million Wasm instructions per second
 under QEMU TCG on a laptop-class host, and 300 to 450 million natively
 (`cargo run -p kalium-wasm --release --example bench`). Ahead-of-time compilation, MMU-backed
@@ -67,7 +79,7 @@ To build and run (needs the toolchain from `rust-toolchain.toml` and
 `qemu-system-aarch64`):
 
 ```
-cargo xtask wasm    # build the SDK example services to target/wasm/
+cargo xtask wasm    # build the SDK example services and the WASI demos to target/wasm/
 cargo xtask build   # wasm, then the kernel for aarch64-unknown-none
 cargo xtask run     # build, then boot in QEMU on the terminal
 cargo xtask test    # host tests, build, boot in QEMU and check the scenario
@@ -78,7 +90,7 @@ cargo xtask fmt-check  # formatting for both workspaces
 ```
 
 [docs/running.md](docs/running.md) has the QEMU command line, the expected
-output and how to write and add a service.
+output, how to write and add a service, and the WASI demos.
 
 ## License
 

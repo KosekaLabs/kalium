@@ -127,6 +127,10 @@ pub struct Inst {
     pub yield_pending: bool,
     /// Objects on whose wait queue this thread is parked.
     pub parked_on: Vec<ObjectId>,
+    /// State of the WASI compatibility layer (stdin buffer, RNG, poll).
+    pub wasi: crate::wasi::State,
+    /// Instructions the interpreter has executed for this instance.
+    pub instructions: u64,
 }
 
 /// Why `spawn` failed to create an instance.
@@ -502,6 +506,8 @@ impl Kernel {
             sleep_until: None,
             yield_pending: false,
             parked_on: Vec::new(),
+            wasi: crate::wasi::State::default(),
+            instructions: 0,
         };
         if id == self.instances.len() {
             self.instances.push(inst);
@@ -530,6 +536,7 @@ impl Kernel {
         inst.yield_pending = false;
         let name = inst.name;
         let object = inst.object;
+        let instructions = inst.instructions;
         let caps: Vec<Capability> = inst.caps.iter().map(|(_, c)| *c).collect();
         inst.caps = CapTable::new(CAP_TABLE_LIMIT);
 
@@ -539,7 +546,10 @@ impl Kernel {
                 instance, name, stats.periods, stats.met, stats.missed, stats.budget_exhausted
             );
         }
-        println!("kalium: instance {} ({}) exited {}", instance, name, code);
+        println!(
+            "kalium: instance {} ({}) exited {} after {} instructions",
+            instance, name, code, instructions
+        );
 
         self.unpark(tid);
         if self.sched.current() != Some(tid) {

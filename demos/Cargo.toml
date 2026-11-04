@@ -1,0 +1,27 @@
+# WASI demo programs: ordinary programs for `wasm32-wasip1`, built by
+# `cargo xtask demos` (part of `cargo xtask wasm`) with
+#   cargo build --release --target wasm32-wasip1 --manifest-path demos/Cargo.toml
+# and copied to target/wasm/ for the kernel's boot image. They do not use the
+# Kalium SDK: they talk to the kernel's WASI preview1 layer only, exactly as
+# they would to any other WASI runtime.
+[workspace]
+resolver = "2"
+members = ["hello-std"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+# Small code for the boot image: size optimization, LTO, abort on panic,
+# no debug info or names.
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = true
+codegen-units = 1
+debug = false
+strip = true
+
+[profile.dev]
+panic = "abort"

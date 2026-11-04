@@ -22,8 +22,10 @@ cargo xtask wasm
 builds every example in release mode (`opt-level = "s"`, LTO, `panic =
 "abort"`, stripped) and copies them to `target/wasm/<name>.wasm` in boot
 image order (`init=0, ping=1, pong=2, rt=3, fair=4, faulty=5, park=6,
-greedy=7`). The kernel's `build.rs` embeds them from there. To build by
-hand:
+greedy=7`), then builds the WASI demo programs from `demos/` after them
+(`hello_std=8, hello_c=9`; they do not use the SDK, see
+`docs/running.md`, "The WASI demos"). The kernel's `build.rs` embeds them
+all from there. To build the SDK examples by hand:
 
 ```
 cargo build --release --target wasm32-unknown-unknown --manifest-path sdk/Cargo.toml
@@ -166,5 +168,8 @@ instances and drops their capabilities until the kernel refuses with
 `ENOMEM` at its instance limit (`greedy: spawn refused (ENOMEM) after 30
 instances`), releases them by closing the channel they block on, and spawns
 once more to show the slots are reused (`greedy: slot reclaimed, park exited
-0`). `init` waits for each instance, prints `init: <name> exited <code>` for
+0`). Between `faulty` and `greedy`, `init` runs the two WASI demos
+(`hello_std`, exit 3, and `hello_c`, exit 5) with a console capability each,
+`hello_c` also with the receive end of a channel as its stdin.
+`init` waits for each instance, prints `init: <name> exited <code>` for
 each, prints `init: done` and exits with 0.

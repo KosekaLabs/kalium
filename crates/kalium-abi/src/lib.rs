@@ -495,6 +495,35 @@ pub mod limits {
     pub const MAX_INSTANCES: usize = 32;
 }
 
+/// The WASI preview1 compatibility layer (`docs/prototype-plan.md`, "WASI
+/// preview1 compatibility"): the import module the kernel resolves for
+/// every instance and the capability slots its standard streams map onto.
+///
+/// These are additions beside the host ABI, not part of it: the module is
+/// deliberately absent from [`imports::MODULES`] and [`imports::ALL_IMPORTS`],
+/// whose function table is Kalium's own. The function names and signatures
+/// of the snapshot are declared in the kernel (`kernel/src/wasi.rs`).
+pub mod wasi {
+    /// The import module name of WASI preview1.
+    pub const MODULE: &str = "wasi_snapshot_preview1";
+
+    /// Capability slot that backs fds 1 and 2 (stdout, stderr): a `Console`
+    /// with `WRITE`. Without it `fd_write` fails with WASI `EBADF`.
+    pub const STDOUT_CONSOLE_SLOT: i32 = 0;
+    /// Capability slot that backs fd 0 (stdin): a `Channel` with `RECV`,
+    /// each message a chunk of input. Without it `fd_read` fails with WASI
+    /// `EBADF`.
+    pub const STDIN_CHANNEL_SLOT: i32 = 1;
+
+    /// WASI file descriptor numbers of the standard streams, the only fds
+    /// that exist.
+    pub const FD_STDIN: i32 = 0;
+    /// See [`FD_STDIN`].
+    pub const FD_STDOUT: i32 = 1;
+    /// See [`FD_STDIN`].
+    pub const FD_STDERR: i32 = 2;
+}
+
 /// Scheduling class values passed to `spawn`.
 ///
 /// > `class` is `0` fair, `1` real-time.
@@ -736,6 +765,20 @@ mod tests {
         assert_eq!(layout::RECV_HEADER_LEN_OFFSET, 0);
         assert_eq!(layout::RECV_HEADER_NCAPS_OFFSET, 4);
         assert_eq!(layout::CAP_INDEX_SIZE, core::mem::size_of::<i32>());
+    }
+
+    #[test]
+    fn wasi_constants() {
+        assert_eq!(wasi::MODULE, "wasi_snapshot_preview1");
+        // WASI is beside the host ABI, not in its import table.
+        assert!(!imports::is_known_module(wasi::MODULE));
+        assert_eq!(imports::lookup(wasi::MODULE, "fd_write"), None);
+        assert_eq!(wasi::STDOUT_CONSOLE_SLOT, 0);
+        assert_eq!(wasi::STDIN_CHANNEL_SLOT, 1);
+        assert_eq!(
+            [wasi::FD_STDIN, wasi::FD_STDOUT, wasi::FD_STDERR],
+            [0, 1, 2]
+        );
     }
 
     #[test]

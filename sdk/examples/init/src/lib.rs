@@ -1,11 +1,14 @@
 //! `init`: the first instance. Runs the M1 boot-test scenario from
-//! `docs/prototype-plan.md` and reports every child's exit code.
+//! `docs/prototype-plan.md` (plus the WASI demos of module 8 and 9) and
+//! reports every child's exit code.
 //!
 //! Initial capabilities: slot 0 `Console(WRITE|DERIVE|TRANSFER)`, slot 1
 //! `Spawn(SPAWN|TRANSFER)`.
 #![no_std]
 
-use kalium_sdk::{exit, rights, spawn, Cap, Channel, Class, Console, Errno, Instance, Line};
+use kalium_sdk::{
+    cap_drop, exit, rights, spawn, Cap, Channel, Class, Console, Errno, Instance, Line,
+};
 
 /// Boot image module indices (the order `cargo xtask wasm` lays out and
 /// the kernel's `build.rs` embeds).
@@ -15,6 +18,9 @@ const MOD_RT: u32 = 3;
 const MOD_FAIR: u32 = 4;
 const MOD_FAULTY: u32 = 5;
 const MOD_GREEDY: u32 = 7;
+/// The WASI demos (`demos/`): a Rust `std` program and a C program.
+const MOD_HELLO_STD: u32 = 8;
+const MOD_HELLO_C: u32 = 9;
 
 /// `rt` parameters: period 2 ms, budget 500 µs.
 const RT_PERIOD_NS: i64 = 2_000_000;
@@ -71,6 +77,36 @@ pub extern "C" fn _start() {
     let faulty = spawn_fair(spawner, MOD_FAULTY, &[], "faulty");
     report("faulty", faulty);
 
+    // Phase 3b: the WASI demos. Ordinary wasm32-wasip1 programs that know
+    // nothing of Kalium; their console capability in slot 0 is their
+    // stdout/stderr. hello_std exits 3.
+    let demo_console = derive_demo_console(console);
+    let hello_std = spawn_fair(spawner, MOD_HELLO_STD, &[demo_console], "hello_std");
+    report("hello_std", hello_std);
+
+    // hello_c also reads its stdin: the receive end of a channel in slot 1,
+    // each message one chunk of input, filled before the spawn with a line,
+    // a word and an empty message (end of file). init keeps the sending end
+    // until hello_c has exited, so a read that blocked on the empty channel
+    // instead of returning (a zero-length read must not) would deadlock the
+    // kernel rather than pass as end of file. hello_c exits 5.
+    let (stdin_tx, stdin_rx) =
+        Channel::create().unwrap_or_else(|e| fail("channel_create (hello_c stdin)", e));
+    for msg in [&b"hello\n"[..], b"world", b""] {
+        stdin_tx
+            .send(msg, &[])
+            .unwrap_or_else(|e| fail("send (hello_c stdin)", e));
+    }
+    let demo_console = derive_demo_console(console);
+    let hello_c = spawn_fair(
+        spawner,
+        MOD_HELLO_C,
+        &[demo_console, stdin_rx.cap()],
+        "hello_c",
+    );
+    report("hello_c", hello_c);
+    cap_drop(stdin_tx.cap()).unwrap_or_else(|e| fail("cap_drop (hello_c stdin)", e));
+
     // Phase 4: a hostile spawner. `greedy` floods the kernel with `park`
     // instances, dropping their capabilities, until the kernel-wide instance
     // limit refuses it, then shows the slots come back. It takes init's
@@ -94,6 +130,14 @@ fn console() -> Console {
 
 fn say(s: &str) {
     let _ = console().println(s);
+}
+
+/// A write-only console for a WASI demo (its stdout and stderr).
+fn derive_demo_console(console: Console) -> Cap {
+    console
+        .cap()
+        .derive(rights::WRITE | rights::TRANSFER)
+        .unwrap_or_else(|e| fail("cap_derive (demo console)", e))
 }
 
 fn spawn_fair(spawner: Cap, module: u32, caps: &[Cap], name: &str) -> Instance {

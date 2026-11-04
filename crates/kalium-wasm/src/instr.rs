@@ -37,6 +37,13 @@
 //! `br_table` keeps its targets in a side table ([`FuncBody::br_tables`])
 //! so that `Instr` stays a small, `Copy` enum (`size_of::<Instr>() == 16`).
 //!
+//! This is the decoded and validated form, what the validator and the
+//! tests work on. The interpreter does not run it directly: at
+//! instantiation every body is compiled into a denser encoding with the
+//! branches resolved to absolute targets and stack heights (the private
+//! `code` module), which is what the label-stack description above
+//! amounts to once the heights are known statically.
+//!
 //! ## Immediates
 //!
 //! - Float constants are stored as raw bits (`F32Const(u32)`, `F64Const(u64)`)
