@@ -1,0 +1,49 @@
+[workspace]
+resolver = "2"
+members = [
+    "kernel",
+    "crates/kalium-abi",
+    "crates/kalium-wasm",
+    "crates/kalium-hal",
+    "crates/kalium-mm",
+    "crates/kalium-cap",
+    "crates/kalium-ipc",
+    "crates/kalium-sched",
+    "xtask",
+]
+# Host-testable crates. `cargo test` at the root runs these. The kernel binary
+# and the wasm examples are built through `cargo xtask`.
+default-members = [
+    "crates/kalium-abi",
+    "crates/kalium-wasm",
+    "crates/kalium-mm",
+    "crates/kalium-cap",
+    "crates/kalium-ipc",
+    "crates/kalium-sched",
+]
+# The SDK and examples target wasm32 and have their own workspace in sdk/.
+exclude = ["sdk"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/koseka/kalium"
+
+[workspace.dependencies]
+kalium-abi = { path = "crates/kalium-abi" }
+kalium-wasm = { path = "crates/kalium-wasm" }
+kalium-hal = { path = "crates/kalium-hal" }
+kalium-mm = { path = "crates/kalium-mm" }
+kalium-cap = { path = "crates/kalium-cap" }
+kalium-ipc = { path = "crates/kalium-ipc" }
+kalium-sched = { path = "crates/kalium-sched" }
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
+debug = true
+
+[profile.dev]
+panic = "abort"

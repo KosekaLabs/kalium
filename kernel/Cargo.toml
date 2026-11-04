@@ -1,0 +1,21 @@
+[package]
+name = "kalium-kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "kalium"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+kalium-abi.workspace = true
+kalium-wasm.workspace = true
+kalium-hal.workspace = true
+kalium-mm.workspace = true
+kalium-cap.workspace = true
+kalium-ipc.workspace = true
+kalium-sched.workspace = true

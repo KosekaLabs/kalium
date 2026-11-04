@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = ["kalium-sdk", "examples/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+kalium-abi = { path = "../crates/kalium-abi" }
+kalium-sdk = { path = "kalium-sdk" }
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = true
+
+[profile.dev]
+panic = "abort"

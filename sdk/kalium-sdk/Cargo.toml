@@ -1,0 +1,8 @@
+[package]
+name = "kalium-sdk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+kalium-abi.workspace = true

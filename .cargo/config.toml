@@ -1,0 +1,9 @@
+[alias]
+xtask = "run -p xtask --"
+
+[target.aarch64-unknown-none]
+rustflags = [
+    "-C", "link-arg=-Tkernel/link.ld",
+    "-C", "relocation-model=static",
+    "-C", "target-cpu=cortex-a72",
+]
