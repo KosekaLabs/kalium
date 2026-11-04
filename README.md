@@ -33,10 +33,45 @@ built out of WebAssembly modules that the OS ships next to it.
 - [docs/architecture.md](docs/architecture.md): design, subsystems, the host
   ABI, security model, scheduling, memory, the NPU path, and a proposed
   crate layout.
+- [docs/prototype-plan.md](docs/prototype-plan.md): the M1 prototype
+  contract: definition of done, host ABI tables, crate contracts.
+- [docs/running.md](docs/running.md): building, running and testing the
+  prototype on QEMU; adding a service.
+- [sdk/README.md](sdk/README.md): the service SDK and the example services.
 
 ## Status
 
-Design phase. There is no code yet; the architecture document is the plan.
+Milestone M1, the first prototype, is complete: a `no_std` Rust kernel that
+boots on QEMU `virt` (aarch64) and runs WebAssembly services through its own
+interpreter, with capabilities, channels, memory objects and a two-class
+(real-time EDF plus weighted fair) scheduler. Everything above the kernel is
+WebAssembly built with the SDK in `sdk/`.
+
+What the boot image does today (`docs/prototype-plan.md`, "M1 definition of
+done"): the `init` service prints through its console capability, spawns
+`ping` and `pong`, which exchange 100 messages over a channel with a memory
+object transferred in the last one; spawns two busy-looping fair instances
+and a real-time one (period 2 ms, budget 500 µs) that meets its periods under
+that load; spawns `faulty`, which traps on an out-of-bounds load and is
+reported by the kernel while everything else continues. `init` observes each
+exit through `instance_wait`, and the kernel exits QEMU with the result.
+
+The interpreter runs at roughly 12 million Wasm instructions per second under
+QEMU TCG on a laptop-class host. Ahead-of-time compilation, MMU-backed
+instance memory, SMP and devices are future milestones.
+
+To build and run (needs the toolchain from `rust-toolchain.toml` and
+`qemu-system-aarch64`):
+
+```
+cargo xtask wasm    # build the SDK example services to target/wasm/
+cargo xtask build   # wasm, then the kernel for aarch64-unknown-none
+cargo xtask run     # build, then boot in QEMU on the terminal
+cargo xtask test    # host tests, build, boot in QEMU and check the scenario
+```
+
+[docs/running.md](docs/running.md) has the QEMU command line, the expected
+output and how to write and add a service.
 
 ## License
 
