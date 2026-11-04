@@ -330,16 +330,25 @@ so that services and the SDK depend on it alone.
 
 ## Roadmap
 
+Done in the prototype (see [status.md](status.md) for details and numbers):
+
 1. Boot on QEMU `virt` (aarch64) with a serial console and the interpreter
-   running a hello-world module.
-2. Memory objects, capabilities, IPC, two instances talking.
-3. Scheduler with both classes and a synthetic RT load test.
-4. Single-pass AOT compiler; run a shelf-candidate JS engine compiled to
-   Wasm.
-5. Display and input on QEMU; first compositor service from QualiaOS.
-6. First real SoC: HAL, display, audio, NPU driver. Pick the SoC by NPU
+   running Wasm services. Done.
+2. Memory objects, capabilities (with derivation and revocation), IPC with
+   capability transfer, instances talking. Done.
+3. Scheduler with both classes and a real-time load test. Done.
+4. Interpreter performance work, cross-instance imports, snapshots for fast
+   start, WASI preview1 so unmodified Rust std and C programs run. Done.
+
+Next:
+
+5. Single-pass AOT compiler for aarch64; run a shelf-candidate JS engine
+   compiled to Wasm.
+6. SMP: secondary cores, per-core run loops, cross-core channels.
+7. Display and input on QEMU; first compositor service from QualiaOS.
+8. First real SoC: HAL, display, audio, NPU driver. Pick the SoC by NPU
    openness.
-7. Agent service running a stub model at the target cadence with the RT
+9. Agent service running a stub model at the target cadence with the RT
    guarantees measured.
 
 ## Open questions
