@@ -7,7 +7,7 @@ capabilities gate everything, and how the parts of QualiaOS that matter to
 the kernel (the runtime shelf, the system agent, the NPU) are supported.
 
 The system-level picture, including the services and apps that run on top of
-Kalium, is in the [QualiaOS documentation](https://github.com/koseka/qualia-os).
+Kalium, is in the [QualiaOS documentation](https://github.com/KosekaLabs/qualia-os).
 
 ## Goals
 

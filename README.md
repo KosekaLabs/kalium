@@ -1,6 +1,6 @@
 # Kalium
 
-Kalium is the kernel of [QualiaOS](https://github.com/koseka/qualia-os). It is
+Kalium is the kernel of [QualiaOS](https://github.com/KosekaLabs/qualia-os). It is
 written entirely in Rust, runs on bare metal on mobile SoCs, and executes
 exactly one kind of program: WebAssembly.
 
