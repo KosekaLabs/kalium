@@ -37,11 +37,9 @@
 //! Initial capabilities: slot 0 `Console(WRITE)`.
 #![no_std]
 
-use kalium_sdk::abi::limits::{
-    CHANNEL_QUEUE_DEPTH, MAX_MEMOBJ_SIZE, MAX_MESSAGE_CAPS, MAX_MESSAGE_LEN,
-};
+use kalium_sdk::abi::limits::{CHANNEL_QUEUE_DEPTH, MAX_MEMOBJ_SIZE, MAX_MESSAGE_CAPS, MAX_MESSAGE_LEN};
 use kalium_sdk::abi::rights;
-use kalium_sdk::{cap_drop, exit, Cap, Channel, Console, Errno, Line, MemObj, Sender};
+use kalium_sdk::{Cap, Channel, Console, Errno, Line, MemObj, Sender, cap_drop, exit};
 
 /// Well past any sane quota: the kernel is broken if it still says yes.
 const GIVE_UP: u32 = 4096;
@@ -50,7 +48,7 @@ const GIVE_UP: u32 = 4096;
 /// one per page.
 const GROW_STEP: usize = 64;
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn _start() {
     let console = Console::from_cap(Cap::slot(0));
 
@@ -159,10 +157,7 @@ pub extern "C" fn _start() {
         Err(Errno::NoMem) => (None, "ENOMEM"),
         Err(e) => fail(console, "channel_create (fresh)", e),
     };
-    let _ = Line::new()
-        .str("hog: send 4096 bytes on a fresh channel: ")
-        .str(verdict)
-        .println(console);
+    let _ = Line::new().str("hog: send 4096 bytes on a fresh channel: ").str(verdict).println(console);
 
     // Messages with no payload but the most capabilities a message may
     // carry, each derived from a channel end this instance keeps: the
@@ -238,11 +233,6 @@ fn memory_size() -> usize {
 }
 
 fn fail(console: Console, what: &str, e: Errno) -> ! {
-    let _ = Line::new()
-        .str("hog: ")
-        .str(what)
-        .str(" failed: ")
-        .errno(e)
-        .println(console);
+    let _ = Line::new().str("hog: ").str(what).str(" failed: ").errno(e).println(console);
     exit(1)
 }

@@ -39,11 +39,11 @@ use crate::fdt;
 
 /// Value of `x0` at entry (the device tree address when a loader passes one).
 /// Written by the boot code before `kmain`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 static KALIUM_BOOT_X0: AtomicU64 = AtomicU64::new(0);
 
 /// Exception level the kernel was entered at (1 or 2). Written by boot code.
-#[no_mangle]
+#[unsafe(no_mangle)]
 static KALIUM_BOOT_EL: AtomicU64 = AtomicU64::new(0);
 
 global_asm!(
@@ -134,7 +134,7 @@ _start:
 "#
 );
 
-extern "C" {
+unsafe extern "C" {
     static __kernel_start: u8;
     static __kernel_end: u8;
     static __text_start: u8;
@@ -295,11 +295,7 @@ static DTB_SIZE: AtomicUsize = AtomicUsize::new(0);
 /// the reader's own limit.
 fn dtb_limit(dtb: usize) -> usize {
     let image = kernel_image_range().start;
-    if dtb < image {
-        (image - dtb).min(fdt::MAX_SIZE)
-    } else {
-        fdt::MAX_SIZE
-    }
+    if dtb < image { (image - dtb).min(fdt::MAX_SIZE) } else { fdt::MAX_SIZE }
 }
 
 /// Size RAM from the device tree, falling back to the linker default.
@@ -309,18 +305,8 @@ pub fn ram_info() -> RamInfo {
     let dtb = dtb_address();
     let cached = RAM_END.load(Ordering::Relaxed);
     if cached != 0 {
-        let source = if RAM_FROM_DTB.load(Ordering::Relaxed) != 0 {
-            RamSource::DeviceTree
-        } else {
-            RamSource::LinkerDefault
-        };
-        return RamInfo {
-            start: RAM_START,
-            end: cached,
-            source,
-            dtb,
-            dtb_size: DTB_SIZE.load(Ordering::Relaxed),
-        };
+        let source = if RAM_FROM_DTB.load(Ordering::Relaxed) != 0 { RamSource::DeviceTree } else { RamSource::LinkerDefault };
+        return RamInfo { start: RAM_START, end: cached, source, dtb, dtb_size: DTB_SIZE.load(Ordering::Relaxed) };
     }
 
     let image = kernel_image_range();
@@ -345,27 +331,14 @@ pub fn ram_info() -> RamInfo {
         // memory begins) and leave room after the image to be usable.
         Some(bank) if bank.start as usize == RAM_START => {
             let end = page_floor(bank.end.min(MAPPED_LIMIT as u64) as usize);
-            if end > image.end {
-                (end, RamSource::DeviceTree)
-            } else {
-                (fallback_end, RamSource::LinkerDefault)
-            }
+            if end > image.end { (end, RamSource::DeviceTree) } else { (fallback_end, RamSource::LinkerDefault) }
         }
         _ => (fallback_end, RamSource::LinkerDefault),
     };
     DTB_SIZE.store(dtb_size, Ordering::Relaxed);
-    RAM_FROM_DTB.store(
-        usize::from(source == RamSource::DeviceTree),
-        Ordering::Relaxed,
-    );
+    RAM_FROM_DTB.store(usize::from(source == RamSource::DeviceTree), Ordering::Relaxed);
     RAM_END.store(end, Ordering::Relaxed);
-    RamInfo {
-        start: RAM_START,
-        end,
-        source,
-        dtb,
-        dtb_size,
-    }
+    RamInfo { start: RAM_START, end, source, dtb, dtb_size }
 }
 
 /// `[__heap_start, end of RAM)`: RAM after the kernel image, up to the size

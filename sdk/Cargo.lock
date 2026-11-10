@@ -4,88 +4,88 @@ version = 4
 
 [[package]]
 name = "fair"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "kalium-sdk",
 ]
 
 [[package]]
 name = "faulty"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "kalium-sdk",
 ]
 
 [[package]]
 name = "greedy"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "kalium-sdk",
 ]
 
 [[package]]
 name = "hog"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "kalium-sdk",
 ]
 
 [[package]]
 name = "init"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "kalium-sdk",
 ]
 
 [[package]]
 name = "kalium-abi"
-version = "0.1.0"
+version = "0.0.0"
 
 [[package]]
 name = "kalium-sdk"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "kalium-abi",
 ]
 
 [[package]]
 name = "park"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "kalium-sdk",
 ]
 
 [[package]]
 name = "ping"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "kalium-sdk",
 ]
 
 [[package]]
 name = "pong"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "kalium-sdk",
 ]
 
 [[package]]
 name = "revoked"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "kalium-sdk",
 ]
 
 [[package]]
 name = "rt"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "kalium-sdk",
 ]
 
 [[package]]
 name = "shelf"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "kalium-sdk",
 ]

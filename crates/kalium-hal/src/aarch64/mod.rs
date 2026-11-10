@@ -27,9 +27,7 @@ unsafe impl<T> Sync for IrqSafe<T> {}
 
 impl<T> IrqSafe<T> {
     pub(crate) const fn new(value: T) -> Self {
-        Self {
-            inner: core::cell::UnsafeCell::new(value),
-        }
+        Self { inner: core::cell::UnsafeCell::new(value) }
     }
 
     pub(crate) fn with<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {

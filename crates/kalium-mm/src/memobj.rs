@@ -49,9 +49,7 @@ pub struct MemObject {
 
 impl fmt::Debug for MemObject {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("MemObject")
-            .field("size", &self.bytes.len())
-            .finish()
+        f.debug_struct("MemObject").field("size", &self.bytes.len()).finish()
     }
 }
 
@@ -69,9 +67,7 @@ impl MemObject {
         // and up); the conversion is checked anyway.
         let len = usize::try_from(size).map_err(|_| MemError::TooBig)?;
         let mut bytes = Vec::new();
-        bytes
-            .try_reserve_exact(len)
-            .map_err(|_| MemError::OutOfMemory)?;
+        bytes.try_reserve_exact(len).map_err(|_| MemError::OutOfMemory)?;
         bytes.resize(len, 0);
         Ok(MemObject { bytes })
     }
@@ -226,11 +222,7 @@ mod tests {
         for _ in 0..20_000 {
             let len = rng.below(300) as usize;
             // Mostly in range, sometimes near or past the end.
-            let offset = if rng.chance(1, 10) {
-                rng.range(size - 300, size + 300)
-            } else {
-                rng.below(size)
-            };
+            let offset = if rng.chance(1, 10) { rng.range(size - 300, size + 300) } else { rng.below(size) };
             let in_bounds = offset.checked_add(len as u64).is_some_and(|e| e <= size);
             if rng.chance(1, 2) {
                 let data: Vec<u8> = (0..len).map(|_| rng.next_u64() as u8).collect();

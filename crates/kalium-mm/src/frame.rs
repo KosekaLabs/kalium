@@ -141,30 +141,17 @@ impl FrameAllocator {
     pub fn new(start: PhysAddr, end: PhysAddr) -> Self {
         let base = start.frame_ceil().unwrap_or(PhysAddr(usize::MAX));
         let end = end.frame_floor();
-        let frames = if end.0 > base.0 {
-            (end.0 - base.0) / FRAME_SIZE
-        } else {
-            0
-        };
+        let frames = if end.0 > base.0 { (end.0 - base.0) / FRAME_SIZE } else { 0 };
         let words = frames.div_ceil(BITS);
         let mut bitmap = alloc::vec![0u64; words];
         // Mark the padding bits of the last word as used.
         let tail_bits = frames % BITS;
-        if tail_bits != 0 {
-            if let Some(last) = bitmap.last_mut() {
-                *last = !0u64 << tail_bits;
-            }
+        if tail_bits != 0
+            && let Some(last) = bitmap.last_mut()
+        {
+            *last = !0u64 << tail_bits;
         }
-        FrameAllocator {
-            base,
-            frames,
-            bitmap,
-            free: frames,
-            hint: 0,
-            allocations: 0,
-            frees: 0,
-            failures: 0,
-        }
+        FrameAllocator { base, frames, bitmap, free: frames, hint: 0, allocations: 0, frees: 0, failures: 0 }
     }
 
     /// First managed frame.
@@ -352,11 +339,7 @@ impl FrameAllocator {
     /// newly reserved.
     pub fn reserve_bytes(&mut self, start: PhysAddr, end: PhysAddr) -> usize {
         let lo = start.frame_floor().0.max(self.base.0);
-        let hi = end
-            .frame_ceil()
-            .map(|a| a.0)
-            .unwrap_or(usize::MAX)
-            .min(self.end().0);
+        let hi = end.frame_ceil().map(|a| a.0).unwrap_or(usize::MAX).min(self.end().0);
         if hi <= lo {
             return 0;
         }
@@ -480,17 +463,11 @@ mod tests {
         let mut a = FrameAllocator::new(pa(2), pa(10));
         let p = a.alloc_frames(2).unwrap();
         let before = a.stats();
-        assert_eq!(
-            a.free_frames(PhysAddr(p.0 + 1), 1),
-            Err(FrameError::Misaligned)
-        );
+        assert_eq!(a.free_frames(PhysAddr(p.0 + 1), 1), Err(FrameError::Misaligned));
         assert_eq!(a.free_frames(pa(1), 1), Err(FrameError::OutOfRange));
         assert_eq!(a.free_frames(pa(10), 1), Err(FrameError::OutOfRange));
         assert_eq!(a.free_frames(pa(9), 2), Err(FrameError::OutOfRange));
-        assert_eq!(
-            a.free_frames(pa(2), usize::MAX),
-            Err(FrameError::OutOfRange)
-        );
+        assert_eq!(a.free_frames(pa(2), usize::MAX), Err(FrameError::OutOfRange));
         // Partially free range: the second frame is already free.
         assert_eq!(a.free_frames(pa(3), 2), Err(FrameError::NotAllocated));
         assert_eq!(a.free_frames(pa(5), 1), Err(FrameError::NotAllocated));
@@ -520,10 +497,7 @@ mod tests {
     fn reserve_bytes_clips_and_rounds_outwards() {
         let mut a = FrameAllocator::new(pa(4), pa(12));
         // Covers frames 5 and 6 (partial on both ends).
-        assert_eq!(
-            a.reserve_bytes(PhysAddr(5 * F + 10), PhysAddr(6 * F + 1)),
-            2
-        );
+        assert_eq!(a.reserve_bytes(PhysAddr(5 * F + 10), PhysAddr(6 * F + 1)), 2);
         assert_eq!(a.is_allocated(pa(5)), Some(true));
         assert_eq!(a.is_allocated(pa(6)), Some(true));
         assert_eq!(a.is_allocated(pa(7)), Some(false));
@@ -581,15 +555,7 @@ mod tests {
         let mut successes = 0;
 
         for step in 0..ops {
-            let do_alloc = live.is_empty()
-                || rng.chance(
-                    if a.free_frames_count() > frames / 2 {
-                        3
-                    } else {
-                        1
-                    },
-                    4,
-                );
+            let do_alloc = live.is_empty() || rng.chance(if a.free_frames_count() > frames / 2 { 3 } else { 1 }, 4);
             if do_alloc {
                 let n = rng.range(1, max_run) as usize;
                 if let Some(p) = a.alloc_frames(n) {
@@ -597,36 +563,24 @@ mod tests {
                     assert!(p.0 + n * F <= arena.len());
                     tag = tag.wrapping_add(1);
                     // Every frame must be unused (all-zero: we re-zero on free).
-                    assert!(
-                        arena[p.0..p.0 + n * F].iter().all(|&b| b == 0),
-                        "overlap at {p}"
-                    );
+                    assert!(arena[p.0..p.0 + n * F].iter().all(|&b| b == 0), "overlap at {p}");
                     arena[p.0..p.0 + n * F].fill(tag);
                     live.push((p, n, tag));
                     successes += 1;
                 } else {
                     // Failure must mean no run of n free frames exists.
-                    assert!(
-                        a.free_frames_count() < n || !has_run(&a, n),
-                        "spurious failure for {n}"
-                    );
+                    assert!(a.free_frames_count() < n || !has_run(&a, n), "spurious failure for {n}");
                 }
             } else {
                 let i = rng.below(live.len() as u64) as usize;
                 let (p, n, t) = live.swap_remove(i);
-                assert!(
-                    arena[p.0..p.0 + n * F].iter().all(|&b| b == t),
-                    "corrupted at {p}"
-                );
+                assert!(arena[p.0..p.0 + n * F].iter().all(|&b| b == t), "corrupted at {p}");
                 arena[p.0..p.0 + n * F].fill(0);
                 a.free_frames(p, n).unwrap();
             }
             if step % 101 == 0 {
                 a.check_invariants().unwrap();
-                assert_eq!(
-                    a.used_frames(),
-                    live.iter().map(|&(_, n, _)| n).sum::<usize>()
-                );
+                assert_eq!(a.used_frames(), live.iter().map(|&(_, n, _)| n).sum::<usize>());
             }
         }
         assert!(successes > ops / 4);

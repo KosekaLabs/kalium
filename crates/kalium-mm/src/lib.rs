@@ -29,9 +29,9 @@ pub mod heap;
 pub mod memobj;
 pub mod spinlock;
 
-pub use frame::{FrameAllocator, FrameError, FrameStats, PhysAddr, FRAME_SIZE};
+pub use frame::{FRAME_SIZE, FrameAllocator, FrameError, FrameStats, PhysAddr};
 pub use heap::{Heap, HeapError, HeapStats, KernelHeap};
-pub use memobj::{MemError, MemObject, MAX_MEMOBJ_BYTES};
+pub use memobj::{MAX_MEMOBJ_BYTES, MemError, MemObject};
 pub use spinlock::{SpinLock, SpinLockGuard};
 
 #[cfg(test)]

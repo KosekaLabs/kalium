@@ -14,7 +14,7 @@ macro_rules! read_sysreg {
 
 /// Write a system register. The caller is responsible for the semantics.
 macro_rules! write_sysreg {
-    ($reg:literal, $val:expr) => {{
+    ($reg:literal, $val:expr_2021) => {{
         let v: u64 = $val;
         // SAFETY: the caller chose the register and value; writes to system
         // registers do not touch Rust-visible memory.

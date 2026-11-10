@@ -505,46 +505,24 @@ fn arity_of(module: &Module, ty: BlockType) -> Option<(u32, u32)> {
 /// `num_imports` the number of imported functions. Never fails (see the
 /// module documentation).
 pub(crate) fn compile_module(module: &Module, arity: &[(u32, u32)], num_imports: usize) -> Program {
-    let mut program = Program {
-        words: Vec::new(),
-        funcs: Vec::with_capacity(arity.len()),
-        locals: Vec::new(),
-        br_tables: Vec::new(),
-    };
+    let mut program =
+        Program { words: Vec::new(), funcs: Vec::with_capacity(arity.len()), locals: Vec::new(), br_tables: Vec::new() };
     for &(np, nr) in arity.iter().take(num_imports) {
-        program.funcs.push(Func {
-            entry: IMPORTED,
-            nparams: np,
-            nresults: nr,
-            locals_start: 0,
-            locals_end: 0,
-            stack: 0,
-        });
+        program.funcs.push(Func { entry: IMPORTED, nparams: np, nresults: nr, locals_start: 0, locals_end: 0, stack: 0 });
     }
     for (body, &(np, nr)) in module.code.iter().zip(arity.iter().skip(num_imports)) {
         let entry = u32::try_from(program.words.len()).unwrap_or(NOWHERE);
         let locals_start = u32::try_from(program.locals.len()).unwrap_or(0);
         program.locals.extend_from_slice(&body.locals);
         let locals_end = u32::try_from(program.locals.len()).unwrap_or(0);
-        let max_height = compile_body(
-            module,
-            arity,
-            body,
-            np,
-            nr,
-            entry,
-            &mut program.words,
-            &mut program.br_tables,
-        );
+        let max_height = compile_body(module, arity, body, np, nr, entry, &mut program.words, &mut program.br_tables);
         program.funcs.push(Func {
             entry,
             nparams: np,
             nresults: nr,
             locals_start,
             locals_end,
-            stack: np
-                .saturating_add(body.locals.len() as u32)
-                .saturating_add(max_height),
+            stack: np.saturating_add(body.locals.len() as u32).saturating_add(max_height),
         });
     }
     program
@@ -643,26 +621,12 @@ impl Tracker<'_> {
     /// The function's own type: what `return` and a branch out of all
     /// blocks carry.
     fn enter(&mut self, nresults: u32) {
-        self.ctrls.push(Ctrl {
-            height: 0,
-            nparams: 0,
-            nresults,
-            cont_after: RETURN,
-            is_loop: false,
-            unreachable: false,
-        });
+        self.ctrls.push(Ctrl { height: 0, nparams: 0, nresults, cont_after: RETURN, is_loop: false, unreachable: false });
     }
 
     fn push_ctrl(&mut self, nparams: u32, nresults: u32, cont_after: u32, is_loop: bool) {
         self.pop(nparams);
-        self.ctrls.push(Ctrl {
-            height: self.height,
-            nparams,
-            nresults,
-            cont_after,
-            is_loop,
-            unreachable: false,
-        });
+        self.ctrls.push(Ctrl { height: self.height, nparams, nresults, cont_after, is_loop, unreachable: false });
         self.push(nparams);
     }
 
@@ -685,11 +649,7 @@ impl Tracker<'_> {
                 height: nlocals.saturating_add(c.height),
                 arity: if c.is_loop { c.nparams } else { c.nresults },
             },
-            _ => Branch {
-                target: RETURN,
-                height: 0,
-                arity: 0,
-            },
+            _ => Branch { target: RETURN, height: 0, arity: 0 },
         }
     }
 
@@ -710,42 +670,31 @@ impl Tracker<'_> {
             | Return => (0, 0),
             Call(f) => self.arity.get(f as usize).copied().unwrap_or((0, 0)),
             CallIndirect { ty, .. } => {
-                let (np, nr) = self
-                    .module
-                    .types
-                    .get(ty as usize)
-                    .map_or((0, 0), |t| (t.params.len() as u32, t.results.len() as u32));
+                let (np, nr) =
+                    self.module.types.get(ty as usize).map_or((0, 0), |t| (t.params.len() as u32, t.results.len() as u32));
                 (np.saturating_add(1), nr)
             }
             Drop => (1, 0),
             Select | SelectT(_) => (3, 1),
-            LocalGet(_) | GlobalGet(_) | RefNull(_) | RefFunc(_) | TableSize(_) | MemorySize
-            | I32Const(_) | I64Const(_) | F32Const(_) | F64Const(_) => (0, 1),
+            LocalGet(_) | GlobalGet(_) | RefNull(_) | RefFunc(_) | TableSize(_) | MemorySize | I32Const(_) | I64Const(_)
+            | F32Const(_) | F64Const(_) => (0, 1),
             LocalSet(_) | GlobalSet(_) => (1, 0),
             LocalTee(_) | RefIsNull | TableGet(_) | MemoryGrow => (1, 1),
             TableSet(_) => (2, 0),
             TableGrow(_) => (2, 1),
-            TableInit { .. }
-            | TableCopy { .. }
-            | TableFill(_)
-            | MemoryInit(_)
-            | MemoryCopy
-            | MemoryFill => (3, 0),
+            TableInit { .. } | TableCopy { .. } | TableFill(_) | MemoryInit(_) | MemoryCopy | MemoryFill => (3, 0),
             ElemDrop(_) | DataDrop(_) => (0, 0),
-            I32Load(_) | I64Load(_) | F32Load(_) | F64Load(_) | I32Load8S(_) | I32Load8U(_)
-            | I32Load16S(_) | I32Load16U(_) | I64Load8S(_) | I64Load8U(_) | I64Load16S(_)
-            | I64Load16U(_) | I64Load32S(_) | I64Load32U(_) => (1, 1),
-            I32Store(_) | I64Store(_) | F32Store(_) | F64Store(_) | I32Store8(_)
-            | I32Store16(_) | I64Store8(_) | I64Store16(_) | I64Store32(_) => (2, 0),
+            I32Load(_) | I64Load(_) | F32Load(_) | F64Load(_) | I32Load8S(_) | I32Load8U(_) | I32Load16S(_) | I32Load16U(_)
+            | I64Load8S(_) | I64Load8U(_) | I64Load16S(_) | I64Load16U(_) | I64Load32S(_) | I64Load32U(_) => (1, 1),
+            I32Store(_) | I64Store(_) | F32Store(_) | F64Store(_) | I32Store8(_) | I32Store16(_) | I64Store8(_)
+            | I64Store16(_) | I64Store32(_) => (2, 0),
             // Binary operators and comparisons.
-            I32Eq | I32Ne | I32LtS | I32LtU | I32GtS | I32GtU | I32LeS | I32LeU | I32GeS
-            | I32GeU | I32Add | I32Sub | I32Mul | I32DivS | I32DivU | I32RemS | I32RemU
-            | I32And | I32Or | I32Xor | I32Shl | I32ShrS | I32ShrU | I32Rotl | I32Rotr | I64Eq
-            | I64Ne | I64LtS | I64LtU | I64GtS | I64GtU | I64LeS | I64LeU | I64GeS | I64GeU
-            | I64Add | I64Sub | I64Mul | I64DivS | I64DivU | I64RemS | I64RemU | I64And | I64Or
-            | I64Xor | I64Shl | I64ShrS | I64ShrU | I64Rotl | I64Rotr | F32Eq | F32Ne | F32Lt
-            | F32Gt | F32Le | F32Ge | F32Add | F32Sub | F32Mul | F32Div | F32Min | F32Max
-            | F32Copysign | F64Eq | F64Ne | F64Lt | F64Gt | F64Le | F64Ge | F64Add | F64Sub
+            I32Eq | I32Ne | I32LtS | I32LtU | I32GtS | I32GtU | I32LeS | I32LeU | I32GeS | I32GeU | I32Add | I32Sub
+            | I32Mul | I32DivS | I32DivU | I32RemS | I32RemU | I32And | I32Or | I32Xor | I32Shl | I32ShrS | I32ShrU
+            | I32Rotl | I32Rotr | I64Eq | I64Ne | I64LtS | I64LtU | I64GtS | I64GtU | I64LeS | I64LeU | I64GeS | I64GeU
+            | I64Add | I64Sub | I64Mul | I64DivS | I64DivU | I64RemS | I64RemU | I64And | I64Or | I64Xor | I64Shl | I64ShrS
+            | I64ShrU | I64Rotl | I64Rotr | F32Eq | F32Ne | F32Lt | F32Gt | F32Le | F32Ge | F32Add | F32Sub | F32Mul
+            | F32Div | F32Min | F32Max | F32Copysign | F64Eq | F64Ne | F64Lt | F64Gt | F64Le | F64Ge | F64Add | F64Sub
             | F64Mul | F64Div | F64Min | F64Max | F64Copysign => (2, 1),
             // Unary operators, tests and conversions.
             _ => (1, 1),
@@ -775,29 +724,16 @@ fn compile_body(
 
     // Pass 1: track the stack, resolve branches and size every
     // instruction.
-    let mut tr = Tracker {
-        module,
-        arity,
-        height: 0,
-        max_height: 0,
-        ctrls: Vec::new(),
-    };
+    let mut tr = Tracker { module, arity, height: 0, max_height: 0, ctrls: Vec::new() };
     tr.enter(nresults);
     let mut resolved: Vec<Resolved> = Vec::with_capacity(instrs.len());
     let mut raw_tables: Vec<BranchTable> = Vec::new();
     let branch_width = |b: &Branch| {
-        if b.height <= u16::MAX as u32 && b.arity <= u8::MAX as u32 {
-            1
-        } else {
-            2
-        }
+        if b.height <= u16::MAX as u32 && b.arity <= u8::MAX as u32 { 1 } else { 2 }
     };
     for (i, instr) in instrs.iter().enumerate() {
         let idx = i as u32;
-        let mut r = Resolved {
-            width: 1,
-            ..Resolved::default()
-        };
+        let mut r = Resolved { width: 1, ..Resolved::default() };
         match *instr {
             Instr::Block { ty, end } => {
                 let (np, nr) = arity_of(module, ty).unwrap_or((0, 0));
@@ -842,19 +778,9 @@ fn compile_body(
             Instr::BrTable(t) => {
                 tr.pop(1);
                 let (targets, default) = match body.br_tables.get(t as usize) {
-                    Some(bt) => (
-                        bt.targets.iter().map(|&d| tr.label(d, nlocals)).collect(),
-                        tr.label(bt.default, nlocals),
-                    ),
+                    Some(bt) => (bt.targets.iter().map(|&d| tr.label(d, nlocals)).collect(), tr.label(bt.default, nlocals)),
                     // No such table: a branch nowhere, which traps.
-                    None => (
-                        Vec::new(),
-                        Branch {
-                            target: NOWHERE,
-                            height: 0,
-                            arity: 0,
-                        },
-                    ),
+                    None => (Vec::new(), Branch { target: NOWHERE, height: 0, arity: 0 }),
                 };
                 raw_tables.push(BranchTable { targets, default });
                 tr.unreachable();
@@ -894,23 +820,11 @@ fn compile_body(
             _ => NOWHERE,
         }
     };
-    let absolute = |b: Branch| -> Branch {
-        Branch {
-            target: if b.target == RETURN {
-                RETURN
-            } else {
-                after(b.target)
-            },
-            ..b
-        }
-    };
+    let absolute = |b: Branch| -> Branch { Branch { target: if b.target == RETURN { RETURN } else { after(b.target) }, ..b } };
     // This body's `br_table`s, in order of appearance.
     let mut next_table = tables.len();
     for t in raw_tables {
-        tables.push(BranchTable {
-            targets: t.targets.into_iter().map(absolute).collect(),
-            default: absolute(t.default),
-        });
+        tables.push(BranchTable { targets: t.targets.into_iter().map(absolute).collect(), default: absolute(t.default) });
     }
 
     // Pass 2: encode.
@@ -922,38 +836,18 @@ fn compile_body(
             Instr::If { else_, end, .. } => {
                 // Into the else arm when there is one, past the `end`
                 // otherwise.
-                let target = if else_ != end {
-                    after(else_)
-                } else {
-                    after(end)
-                };
+                let target = if else_ != end { after(else_) } else { after(end) };
                 words.push(word(op::IF, 0, target));
             }
             Instr::Else { end } => words.push(word(op::ELSE, 0, after(end))),
             // The function's `end` returns; so does the last instruction of
             // an unbalanced (invalid) body, so that nothing runs past it.
-            Instr::End => words.push(word(
-                if r.function_end || i + 1 == instrs.len() {
-                    op::RETURN
-                } else {
-                    op::END
-                },
-                0,
-                0,
-            )),
+            Instr::End => words.push(word(if r.function_end || i + 1 == instrs.len() { op::RETURN } else { op::END }, 0, 0)),
             Instr::Br(_) | Instr::BrIf(_) => {
                 let b = absolute(r.branch);
                 let conditional = matches!(instr, Instr::BrIf(_));
                 if b.target == RETURN {
-                    words.push(word(
-                        if conditional {
-                            op::BR_IF_RETURN
-                        } else {
-                            op::RETURN
-                        },
-                        0,
-                        0,
-                    ));
+                    words.push(word(if conditional { op::BR_IF_RETURN } else { op::RETURN }, 0, 0));
                 } else if r.width == 1 {
                     let o = if conditional { op::BR_IF } else { op::BR };
                     words.push(word(o, b.height as u16, b.target) | (b.arity as Word) << 8);
@@ -979,9 +873,7 @@ fn compile_body(
             continue;
         };
         let at = first + start as usize;
-        if matches!(instrs.get(i + 1), Some(Instr::BrIf(_)))
-            && words.get(at + 1).map(|&w| opcode(w)) != Some(op::BR_IF)
-        {
+        if matches!(instrs.get(i + 1), Some(Instr::BrIf(_))) && words.get(at + 1).map(|&w| opcode(w)) != Some(op::BR_IF) {
             continue;
         }
         if let Some(slot) = words.get_mut(at) {
@@ -1007,14 +899,7 @@ fn encode(instr: &Instr, out: &mut Vec<Word>) {
     match *instr {
         Unreachable => simple!(op::UNREACHABLE),
         Nop => simple!(op::NOP),
-        Block { .. }
-        | Loop { .. }
-        | If { .. }
-        | Else { .. }
-        | End
-        | Br(_)
-        | BrIf(_)
-        | BrTable(_) => simple!(op::TRAP_INVALID),
+        Block { .. } | Loop { .. } | If { .. } | Else { .. } | End | Br(_) | BrIf(_) | BrTable(_) => simple!(op::TRAP_INVALID),
         Return => simple!(op::RETURN),
         Call(f) => with_a!(op::CALL, f),
         CallIndirect { ty, table } => {
@@ -1304,20 +1189,12 @@ fn fuse(instrs: &[Instr]) -> Option<u8> {
     let i2 = instrs.get(2);
     let i3 = instrs.get(3);
     Some(match (i0, i1, i2, i3) {
-        (LocalGet(_), Some(LocalGet(_)), Some(I32Add), Some(LocalSet(_))) => {
-            op::LOCAL_GET_LOCAL_GET_I32_ADD_LOCAL_SET
-        }
-        (LocalGet(_), Some(I32Const(_)), Some(I32Add), Some(LocalSet(_))) => {
-            op::LOCAL_GET_I32_CONST_I32_ADD_LOCAL_SET
-        }
+        (LocalGet(_), Some(LocalGet(_)), Some(I32Add), Some(LocalSet(_))) => op::LOCAL_GET_LOCAL_GET_I32_ADD_LOCAL_SET,
+        (LocalGet(_), Some(I32Const(_)), Some(I32Add), Some(LocalSet(_))) => op::LOCAL_GET_I32_CONST_I32_ADD_LOCAL_SET,
         (LocalGet(_), Some(LocalGet(_)), Some(I32Store(_)), _) => op::LOCAL_GET_LOCAL_GET_I32_STORE,
         (LocalGet(_), Some(I32Const(_)), Some(I32Store(_)), _) => op::LOCAL_GET_I32_CONST_I32_STORE,
-        (LocalGet(_), Some(LocalGet(_)), Some(o), _) if local2_fusion(o).is_some() => {
-            local2_fusion(o)?
-        }
-        (LocalGet(_), Some(I32Const(_)), Some(o), _) if const_fusions(o).is_some() => {
-            const_fusions(o)?.1
-        }
+        (LocalGet(_), Some(LocalGet(_)), Some(o), _) if local2_fusion(o).is_some() => local2_fusion(o)?,
+        (LocalGet(_), Some(I32Const(_)), Some(o), _) if const_fusions(o).is_some() => const_fusions(o)?.1,
         (LocalGet(_), Some(LocalGet(_)), _, _) => op::LOCAL_GET_LOCAL_GET,
         (LocalGet(_), Some(I32Const(_)), _, _) => op::LOCAL_GET_I32_CONST,
         (LocalGet(_), Some(I32Load(_)), _, _) => op::LOCAL_GET_I32_LOAD,
@@ -1333,10 +1210,7 @@ fn fuse(instrs: &[Instr]) -> Option<u8> {
 /// The name of an opcode (for tests and debugging).
 #[cfg(test)]
 pub(crate) fn name(code: u8) -> &'static str {
-    op::NAMES
-        .iter()
-        .find(|&&(_, v)| v == code)
-        .map_or("?", |&(n, _)| n)
+    op::NAMES.iter().find(|&&(_, v)| v == code).map_or("?", |&(n, _)| n)
 }
 
 #[cfg(test)]
@@ -1357,20 +1231,11 @@ mod tests {
     /// A program of one function of type `types[0]` (or `[] -> []`) with
     /// `locals` and `instrs`.
     fn program(types: Vec<FuncType>, locals: Vec<ValType>, instrs: Vec<Instr>) -> Program {
-        let (np, nr) = types
-            .first()
-            .map_or((0, 0), |t| (t.params.len() as u32, t.results.len() as u32));
+        let (np, nr) = types.first().map_or((0, 0), |t| (t.params.len() as u32, t.results.len() as u32));
         let module = Module {
             types,
             funcs: vec![0],
-            code: vec![FuncBody {
-                locals,
-                instrs,
-                br_tables: vec![BrTable {
-                    targets: vec![0, 1],
-                    default: 9,
-                }],
-            }],
+            code: vec![FuncBody { locals, instrs, br_tables: vec![BrTable { targets: vec![0, 1], default: 9 }] }],
             ..Module::default()
         };
         compile_module(&module, &[(np, nr)], 0)
@@ -1381,29 +1246,19 @@ mod tests {
     }
 
     fn branch(w: Word) -> Branch {
-        Branch {
-            target: imm_a(w),
-            height: imm_b(w),
-            arity: imm_c(w),
-        }
+        Branch { target: imm_a(w), height: imm_b(w), arity: imm_c(w) }
     }
 
     #[test]
     fn encodes_immediates_and_resolves_branches() {
         let program = program(
-            vec![FuncType {
-                params: vec![ValType::I32, ValType::I32],
-                results: vec![ValType::I64],
-            }],
+            vec![FuncType { params: vec![ValType::I32, ValType::I32], results: vec![ValType::I64] }],
             vec![ValType::I32, ValType::FuncRef],
             vec![
                 // 0: i32.const (operand height 1 after) -> pc 0
                 Instr::I32Const(1),
                 // 1: block (type 0: 2 params, 1 result) -> pc 1
-                Instr::Block {
-                    ty: BlockType::Type(0),
-                    end: 5,
-                },
+                Instr::Block { ty: BlockType::Type(0), end: 5 },
                 // 2: i64.const: 2 words -> pc 2,3
                 Instr::I64Const(-1),
                 // 3: br 0 (block: unwind to its height) -> pc 4
@@ -1413,15 +1268,9 @@ mod tests {
                 // 5: end -> pc 6
                 Instr::End,
                 // 6: loop (result i32) -> pc 7
-                Instr::Loop {
-                    ty: BlockType::Val(ValType::I32),
-                    end: 10,
-                },
+                Instr::Loop { ty: BlockType::Val(ValType::I32), end: 10 },
                 // 7: i32.load -> pc 8
-                Instr::I32Load(MemArg {
-                    align: 2,
-                    offset: 0x1234,
-                }),
+                Instr::I32Load(MemArg { align: 2, offset: 0x1234 }),
                 // 8: br_if 0 (loop: back to pc 8) -> pc 9
                 Instr::BrIf(0),
                 // 9: br_table -> pc 10
@@ -1429,30 +1278,19 @@ mod tests {
                 // 10: end -> pc 11
                 Instr::End,
                 // 11: if (result i32), no else -> pc 12
-                Instr::If {
-                    ty: BlockType::Val(ValType::I32),
-                    else_: 13,
-                    end: 13,
-                },
+                Instr::If { ty: BlockType::Val(ValType::I32), else_: 13, end: 13 },
                 // 12: i32.const -> pc 13
                 Instr::I32Const(7),
                 // 13: end -> pc 14
                 Instr::End,
                 // 14: if with else -> pc 15
-                Instr::If {
-                    ty: BlockType::Empty,
-                    else_: 15,
-                    end: 16,
-                },
+                Instr::If { ty: BlockType::Empty, else_: 15, end: 16 },
                 // 15: else -> pc 16
                 Instr::Else { end: 16 },
                 // 16: end -> pc 17
                 Instr::End,
                 // 17: block with a bad type index -> pc 18
-                Instr::Block {
-                    ty: BlockType::Type(9),
-                    end: 99,
-                },
+                Instr::Block { ty: BlockType::Type(9), end: 99 },
                 // 18: br_if 0 to nowhere -> pc 19
                 Instr::BrIf(0),
                 // 19: end (of the function) -> pc 20
@@ -1461,10 +1299,7 @@ mod tests {
         );
         let f = program.funcs[0];
         assert_eq!((f.entry, f.nparams, f.nresults), (0, 2, 1));
-        assert_eq!(
-            &program.locals[f.locals_start as usize..f.locals_end as usize],
-            &[ValType::I32, ValType::FuncRef]
-        );
+        assert_eq!(&program.locals[f.locals_start as usize..f.locals_end as usize], &[ValType::I32, ValType::FuncRef]);
         let names = ops(&program);
         // Word 3 is a raw immediate; its low bits mean nothing.
         let want = [
@@ -1499,24 +1334,10 @@ mod tests {
         // 1 with 2 params... which the tracker clamps to 0 (only an invalid
         // body does that): its height is 0 + 4 locals, arity 1 result, and
         // it continues after its `end` (instruction 5) at pc 7.
-        assert_eq!(
-            branch(w[4]),
-            Branch {
-                target: 7,
-                height: 4,
-                arity: 1
-            }
-        );
+        assert_eq!(branch(w[4]), Branch { target: 7, height: 4, arity: 1 });
         // The loop: entered at operand height 1 (the block's result), its
         // body starts at pc 8, a branch to it carries its 0 params.
-        assert_eq!(
-            branch(w[9]),
-            Branch {
-                target: 8,
-                height: 5,
-                arity: 0
-            }
-        );
+        assert_eq!(branch(w[9]), Branch { target: 8, height: 5, arity: 0 });
         assert_eq!(imm_a(w[8]), 0x1234);
         // br_table 0: targets [loop, function], default 9 (out of range: the
         // function).
@@ -1537,31 +1358,13 @@ mod tests {
 
     #[test]
     fn functions_are_laid_out_in_order() {
-        let body = vec![
-            Instr::If {
-                ty: BlockType::Empty,
-                else_: 2,
-                end: 2,
-            },
-            Instr::Nop,
-            Instr::End,
-            Instr::Nop,
-            Instr::End,
-        ];
+        let body = vec![Instr::If { ty: BlockType::Empty, else_: 2, end: 2 }, Instr::Nop, Instr::End, Instr::Nop, Instr::End];
         let module = Module {
             funcs: vec![0, 0],
             types: vec![FuncType::default()],
             code: vec![
-                FuncBody {
-                    locals: vec![],
-                    instrs: vec![Instr::Nop, Instr::End],
-                    br_tables: vec![],
-                },
-                FuncBody {
-                    locals: vec![ValType::I64],
-                    instrs: body,
-                    br_tables: vec![],
-                },
+                FuncBody { locals: vec![], instrs: vec![Instr::Nop, Instr::End], br_tables: vec![] },
+                FuncBody { locals: vec![ValType::I64], instrs: body, br_tables: vec![] },
             ],
             ..Module::default()
         };
@@ -1588,10 +1391,7 @@ mod tests {
             vec![],
             vec![],
             vec![
-                Instr::Block {
-                    ty: BlockType::Empty,
-                    end: 4,
-                },
+                Instr::Block { ty: BlockType::Empty, end: 4 },
                 Instr::Br(0),
                 Instr::I32Add,
                 Instr::I32Add,
@@ -1603,14 +1403,7 @@ mod tests {
         );
         let w = &program.words;
         assert_eq!(ops(&program)[6], "BR_IF_RETURN");
-        assert_eq!(
-            branch(w[1]),
-            Branch {
-                target: 5,
-                height: 0,
-                arity: 0
-            }
-        );
+        assert_eq!(branch(w[1]), Branch { target: 5, height: 0, arity: 0 });
     }
 
     #[test]
@@ -1619,10 +1412,7 @@ mod tests {
             vec![],
             vec![],
             vec![
-                Instr::Loop {
-                    ty: BlockType::Empty,
-                    end: 9,
-                },
+                Instr::Loop { ty: BlockType::Empty, end: 9 },
                 Instr::LocalGet(0),
                 Instr::I32Const(1),
                 Instr::I32Add,
@@ -1664,13 +1454,6 @@ mod tests {
         assert_eq!(imm_a(w[2]), 1);
         assert_eq!(imm_a(w[4]), 0);
         assert_eq!(imm_a(w[6]), 1);
-        assert_eq!(
-            branch(w[8]),
-            Branch {
-                target: 1,
-                height: 0,
-                arity: 0
-            }
-        );
+        assert_eq!(branch(w[8]), Branch { target: 1, height: 0, arity: 0 });
     }
 }

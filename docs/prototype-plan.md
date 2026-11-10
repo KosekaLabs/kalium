@@ -1,95 +1,37 @@
 # Prototype plan (milestone M1)
 
-This is the working brief for the first Kalium prototype. It is the contract
-between the crates; code that disagrees with this document is wrong until the
-document is changed. The long-term design is in [architecture.md](architecture.md).
+This is the working brief for the first Kalium prototype. It is the contract between the crates; code that disagrees with this document is wrong until the document is changed. The long-term design is in [architecture.md](architecture.md).
 
 ## M1 definition of done
 
 `cargo xtask test` passes, which means:
 
 1. All host-side unit tests pass (`cargo test` at the workspace root).
-2. The kernel boots on QEMU `virt` (aarch64, cortex-a72, GICv2) and exits
-   cleanly with code 0 through semihosting after the boot-test scenario:
-   - the init service (a Wasm module from the SDK examples) prints
-     `hello from init` through the console capability;
-   - init spawns `ping` and `pong` instances connected by a channel and they
-     exchange 100 messages, the last one carrying a transferred capability;
-   - init spawns one real-time instance (`rt`, period 2 ms, budget 500 µs)
-     and two fair instances that busy-loop; the RT instance reports that it
-     met at least 95% of its periods while the fair ones were running;
-   - a `faulty` instance traps on an out-of-bounds load and the kernel reports
-     the trap and continues; init observes the exit through `instance_wait`;
-   - init hands a `revoked` instance a console capability derived from a
-     handle it keeps and the derived receive end of a channel; after the
-     instance has printed once, init revokes both (`cap_revoke`): the
-     instance's next `console_write` and `recv` fail with `EBADCAP` and it
-     exits 42, which init reports as `init: revoked exited 42`, and init's
-     own `send` on the channel, whose only remaining receiver was revoked,
-     fails with `ECLOSED`;
-   - init spawns `shelf`, which builds a 256 KiB state with several
-     million instructions, prints `shelf: initialised` and parks in
-     `recv`; init takes a snapshot of it (`instance_snapshot`) and starts
-     three instances from the snapshot at the export `resume`
-     (`spawn_snapshot`), each of which finds the state intact, prints
-     `shelf: resumed ok` and exits 0; init reports
-     `init: shelf init N us, restore M us` and the restore is the faster
-     start (`M < N`);
-   - init spawns `hog`, a hostile service that first leaves the kernel a
-     reference cycle (it creates a channel, sends one of the channel's own
-     send capabilities over the channel and drops both ends, printing
-     `hog: cycle: a channel's send end sent over itself, both ends
-     dropped`), which the kernel must collect at once (`kalium: collected
-     1 unreachable objects: 1 queued messages, B budget bytes`, with `B`
-     the message's `cost_of`; see [Reachability](#reachability)), and then
-     creates memory objects of
-     the largest size, grows its linear memory, creates channels and fills
-     their queues until each quota refuses it (see
-     [Resource quotas](#resource-quotas)): it prints exactly
-     `hog: memobjs 2, pages 256, channels 64, messages 1024` (so the
-     collected channel went back to its quota), finds that a
-     4096-byte `send` on a fresh channel still works (or fails cleanly with
-     `ENOMEM`), fills the rest of that queue with zero-byte messages
-     carrying 4 capabilities each and takes half of the queue back
-     (`hog: 15 cap-only messages sent, 8 received back`), prints
-     `hog: quota reached, kernel alive` and exits 0 holding everything;
-     the kernel reports what the exit drained from its channels and gave
-     back to the budget (`kalium: instance 1 (hog) exit drained 1016
-     queued messages, B budget bytes`, with `B` exactly the cost of those
-     messages as `kalium_ipc::Message::cost_of` defines it: slot, payload
-     and capabilities, so that cap-only messages are not free); init then
-     spawns an ordinary instance and creates a 16 MiB memory object to
-     show the kernel is unharmed and the memory was released, and reports
-     `init: after hog, spawn ok`;
-   - when init exits, the kernel reports `kalium: instance budget: 0 bytes
-     in use`: everything charged to the kernel-wide budget was released.
-3. `cargo xtask build` produces `target/aarch64-unknown-none/release/kalium`
-   and `cargo xtask run` boots it interactively in QEMU.
+2. The kernel boots on QEMU `virt` (aarch64, cortex-a72, GICv2) and exits cleanly with code 0 through semihosting after the boot-test scenario:
+   - the init service (a Wasm module from the SDK examples) prints `hello from init` through the console capability;
+   - init spawns `ping` and `pong` instances connected by a channel and they exchange 100 messages, the last one carrying a transferred capability;
+   - init spawns one real-time instance (`rt`, period 2 ms, budget 500 µs) and two fair instances that busy-loop; the RT instance reports that it met at least 95% of its periods while the fair ones were running;
+   - a `faulty` instance traps on an out-of-bounds load and the kernel reports the trap and continues; init observes the exit through `instance_wait`;
+   - init hands a `revoked` instance a console capability derived from a handle it keeps and the derived receive end of a channel; after the instance has printed once, init revokes both (`cap_revoke`): the instance's next `console_write` and `recv` fail with `EBADCAP` and it exits 42, which init reports as `init: revoked exited 42`, and init's own `send` on the channel, whose only remaining receiver was revoked, fails with `ECLOSED`;
+   - init spawns `shelf`, which builds a 256 KiB state with several million instructions, prints `shelf: initialised` and parks in `recv`; init takes a snapshot of it (`instance_snapshot`) and starts three instances from the snapshot at the export `resume` (`spawn_snapshot`), each of which finds the state intact, prints `shelf: resumed ok` and exits 0; init reports `init: shelf init N us, restore M us` and the restore is the faster start (`M < N`);
+   - init spawns `hog`, a hostile service that first leaves the kernel a reference cycle (it creates a channel, sends one of the channel's own send capabilities over the channel and drops both ends, printing `hog: cycle: a channel's send end sent over itself, both ends dropped`), which the kernel must collect at once (`kalium: collected 1 unreachable objects: 1 queued messages, B budget bytes`, with `B` the message's `cost_of`; see [Reachability](#reachability)), and then creates memory objects of the largest size, grows its linear memory, creates channels and fills their queues until each quota refuses it (see [Resource quotas](#resource-quotas)): it prints exactly `hog: memobjs 2, pages 256, channels 64, messages 1024` (so the collected channel went back to its quota), finds that a 4096-byte `send` on a fresh channel still works (or fails cleanly with `ENOMEM`), fills the rest of that queue with zero-byte messages carrying 4 capabilities each and takes half of the queue back (`hog: 15 cap-only messages sent, 8 received back`), prints `hog: quota reached, kernel alive` and exits 0 holding everything; the kernel reports what the exit drained from its channels and gave back to the budget (`kalium: instance 1 (hog) exit drained 1016 queued messages, B budget bytes`, with `B` exactly the cost of those messages as `kalium_ipc::Message::cost_of` defines it: slot, payload and capabilities, so that cap-only messages are not free); init then spawns an ordinary instance and creates a 16 MiB memory object to show the kernel is unharmed and the memory was released, and reports `init: after hog, spawn ok`;
+   - when init exits, the kernel reports `kalium: instance budget: 0 bytes in use`: everything charged to the kernel-wide budget was released.
+3. `cargo xtask build` produces `target/aarch64-unknown-none/release/kalium` and `cargo xtask run` boots it interactively in QEMU.
 
 ## Conventions
 
-- Edition 2021, stable toolchain pinned by `rust-toolchain.toml`. No nightly.
-- Every crate is `#![no_std]`. Crates that need heap use `extern crate alloc`.
-  Only `kalium-hal`, `kalium-mm` and the kernel binary may contain `unsafe`;
-  every other crate has `#![forbid(unsafe_code)]`.
-- Every crate except `kalium-hal` and the kernel binary builds and tests on
-  the host (`x86_64-unknown-linux-gnu`). `kalium-hal` is an empty crate on
-  non-aarch64 targets (`#[cfg(target_arch = "aarch64")]` around everything).
-- Host tests live next to the code (`#[cfg(test)]`), with `std` enabled only
-  under `cfg(test)` where needed.
-- No panics on untrusted input. Decoding a module, resolving a capability,
-  receiving a message: all return `Result`. `unwrap`/`expect`/indexing that
-  can panic on attacker-controlled data is a bug.
-- Dependencies: keep to a minimum and only pure-Rust, `no_std`-capable
-  crates. Allowed without discussion: `libm`, `spin`, `bitflags`,
-  `hashbrown`, `tock-registers` or `aarch64-cpu` for the HAL. Host-only dev
-  dependencies (`wat`, `wast`, `proptest`) are fine.
-- Formatting: `cargo fmt`. Lints: `cargo clippy` clean on the default members.
+- Edition 2024, stable toolchain pinned by `rust-toolchain.toml`. No nightly.
+- Every crate is `#![no_std]`. Crates that need heap use `extern crate alloc`. Only `kalium-hal`, `kalium-mm` and the kernel binary may contain `unsafe`; every other crate has `#![forbid(unsafe_code)]`.
+- Every crate except `kalium-hal` and the kernel binary builds and tests on the host (`x86_64-unknown-linux-gnu`). `kalium-hal` is an empty crate on non-aarch64 targets (`#[cfg(target_arch = "aarch64")]` around everything).
+- Host tests live next to the code (`#[cfg(test)]`), with `std` enabled only under `cfg(test)` where needed.
+- No panics on untrusted input. Decoding a module, resolving a capability, receiving a message: all return `Result`. `unwrap`/`expect`/indexing that can panic on attacker-controlled data is a bug.
+- Dependencies: keep to a minimum and only pure-Rust, `no_std`-capable crates. Allowed without discussion: `libm`, `spin`, `bitflags`, `hashbrown`, `tock-registers` or `aarch64-cpu` for the HAL. Host-only dev dependencies (`wat`, `wast`, `proptest`) are fine.
+- Formatting: `cargo fmt` with `.trunk/configs/.rustfmt.toml` (shared with `trunk fmt`). Lints: `cargo clippy` clean on the default members.
 - Commit messages: imperative, explain why.
 
 ## Workspace layout
 
-```
+```text
 Cargo.toml              workspace; default-members are the host-testable crates
 .cargo/config.toml      `cargo xtask` alias; aarch64 rustflags (linker script)
 rust-toolchain.toml
@@ -110,24 +52,18 @@ xtask/                  `cargo xtask build|run|test|wasm|demos|clippy`
 
 ## Host ABI (the contract between kernel and SDK)
 
-All host functions are core-Wasm imports. Pointers and lengths are `i32`
-offsets into the instance's linear memory; the kernel bounds-checks every one
-and returns `EFAULT` on failure. Every fallible call returns an `i32` errno
-(`0` is OK). Out-parameters are written into linear memory at the given
-pointer. Capabilities are `i32` indices into the instance's capability table;
-`-1` is never valid.
+All host functions are core-Wasm imports. Pointers and lengths are `i32` offsets into the instance's linear memory; the kernel bounds-checks every one and returns `EFAULT` on failure. Every fallible call returns an `i32` errno (`0` is OK). Out-parameters are written into linear memory at the given pointer. Capabilities are `i32` indices into the instance's capability table; `-1` is never valid.
 
 ### Namespaces and when they resolve
 
-| Module name | Resolves when |
-| --- | --- |
-| `kalium:core` | always |
-| `kalium:ipc` | always |
-| `kalium:memory` | always |
-| `kalium:spawn` | the instance holds at least one capability of kind `Spawn` at instantiation |
+| Module name     | Resolves when                                                               |
+| --------------- | --------------------------------------------------------------------------- |
+| `kalium:core`   | always                                                                      |
+| `kalium:ipc`    | always                                                                      |
+| `kalium:memory` | always                                                                      |
+| `kalium:spawn`  | the instance holds at least one capability of kind `Spawn` at instantiation |
 
-An import that does not resolve is a link error and the instance is not
-created (`ENOENT` to the spawner).
+An import that does not resolve is a link error and the instance is not created (`ENOENT` to the spawner).
 
 ### `kalium:core`
 
@@ -148,7 +84,7 @@ created (`ENOENT` to the spawner).
 
 | Function | Signature | Notes |
 | --- | --- | --- |
-| `channel_create` | `(out_send: i32, out_recv: i32) -> i32` | Creates a channel. Writes two cap indices: one with `SEND|DERIVE|TRANSFER`, one with `RECV|WAIT|DERIVE|TRANSFER`. Both refer to the same object. `ENOMEM` once the caller has `MAX_CHANNELS_PER_INSTANCE` (64) channels it created still in existence (see [Resource quotas](#resource-quotas)). |
+| `channel_create` | `(out_send: i32, out_recv: i32) -> i32` | Creates a channel. Writes two cap indices: one with `SEND\|DERIVE\|TRANSFER`, one with `RECV\|WAIT\|DERIVE\|TRANSFER`. Both refer to the same object. `ENOMEM` once the caller has `MAX_CHANNELS_PER_INSTANCE` (64) channels it created still in existence (see [Resource quotas](#resource-quotas)). |
 | `send` | `(cap: i32, msg: i32, len: i32, caps: i32, ncaps: i32) -> i32` | Needs `SEND`. `caps` points to `ncaps` `i32` indices; each must have `TRANSFER`; they are removed from the sender's table on success. `EAGAIN` if the queue is full (queue depth 16, message limit 4096 bytes, up to 4 caps; `ETOOBIG` beyond either, before the list is read). `ECLOSED` if no receiver cap exists any more. `ENOMEM` if the kernel-wide instance budget cannot hold the copy of the message (see [Resource quotas](#resource-quotas)). |
 | `recv` | `(cap: i32, buf: i32, buf_len: i32, caps: i32, ncaps_max: i32, out_hdr: i32) -> i32` | Needs `RECV`. Blocks until a message is available. Copies at most `buf_len` bytes; the transferred caps are added to the receiver's table and their indices written at `caps`. `out_hdr` receives `{len: u32, ncaps: u32}` with the full message length (so truncation is detectable). `ECLOSED` if the queue is empty and no sender cap exists any more. |
 | `try_recv` | same as `recv` | Non-blocking: `EAGAIN` instead of blocking. |
@@ -158,158 +94,60 @@ created (`ENOENT` to the spawner).
 
 | Function | Signature | Notes |
 | --- | --- | --- |
-| `memobj_create` | `(size: i64, out_cap: i32) -> i32` | Zeroed memory object, cap with `READ|WRITE|DERIVE|TRANSFER`. Size limit 16 MiB in M1 (`ETOOBIG`). `ENOMEM` once the caller's existing objects plus this one exceed `MAX_MEMOBJ_BYTES_PER_INSTANCE` (32 MiB), or the kernel-wide instance budget cannot hold it (see [Resource quotas](#resource-quotas)). |
+| `memobj_create` | `(size: i64, out_cap: i32) -> i32` | Zeroed memory object, cap with `READ\|WRITE\|DERIVE\|TRANSFER`. Size limit 16 MiB in M1 (`ETOOBIG`). `ENOMEM` once the caller's existing objects plus this one exceed `MAX_MEMOBJ_BYTES_PER_INSTANCE` (32 MiB), or the kernel-wide instance budget cannot hold it (see [Resource quotas](#resource-quotas)). |
 | `memobj_size` | `(cap: i32, out_size: i32) -> i32` | Writes `i64`. |
 | `memobj_read` | `(cap: i32, offset: i64, ptr: i32, len: i32) -> i32` | Needs `READ`. |
 | `memobj_write` | `(cap: i32, offset: i64, ptr: i32, len: i32) -> i32` | Needs `WRITE`. |
 
-Mapping memory objects into linear memory is deferred to the multi-memory /
-MMU-backed design; M1 copies.
+Mapping memory objects into linear memory is deferred to the multi-memory / MMU-backed design; M1 copies.
 
 ### `kalium:spawn`
 
 | Function | Signature | Notes |
 | --- | --- | --- |
-| `spawn` | `(cap: i32, module: i32, caps: i32, ncaps: i32, class: i32, period_ns: i64, budget_ns: i64, out_cap: i32) -> i32` | Needs `Spawn` kind with `SPAWN`. `module` is an index into the boot image's module table. The `ncaps` caps (each needs `TRANSFER`) are moved to the child, becoming its slots `0..ncaps` in order (`ENOMEM` for more than the table holds, before the list is read). `class` is `0` fair, `1` real-time. Returns an `Instance` cap with `WAIT|KILL|SNAPSHOT|DERIVE|TRANSFER`. At most 32 instances may be live at once (`MAX_INSTANCES`, kernel-wide and counting `init`); `spawn` fails with `ENOMEM` beyond that, whatever the caller does with the `Instance` caps it got back, and with `ENOMEM` when the kernel-wide instance budget cannot hold the new instance's memory and execution state (see [Resource quotas](#resource-quotas)). An exited instance's slot, and so its id, is reused by the next `spawn`. |
+| `spawn` | `(cap: i32, module: i32, caps: i32, ncaps: i32, class: i32, period_ns: i64, budget_ns: i64, out_cap: i32) -> i32` | Needs `Spawn` kind with `SPAWN`. `module` is an index into the boot image's module table. The `ncaps` caps (each needs `TRANSFER`) are moved to the child, becoming its slots `0..ncaps` in order (`ENOMEM` for more than the table holds, before the list is read). `class` is `0` fair, `1` real-time. Returns an `Instance` cap with `WAIT\|KILL\|SNAPSHOT\|DERIVE\|TRANSFER`. At most 32 instances may be live at once (`MAX_INSTANCES`, kernel-wide and counting `init`); `spawn` fails with `ENOMEM` beyond that, whatever the caller does with the `Instance` caps it got back, and with `ENOMEM` when the kernel-wide instance budget cannot hold the new instance's memory and execution state (see [Resource quotas](#resource-quotas)). An exited instance's slot, and so its id, is reused by the next `spawn`. |
 | `instance_wait` | `(cap: i32, out_code: i32) -> i32` | Needs `WAIT`. Blocks until the instance exits; writes exit code (`i32`; traps report `-1`, kill reports `-2`). |
 | `instance_kill` | `(cap: i32) -> i32` | Needs `KILL`. |
 | `module_count` | `() -> i32` | Number of modules in the boot image. |
-| `instance_snapshot` | `(cap: i32, out_cap: i32) -> i32` | Needs `Instance` kind with `SNAPSHOT`. Captures the instance's state (linear memory, globals, tables, dropped segments; nothing of the execution in flight) into a new object of kind `Snapshot`, which remembers the instance's module, and writes a cap on it with `READ|DERIVE|TRANSFER` at `out_cap`. The instance must be parked in a host call (blocked or sleeping): `EBUSY` while it is runnable or is the caller, and `EBUSY` if its memory or tables are shared with another instance; `ECLOSED` once it has exited (its Wasm state is freed at exit); `ENOMEM` once the caller's existing snapshots plus this one exceed `MAX_SNAPSHOT_BYTES_PER_INSTANCE` (32 MiB, as encoded), or the kernel-wide instance budget cannot hold it (see [Resource quotas](#resource-quotas)). See [Snapshots](#snapshots). |
+| `instance_snapshot` | `(cap: i32, out_cap: i32) -> i32` | Needs `Instance` kind with `SNAPSHOT`. Captures the instance's state (linear memory, globals, tables, dropped segments; nothing of the execution in flight) into a new object of kind `Snapshot`, which remembers the instance's module, and writes a cap on it with `READ\|DERIVE\|TRANSFER` at `out_cap`. The instance must be parked in a host call (blocked or sleeping): `EBUSY` while it is runnable or is the caller, and `EBUSY` if its memory or tables are shared with another instance; `ECLOSED` once it has exited (its Wasm state is freed at exit); `ENOMEM` once the caller's existing snapshots plus this one exceed `MAX_SNAPSHOT_BYTES_PER_INSTANCE` (32 MiB, as encoded), or the kernel-wide instance budget cannot hold it (see [Resource quotas](#resource-quotas)). See [Snapshots](#snapshots). |
 | `spawn_snapshot` | `(cap: i32, snapshot_cap: i32, caps: i32, ncaps: i32, class: i32, period_ns: i64, budget_ns: i64, entry: i32, out_cap: i32) -> i32` | `spawn` from a snapshot: needs `Spawn` kind with `SPAWN` and `snapshot_cap` of kind `Snapshot` with `READ`. The instance is of the snapshot's module with the snapshot's state; no data or element segment and no start function runs. `entry` is `0` to run the export `_start`, `1` to run the export `resume` (either of type `[] -> []`; `ENOENT` if missing or mistyped, `EINVAL` for another value). `caps`, `class` and the result are as for `spawn`. |
 
-Every capability carries a *lineage*: the object it names and a node in
-that object's derivation tree. A capability the kernel mints fresh
-(`channel_create`, `memobj_create`, `spawn`, the boot capabilities) is a
-root; `cap_derive` makes a child of the source's node; a transfer
-(`send`/`recv`, `spawn`) moves the capability with its node. `cap_revoke`
-on a capability invalidates every node below its own, and only those: not
-the capability itself, not its siblings (other derivations of the same
-source), not what it was derived from. So the holder of a capability can
-cut off exactly what was derived from it, a transferred capability is
-revoked together with the chain it came from, and dropping a capability
-never revokes anything (its children stay valid; the node lives on while
-they do). Rules:
+### Revocation
 
-- A revoked capability is not live: every host call that takes it fails
-  with `EBADCAP` (checked before kind and rights, on the next call), in
-  whichever table it sits, and a transferred one is dead on arrival. It
-  keeps its slot and its reference on the object until `cap_drop` (which
-  succeeds on a revoked slot) or the holder's exit; nothing is removed from
-  another instance's table behind its back.
-- The check walks the node's chain upwards, at most `MAX_DERIVE_DEPTH`
-  steps; no table is scanned on a host call. `cap_revoke` itself scans
-  every table and every queued message once.
-- A channel capability counts as a sender or receiver while it is valid.
-  `cap_revoke` drops the counts of the `SEND`/`RECV` capabilities it
-  invalidates at once and wakes every thread parked on the object, so a
-  revoked receiver cannot keep a channel open (senders get `ECLOSED` once no
-  valid receiver remains) and a revoked sender cannot keep receivers
-  waiting (`ECLOSED` once the queue drains); a thread blocked in `recv`,
-  `wait_any` or `instance_wait` on a revoked capability wakes to `EBADCAP`.
-  Dropping the dead capability later only releases its reference.
-- A revoked capability may derive again: the children it makes after the
-  revocation are valid, the ones from before stay dead. A revocation is a
-  bump of the node's 32-bit generation; `cap_revoke` fails with `ENOMEM`,
-  invalidating nothing, once that would wrap (an ancestor's revocation
-  still kills the chain).
-- Lineage nodes are reference counted and freed when no capability carries
-  them and no child needs them, so a derive/drop loop does not grow kernel
-  memory.
+Every capability carries a _lineage_: the object it names and a node in that object's derivation tree. A capability the kernel mints fresh (`channel_create`, `memobj_create`, `spawn`, the boot capabilities) is a root; `cap_derive` makes a child of the source's node; a transfer (`send`/`recv`, `spawn`) moves the capability with its node. `cap_revoke` on a capability invalidates every node below its own, and only those: not the capability itself, not its siblings (other derivations of the same source), not what it was derived from. So the holder of a capability can cut off exactly what was derived from it, a transferred capability is revoked together with the chain it came from, and dropping a capability never revokes anything (its children stay valid; the node lives on while they do). Rules:
 
-The idiom for a capability to hand out and take back later is a handle
-kept at home: derive `handle` (with `DERIVE`) from the original, transfer a
-derivation of `handle`, and `cap_revoke(handle)` when the time comes; the
-original and `handle` are untouched.
+- A revoked capability is not live: every host call that takes it fails with `EBADCAP` (checked before kind and rights, on the next call), in whichever table it sits, and a transferred one is dead on arrival. It keeps its slot and its reference on the object until `cap_drop` (which succeeds on a revoked slot) or the holder's exit; nothing is removed from another instance's table behind its back.
+- The check walks the node's chain upwards, at most `MAX_DERIVE_DEPTH` steps; no table is scanned on a host call. `cap_revoke` itself scans every table and every queued message once.
+- A channel capability counts as a sender or receiver while it is valid. `cap_revoke` drops the counts of the `SEND`/`RECV` capabilities it invalidates at once and wakes every thread parked on the object, so a revoked receiver cannot keep a channel open (senders get `ECLOSED` once no valid receiver remains) and a revoked sender cannot keep receivers waiting (`ECLOSED` once the queue drains); a thread blocked in `recv`, `wait_any` or `instance_wait` on a revoked capability wakes to `EBADCAP`. Dropping the dead capability later only releases its reference.
+- A revoked capability may derive again: the children it makes after the revocation are valid, the ones from before stay dead. A revocation is a bump of the node's 32-bit generation; `cap_revoke` fails with `ENOMEM`, invalidating nothing, once that would wrap (an ancestor's revocation still kills the chain).
+- Lineage nodes are reference counted and freed when no capability carries them and no child needs them, so a derive/drop loop does not grow kernel memory.
+
+The idiom for a capability to hand out and take back later is a handle kept at home: derive `handle` (with `DERIVE`) from the original, transfer a derivation of `handle`, and `cap_revoke(handle)` when the time comes; the original and `handle` are untouched.
 
 ### Reachability
 
-An object (a channel, a memory object, a snapshot, an exited instance's
-record) exists while something refers to it, and is freed, its charges
-released, when nothing does. The references are the capabilities on it,
-wherever they are: in a table, or queued in a message in flight. A count
-of those alone would leak a cycle, so the rule is in terms of what can
-still be used:
+An object (a channel, a memory object, a snapshot, an exited instance's record) exists while something refers to it, and is freed, its charges released, when nothing does. The references are the capabilities on it, wherever they are: in a table, or queued in a message in flight. A count of those alone would leak a cycle, so the rule is in terms of what can still be used:
 
-- An object is **live** while a table or a kernel pin holds a capability
-  on it, or a capability on it is queued in a channel that is itself
-  live. A capability queued in a channel that nobody can receive from any
-  more keeps nothing alive.
-- A channel whose own queue holds a capability on that channel (a service
-  sends one of the channel's send ends over the channel and never
-  receives it), or a set of channels whose queues refer to each other, is
-  freed as soon as the last capability on it in a table is dropped or
-  its holder exits: the queued messages are drained, the capabilities
-  they carry released (which may free further objects, iteratively,
-  never recursively, and without allocating a work list sized by the
-  number of objects), and the charges go back to the creator's quota and
-  the kernel-wide budget. The kernel reports it: `kalium: collected N
-  unreachable objects: M queued messages, B budget bytes`.
-- The channel endpoint counts are not affected: a queued send end counts
-  as a sender while the message carrying it can be received, so `recv`
-  never reports `ECLOSED` on a channel whose queue holds a sender, and a
-  channel whose only sender is in its own queue, with no receiver held
-  anywhere, is collected rather than kept open.
-- The check runs after a release only (a `send` queues a capability in a
-  channel the sender holds, a `recv` or a mint puts one in a table, so
-  neither can make an object unreachable), when the released object is
-  left with references that only queued messages hold, and once per
-  instance exit; it is a mark from the tables and pins over the queues
-  and a drain of what was not marked, bounded by the number of objects
-  and queued capabilities.
+- An object is **live** while a table or a kernel pin holds a capability on it, or a capability on it is queued in a channel that is itself live. A capability queued in a channel that nobody can receive from any more keeps nothing alive.
+- A channel whose own queue holds a capability on that channel (a service sends one of the channel's send ends over the channel and never receives it), or a set of channels whose queues refer to each other, is freed as soon as the last capability on it in a table is dropped or its holder exits: the queued messages are drained, the capabilities they carry released (which may free further objects, iteratively, never recursively, and without allocating a work list sized by the number of objects), and the charges go back to the creator's quota and the kernel-wide budget. The kernel reports it: `kalium: collected N unreachable objects: M queued messages, B budget bytes`.
+- The channel endpoint counts are not affected: a queued send end counts as a sender while the message carrying it can be received, so `recv` never reports `ECLOSED` on a channel whose queue holds a sender, and a channel whose only sender is in its own queue, with no receiver held anywhere, is collected rather than kept open.
+- The check runs after a release only (a `send` queues a capability in a channel the sender holds, a `recv` or a mint puts one in a table, so neither can make an object unreachable), when the released object is left with references that only queued messages hold, and once per instance exit; it is a mark from the tables and pins over the queues and a drain of what was not marked, bounded by the number of objects and queued capabilities.
 
 ### Snapshots
 
-The fast-start primitive of the runtime shelf: an instance that has done
-its initialisation is captured once and every later instance starts from
-the capture instead of initialising again. `instance_snapshot` takes the
-state of a parked instance (what `Instance::snapshot` in kalium-wasm
-captures: the contents of its linear memory, its globals, its tables and
-which segments it has dropped; no value stack, no frames) into a
-`Snapshot` object, and `spawn_snapshot` creates an instance of the
-snapshot's module whose objects start with those contents
-(`Instance::from_snapshot`: a copy of the memory and the tables, nothing
-run). Rules:
+The fast-start primitive of the runtime shelf: an instance that has done its initialisation is captured once and every later instance starts from the capture instead of initialising again. `instance_snapshot` takes the state of a parked instance (what `Instance::snapshot` in kalium-wasm captures: the contents of its linear memory, its globals, its tables and which segments it has dropped; no value stack, no frames) into a `Snapshot` object, and `spawn_snapshot` creates an instance of the snapshot's module whose objects start with those contents (`Instance::from_snapshot`: a copy of the memory and the tables, nothing run). Rules:
 
-- The snapshotted instance must be parked in a host call, i.e. blocked in
-  `recv`, `wait_any` or `instance_wait`, or sleeping, so that its memory
-  is not in the middle of a computation; the interpreter has rewound to
-  the call and the state is what the service left before issuing it. A
-  runnable instance (ready, preempted, or the caller itself) is `EBUSY`;
-  the spawner retries after a `yield_`. An exited instance is `ECLOSED`:
-  the kernel frees the Wasm state at exit so that holders of `Instance`
-  capabilities cannot pin memory beyond `MAX_INSTANCES`.
-- A snapshot is refused with `EBUSY` when the instance's memory or tables
-  are shared (kalium-wasm's rule: every object must have one handle; in M1
-  the kernel never shares them, so this does not happen).
-- The `Snapshot` object is an ordinary kernel object: its reference count
-  is the capabilities on it (`READ|DERIVE|TRANSFER`; `cap_derive`,
-  `cap_revoke` and transfers apply) and it is freed with the last one. It
-  is not tied to the instance it came from, which goes on, or exits,
-  independently.
-- `spawn_snapshot` starts the new instance at an entry chosen by
-  convention: `entry` 0 runs the export `_start` (what `spawn` runs), 1
-  runs the export `resume`. A service meant to be shelved exports both:
-  `_start` builds its state and parks, `resume` continues from the
-  restored state (its stack pointer and heap are where `_start` left
-  them). The transferred capabilities become slots `0..ncaps` as for
-  `spawn`, and the restored memory still holds whatever slot numbers the
-  original stored, so the spawner passes them in the same order it did
-  for the original.
-- The snapshotted instance is not changed by the snapshot, and the
-  snapshot is not changed by the instances created from it.
+- The snapshotted instance must be parked in a host call, i.e. blocked in `recv`, `wait_any` or `instance_wait`, or sleeping, so that its memory is not in the middle of a computation; the interpreter has rewound to the call and the state is what the service left before issuing it. A runnable instance (ready, preempted, or the caller itself) is `EBUSY`; the spawner retries after a `yield_`. An exited instance is `ECLOSED`: the kernel frees the Wasm state at exit so that holders of `Instance` capabilities cannot pin memory beyond `MAX_INSTANCES`.
+- A snapshot is refused with `EBUSY` when the instance's memory or tables are shared (kalium-wasm's rule: every object must have one handle; in M1 the kernel never shares them, so this does not happen).
+- The `Snapshot` object is an ordinary kernel object: its reference count is the capabilities on it (`READ|DERIVE|TRANSFER`; `cap_derive`, `cap_revoke` and transfers apply) and it is freed with the last one. It is not tied to the instance it came from, which goes on, or exits, independently.
+- `spawn_snapshot` starts the new instance at an entry chosen by convention: `entry` 0 runs the export `_start` (what `spawn` runs), 1 runs the export `resume`. A service meant to be shelved exports both: `_start` builds its state and parks, `resume` continues from the restored state (its stack pointer and heap are where `_start` left them). The transferred capabilities become slots `0..ncaps` as for `spawn`, and the restored memory still holds whatever slot numbers the original stored, so the spawner passes them in the same order it did for the original.
+- The snapshotted instance is not changed by the snapshot, and the snapshot is not changed by the instances created from it.
 
 ### Resource quotas
 
-Every byte the kernel allocates on behalf of an instance is accounted
-for, so that a hostile service is refused with `ENOMEM` by a quota and
-never by an allocation failure, which in a kernel is a panic that takes
-the whole system down. Two layers:
+Every byte the kernel allocates on behalf of an instance is accounted for, so that a hostile service is refused with `ENOMEM` by a quota and never by an allocation failure, which in a kernel is a panic that takes the whole system down. Two layers:
 
-- **Per instance.** An object is charged to the instance that created
-  it until it is freed (its last capability gone, wherever it went) or
-  the creator exits, whichever comes first; an object that outlives its
-  creator is nobody's as far as the quotas go, but still the budget's
-  below. The quotas are `kalium-abi` constants:
+- **Per instance.** An object is charged to the instance that created it until it is freed (its last capability gone, wherever it went) or the creator exits, whichever comes first; an object that outlives its creator is nobody's as far as the quotas go, but still the budget's below. The quotas are `kalium-abi` constants:
 
   | Quota | Bounds | Refused with |
   | --- | --- | --- |
@@ -317,63 +155,29 @@ the whole system down. Two layers:
   | `limits::MAX_SNAPSHOT_BYTES_PER_INSTANCE` = 32 MiB | the snapshots an instance took (`instance_snapshot`) that still exist, as `Snapshot::to_bytes` encodes them, summed | `instance_snapshot`: `ENOMEM` |
   | `limits::MAX_CHANNELS_PER_INSTANCE` = 64 | the channels an instance created (`channel_create`) that still exist; with the queue depth and message limit this bounds what the queues of its channels can hold (4 MiB of payload) | `channel_create`: `ENOMEM` |
 
-  Linear memory is bounded by the page limit (256 pages, 16 MiB), tables
-  by the element limit (65536), the capability table by its 256 slots and
-  lineage nodes by the capabilities that carry them (at most
-  `MAX_DERIVE_DEPTH` nodes each; a derive/drop loop frees them), live
-  instances by `MAX_INSTANCES`.
+  Linear memory is bounded by the page limit (256 pages, 16 MiB), tables by the element limit (65536), the capability table by its 256 slots and lineage nodes by the capabilities that carry them (at most `MAX_DERIVE_DEPTH` nodes each; a derive/drop loop frees them), live instances by `MAX_INSTANCES`.
 
-- **Kernel-wide.** The kernel reserves a headroom of its heap (8 MiB)
-  for its own bookkeeping, and everything an instance makes it allocate
-  is charged against the rest, one counter for all instances: linear
-  memories (on creation and on every `memory.grow`, which returns -1
-  when the budget is exhausted exactly as when the page limit is), tables
-  (`table.grow` likewise), the value stack and call frames an execution
-  may grow to (reserved when the instance is created), memory objects,
-  snapshots, and the kernel's copy of every queued message: its queue
-  slot, its payload and the capabilities it carries, with the lineage
-  node each keeps alive while it is in no table
-  (`kalium_ipc::Message::cost_of`; charged at `send`, released at `recv`
-  or when the channel is destroyed), so that a message with no payload
-  but capabilities is charged too, or 32 instances could park about
-  5 MiB of capability lists in the kernel's headroom for nothing.
-  Charges are released when the object is freed or the instance exits. Over
-  budget is `ENOMEM` from the host call (`memobj_create`,
-  `instance_snapshot`, `send`, `spawn`, `spawn_snapshot`) and nothing is
-  allocated.
+- **Kernel-wide.** The kernel reserves a headroom of its heap (8 MiB) for its own bookkeeping, and everything an instance makes it allocate is charged against the rest, one counter for all instances: linear memories (on creation and on every `memory.grow`, which returns -1 when the budget is exhausted exactly as when the page limit is), tables (`table.grow` likewise), the value stack and call frames an execution may grow to (reserved when the instance is created), memory objects, snapshots, and the kernel's copy of every queued message: its queue slot, its payload and the capabilities it carries, with the lineage node each keeps alive while it is in no table (`kalium_ipc::Message::cost_of`; charged at `send`, released at `recv` or when the channel is destroyed), so that a message with no payload but capabilities is charged too, or 32 instances could park about 5 MiB of capability lists in the kernel's headroom for nothing. Charges are released when the object is freed or the instance exits. Over budget is `ENOMEM` from the host call (`memobj_create`, `instance_snapshot`, `send`, `spawn`, `spawn_snapshot`) and nothing is allocated.
 
-Everything the kernel allocates on a host call for a size the instance
-chose (message copies, capability lists, iovec arrays, snapshot bytes
-and every copy `Instance::snapshot` makes of the memory, the globals and
-the tables, memory objects, the growth of a capability table, a lineage
-or a channel queue) is allocated fallibly and failure is `ENOMEM`
-(WASI: `ENOMEM`),
-never a panic; the allocator returns null when it has nothing, so that
-works, and the Rust allocation error handler is the last resort for a
-kernel bug, not something an instance can reach. Lists longer than
-anything could hold are refused before they are read: `send` with more
-than 4 capabilities (`ETOOBIG`), `spawn` with more than 256 (`ENOMEM`),
-`wait_any` with more than 256 (`EINVAL`).
+Everything the kernel allocates on a host call for a size the instance chose (message copies, capability lists, iovec arrays, snapshot bytes and every copy `Instance::snapshot` makes of the memory, the globals and the tables, memory objects, the growth of a capability table, a lineage or a channel queue) is allocated fallibly and failure is `ENOMEM` (WASI: `ENOMEM`), never a panic; the allocator returns null when it has nothing, so that works, and the Rust allocation error handler is the last resort for a kernel bug, not something an instance can reach. Lists longer than anything could hold are refused before they are read: `send` with more than 4 capabilities (`ETOOBIG`), `spawn` with more than 256 (`ENOMEM`), `wait_any` with more than 256 (`EINVAL`).
 
-The boot-test scenario checks this with `hog` (module 10, see the
-definition of done): without quotas it is the service that fills the heap
-and makes the kernel's next small allocation fail.
+The boot-test scenario checks this with `hog` (module 10, see the definition of done): without quotas it is the service that fills the heap and makes the kernel's next small allocation fail.
 
 ### Errno
 
-| Value | Name | Meaning |
-| --- | --- | --- |
-| 0 | `OK` | |
-| 1 | `EBADCAP` | Index is not a live slot. |
-| 2 | `EPERM` | Slot exists but lacks the right, or is the wrong kind. |
-| 3 | `EINVAL` | Bad argument. |
-| 4 | `ENOMEM` | Out of memory or over a quota. |
-| 5 | `EAGAIN` | Would block / queue full. |
-| 6 | `ECLOSED` | Peer gone. |
-| 7 | `ETOOBIG` | Message or object too large. |
-| 8 | `ENOENT` | No such module / unresolved import. |
-| 9 | `EFAULT` | Pointer/length outside linear memory. |
-| 10 | `EBUSY` | Resource in use. |
+| Value | Name      | Meaning                                                |
+| ----- | --------- | ------------------------------------------------------ |
+| 0     | `OK`      |                                                        |
+| 1     | `EBADCAP` | Index is not a live slot.                              |
+| 2     | `EPERM`   | Slot exists but lacks the right, or is the wrong kind. |
+| 3     | `EINVAL`  | Bad argument.                                          |
+| 4     | `ENOMEM`  | Out of memory or over a quota.                         |
+| 5     | `EAGAIN`  | Would block / queue full.                              |
+| 6     | `ECLOSED` | Peer gone.                                             |
+| 7     | `ETOOBIG` | Message or object too large.                           |
+| 8     | `ENOENT`  | No such module / unresolved import.                    |
+| 9     | `EFAULT`  | Pointer/length outside linear memory.                  |
+| 10    | `EBUSY`   | Resource in use.                                       |
 
 ### Rights (u64 bit flags)
 
@@ -383,55 +187,28 @@ and makes the kernel's next small allocation fail.
 
 `Console=1, Channel=2, MemObj=3, Instance=4, Spawn=5, Snapshot=6`.
 
-The kernel's `cap_revoke` scans every table and every queued message once
-with `is_descendant` and `is_valid`, counting what dies, after
-`can_revoke` has said the revocation will be recorded: nothing is
-allocated on that path, however many capabilities exist.
+The kernel's `cap_revoke` scans every table and every queued message once with `is_descendant` and `is_valid`, counting what dies, after `can_revoke` has said the revocation will be recorded: nothing is allocated on that path, however many capabilities exist.
 
-`kalium-abi` defines all of the above as constants (`limits::MAX_DERIVE_DEPTH`,
-the quotas of [Resource quotas](#resource-quotas) and the `entry` values of `spawn_snapshot` included) plus the import module and function names, and nothing else. It has no dependencies and no `unsafe`.
+`kalium-abi` defines all of the above as constants (`limits::MAX_DERIVE_DEPTH`, the quotas of [Resource quotas](#resource-quotas) and the `entry` values of `spawn_snapshot` included) plus the import module and function names, and nothing else. It has no dependencies and no `unsafe`.
 
 ## WASI preview1 compatibility
 
-Beside its own host ABI the kernel offers the `wasi_snapshot_preview1`
-import module, so that ordinary programs built for `wasm32-wasip1` (Rust
-`std`, C through wasi-libc, anything else that targets WASI preview1) run on
-Kalium unchanged. It is a compatibility layer over the capabilities an
-instance holds, not a second ABI: a WASI program cannot ask for anything the
-host ABI could not give it, and gets nothing a capability does not grant.
-The implementation and its design notes live in `kernel/src/wasi.rs`;
-`kalium-abi` has the module name and slot numbers below as `wasi::*`.
+Beside its own host ABI the kernel offers the `wasi_snapshot_preview1` import module, so that ordinary programs built for `wasm32-wasip1` (Rust `std`, C through wasi-libc, anything else that targets WASI preview1) run on Kalium unchanged. It is a compatibility layer over the capabilities an instance holds, not a second ABI: a WASI program cannot ask for anything the host ABI could not give it, and gets nothing a capability does not grant. The implementation and its design notes live in `kernel/src/wasi.rs`; `kalium-abi` has the module name and slot numbers below as `wasi::*`.
 
 ### Linking
 
-`wasi_snapshot_preview1` resolves for every instance, whatever capabilities
-it holds; the calls, not the imports, are checked against the capabilities
-(a `fd_write` without a console fails with `EBADF`). The kernel declares the
-complete function table of the snapshot (46 functions, `wasi/api.h` order)
-with its core-Wasm signatures: pointers, lengths, fds, flags and small enums
-are `i32`, 64-bit sizes, offsets, timestamps and rights are `i64`, every
-function returns an `i32` errno except `proc_exit`. An import that is not
-in the table, or whose type differs, is a link error (`ENOENT` to the
-spawner) like any other. The entry point is the WASI command convention,
-`_start: [] -> []`, which is also the SDK's; a `_start` that returns is
-exit 0.
+`wasi_snapshot_preview1` resolves for every instance, whatever capabilities it holds; the calls, not the imports, are checked against the capabilities (a `fd_write` without a console fails with `EBADF`). The kernel declares the complete function table of the snapshot (46 functions, `wasi/api.h` order) with its core-Wasm signatures: pointers, lengths, fds, flags and small enums are `i32`, 64-bit sizes, offsets, timestamps and rights are `i64`, every function returns an `i32` errno except `proc_exit`. An import that is not in the table, or whose type differs, is a link error (`ENOENT` to the spawner) like any other. The entry point is the WASI command convention, `_start: [] -> []`, which is also the SDK's; a `_start` that returns is exit 0.
 
 ### File descriptors
 
-The three standard streams map onto the capability slots a spawner fills;
-nothing else is a valid fd (no preopened directories: `fd_prestat_get` is
-`EBADF` for every fd, which is how wasi-libc and Rust's `std` learn there is
-nothing to open; no files; no sockets).
+The three standard streams map onto the capability slots a spawner fills; nothing else is a valid fd (no preopened directories: `fd_prestat_get` is `EBADF` for every fd, which is how wasi-libc and Rust's `std` learn there is nothing to open; no files; no sockets).
 
 | fd | Backed by | Without the capability |
 | --- | --- | --- |
 | 0 | the `Channel` capability with `RECV` in slot 1 (`wasi::STDIN_CHANNEL_SLOT`); each message is a chunk of input, kept across `fd_read` calls until consumed; an empty message or a channel without senders is end of file (0 bytes); capabilities carried by a message are dropped. The iovecs have `readv` semantics: an empty iovec among others is skipped, and a call with no room at all (no iovecs, or only empty ones) returns 0 at once without taking a message or blocking, like `read(fd, buf, 0)` | `fd_read` is `EBADF` |
 | 1, 2 | the `Console` capability with `WRITE` in slot 0 (`wasi::STDOUT_CONSOLE_SLOT`) | `fd_write` is `EBADF`, the bytes are dropped |
 
-`fd_fdstat_get` on 0..2 reports a character device with `FD_READ` on 0 and
-`FD_WRITE` on 1 and 2 when the backing capability is present (so C stdio is
-line buffered); `fd_seek` and `fd_tell` on them are `ESPIPE`; `fd_close` is
-accepted and does nothing.
+`fd_fdstat_get` on 0..2 reports a character device with `FD_READ` on 0 and `FD_WRITE` on 1 and 2 when the backing capability is present (so C stdio is line buffered); `fd_seek` and `fd_tell` on them are `ESPIPE`; `fd_close` is accepted and does nothing.
 
 ### Functions
 
@@ -450,85 +227,25 @@ accepted and does nothing.
 | `path_*`, `sock_*` | `ENOTSUP` (no file system, no sockets) |
 | `proc_raise` | `ENOSYS` |
 
-Errno values are WASI preview1's (`__WASI_ERRNO_*`: `EBADF=8`, `EFAULT=21`,
-`EINVAL=28`, `ENOSYS=52`, `ENOTSUP=58`, `ESPIPE=70`, ...), not Kalium's.
-Every pointer and length is bounds-checked like the host ABI's, with the
-same helpers; a failure is WASI `EFAULT`, a negative count `EINVAL`.
+Errno values are WASI preview1's (`__WASI_ERRNO_*`: `EBADF=8`, `EFAULT=21`, `EINVAL=28`, `ENOSYS=52`, `ENOTSUP=58`, `ESPIPE=70`, ...), not Kalium's. Every pointer and length is bounds-checked like the host ABI's, with the same helpers; a failure is WASI `EFAULT`, a negative count `EINVAL`.
 
 ### Demos
 
-`demos/` holds programs that do not use the SDK: `hello-std`, a Rust `std`
-program built with `cargo build --release --target wasm32-wasip1`, and
-`hello-c`, a C program compiled with clang against wasi-libc (a prebuilt
-binary is checked in for machines without that toolchain). They are boot
-image modules 11 (`hello_std`) and 12 (`hello_c`); `init` spawns each with a
-console capability in slot 0, and `hello_c` also with the receive end of a
-channel in slot 1 as its stdin, filled before the spawn with `hello\n`,
-`world` and an empty message (end of file) and whose sending end `init`
-keeps until `hello_c` has exited. The boot-test scenario asserts their
-output and their exit codes, 3 and 5; for `hello_c` that includes a line
-read with `fgets`, a `readv` whose empty first buffer is skipped, end of
-file, and a zero-length `read` on the drained stdin that returns at once
-(were it to block, the kernel would report a deadlock). `cargo xtask demos`
-builds them (`cargo xtask wasm` runs it); see `docs/running.md`.
+`demos/` holds programs that do not use the SDK: `hello-std`, a Rust `std` program built with `cargo build --release --target wasm32-wasip1`, and `hello-c`, a C program compiled with clang against wasi-libc (a prebuilt binary is checked in for machines without that toolchain). They are boot image modules 11 (`hello_std`) and 12 (`hello_c`); `init` spawns each with a console capability in slot 0, and `hello_c` also with the receive end of a channel in slot 1 as its stdin, filled before the spawn with `hello\n`, `world` and an empty message (end of file) and whose sending end `init` keeps until `hello_c` has exited. The boot-test scenario asserts their output and their exit codes, 3 and 5; for `hello_c` that includes a line read with `fgets`, a `readv` whose empty first buffer is skipped, end of file, and a zero-length `read` on the drained stdin that returns at once (were it to block, the kernel would report a deadlock). `cargo xtask demos` builds them (`cargo xtask wasm` runs it); see `docs/running.md`.
 
 ## Crate contracts
 
 ### kalium-wasm
 
-Decoder, validator and interpreter for core WebAssembly as emitted by Rust's
-`wasm32-unknown-unknown` target on the pinned toolchain. Required features:
-MVP, mutable globals, sign-extension, non-trapping float-to-int, bulk memory
-(`memory.copy/fill/init`, `data.drop`, `table.copy/init/fill/grow/size`,
-`elem.drop`), multi-value (block types with params and results), reference
-types (`ref.null/is_null/func`, `table.get/set`, multiple tables). SIMD and
-threads are out of scope for M1 (reject with a clear error). Floats use `libm`.
+Decoder, validator and interpreter for core WebAssembly as emitted by Rust's `wasm32-unknown-unknown` target on the pinned toolchain. Required features: MVP, mutable globals, sign-extension, non-trapping float-to-int, bulk memory (`memory.copy/fill/init`, `data.drop`, `table.copy/init/fill/grow/size`, `elem.drop`), multi-value (block types with params and results), reference types (`ref.null/is_null/func`, `table.get/set`, multiple tables). SIMD and threads are out of scope for M1 (reject with a clear error). Floats use `libm`.
 
-Execution is resumable: the interpreter keeps its value stack, frames and
-program counter in an `Execution` struct and runs for a fuel budget, so the
-scheduler can preempt it at any back-edge or call. Host calls are restartable:
-if the host returns `Block`, the interpreter leaves the arguments on the stack
-and rewinds to the call instruction, so resuming re-issues the call.
+Execution is resumable: the interpreter keeps its value stack, frames and program counter in an `Execution` struct and runs for a fuel budget, so the scheduler can preempt it at any back-edge or call. Host calls are restartable: if the host returns `Block`, the interpreter leaves the arguments on the stack and rewinds to the call instruction, so resuming re-issues the call.
 
-Memories, tables and globals are *shared objects*: an instance holds a
-handle (`MemoryRef`, `TableRef`, `GlobalRef`; `Rc<RefCell<_>>`, the kernel
-being single-threaded) for each one in its index spaces, whether it defined
-or imported it, and exporting one hands out a clone of the handle, so two
-instances that import the same object see one memory, one table or one
-cell. The interpreter borrows the memory for the duration of an interpreter
-loop and releases the borrow around every host call, so a host function
-borrows it itself through `HostCtx` (`ctx.memory.borrow_mut()`), may grow
-it, and may run another instance that shares it.
+Memories, tables and globals are _shared objects_: an instance holds a handle (`MemoryRef`, `TableRef`, `GlobalRef`; `Rc<RefCell<_>>`, the kernel being single-threaded) for each one in its index spaces, whether it defined or imported it, and exporting one hands out a clone of the handle, so two instances that import the same object see one memory, one table or one cell. The interpreter borrows the memory for the duration of an interpreter loop and releases the borrow around every host call, so a host function borrows it itself through `HostCtx` (`ctx.memory.borrow_mut()`), may grow it, and may run another instance that shares it.
 
-A `funcref` (`Value::FuncRef`) is a store-wide *function address*, not a
-function index: each instance owns the address range
-`func_base..func_base + num_funcs` (`Instance::func_addr(index)` =
-`func_base + index` for a defined function; an imported function keeps the
-address of the function it resolved to), and the embedder keeps the ranges
-of instances that may share tables disjoint. A `call_indirect` through the
-address of a function of another instance is routed to the embedder through
-`Host::call_foreign`. With `Instance::new` the range starts at 0, so
-function addresses equal function indices.
+A `funcref` (`Value::FuncRef`) is a store-wide _function address_, not a function index: each instance owns the address range `func_base..func_base + num_funcs` (`Instance::func_addr(index)` = `func_base + index` for a defined function; an imported function keeps the address of the function it resolved to), and the embedder keeps the ranges of instances that may share tables disjoint. A `call_indirect` through the address of a function of another instance is routed to the embedder through `Host::call_foreign`. With `Instance::new` the range starts at 0, so function addresses equal function indices.
 
-Fast start: a `Module` carries its compiled code (`Module::program`, a
-`ProgramCache` filled by `Module::new`), so every instance of a module
-shares one compiled program and instantiation never compiles. The state an
-instance's initialisation leaves behind (memory contents, globals, tables,
-which segments are dropped; nothing of an execution in flight) can be
-captured as a `Snapshot` with `Instance::snapshot` and restored into a new
-instance with `Instance::from_snapshot`, which allocates the objects with
-those contents instead of applying the segments (a memcpy-class
-operation). A snapshot may only be taken when the objects are the
-instance's alone: the module imports no table, memory or global, and every
-handle it holds has `Rc::strong_count == 1` (not exported to a live
-instance, not kept by the host); otherwise `Error::Unsupported`. Function
-references are stored by function index, so a snapshot restores at any
-`func_base`. On restore the snapshot is validated against the module and
-the limits (page count, globals count and types, table lengths and entry
-types, segment counts): a mismatch is `Error::Snapshot`, never a panic.
-`Snapshot::to_bytes`/`from_bytes` is a versioned little-endian encoding
-(magic `KSNP`, version 1, memory, values with a type tag, drop flags),
-bounds-checked on decode, for keeping a snapshot in a memory object.
+Fast start: a `Module` carries its compiled code (`Module::program`, a `ProgramCache` filled by `Module::new`), so every instance of a module shares one compiled program and instantiation never compiles. The state an instance's initialisation leaves behind (memory contents, globals, tables, which segments are dropped; nothing of an execution in flight) can be captured as a `Snapshot` with `Instance::snapshot` and restored into a new instance with `Instance::from_snapshot`, which allocates the objects with those contents instead of applying the segments (a memcpy-class operation). A snapshot may only be taken when the objects are the instance's alone: the module imports no table, memory or global, and every handle it holds has `Rc::strong_count == 1` (not exported to a live instance, not kept by the host); otherwise `Error::Unsupported`. Function references are stored by function index, so a snapshot restores at any `func_base`. On restore the snapshot is validated against the module and the limits (page count, globals count and types, table lengths and entry types, segment counts): a mismatch is `Error::Snapshot`, never a panic. `Snapshot::to_bytes`/`from_bytes` is a versioned little-endian encoding (magic `KSNP`, version 1, memory, values with a type tag, drop flags), bounds-checked on decode, for keeping a snapshot in a memory object.
 
 ```rust
 pub enum Value { I32(i32), I64(i64), F32(f32), F64(f64), FuncRef(Option<u32> /* function address */), ExternRef(Option<u32>) }
@@ -611,24 +328,11 @@ pub enum Error { Malformed { .. }, Unsupported { .. }, Invalid { .. }, Limit { m
 pub struct Limits { pub max_memory_pages: u32, pub max_stack_values: usize, pub max_call_depth: usize, pub max_table_elements: u32 /* total over all tables */ }
 ```
 
-The kernel maps `Error::Link` to `ENOENT` for the spawner (see the host ABI
-above); it uses `Instance::new`, so in M1 a module that imports a table,
-memory or global is a link error as well.
+The kernel maps `Error::Link` to `ENOENT` for the spawner (see the host ABI above); it uses `Instance::new`, so in M1 a module that imports a table, memory or global is a link error as well.
 
-Fuel: 1 unit per instruction is fine; `run` returns `OutOfFuel` promptly after
-the budget is spent. Memory grows via `Vec<u8>` in M1 with the page limit
-enforced. Every memory access is bounds-checked (`Trap::OutOfBounds`).
+Fuel: 1 unit per instruction is fine; `run` returns `OutOfFuel` promptly after the budget is spent. Memory grows via `Vec<u8>` in M1 with the page limit enforced. Every memory access is bounds-checked (`Trap::OutOfBounds`).
 
-Budgets: an embedder that runs many instances bounds what they allocate
-between them with a `Budget` (`budget::Budget`, shared as `BudgetRef`,
-`Rc<Budget>` like the object handles): a memory or table given one
-(`Memory::set_budget`, `Table::set_budget`) charges its current size, then
-every `grow` before it allocates (a grow the budget refuses returns `None`,
-i.e. `-1` to the instance, like one the allocator refuses) and releases
-its charge when dropped; the embedder charges its own allocations through
-`Budget::reserve`/`Budget::release`. Memory and table growth, snapshot
-capture and restore allocate with `try_reserve` and report failure
-(`None`, `Error::OutOfMemory`) rather than abort.
+Budgets: an embedder that runs many instances bounds what they allocate between them with a `Budget` (`budget::Budget`, shared as `BudgetRef`, `Rc<Budget>` like the object handles): a memory or table given one (`Memory::set_budget`, `Table::set_budget`) charges its current size, then every `grow` before it allocates (a grow the budget refuses returns `None`, i.e. `-1` to the instance, like one the allocator refuses) and releases its charge when dropped; the embedder charges its own allocations through `Budget::reserve`/`Budget::release`. Memory and table growth, snapshot capture and restore allocate with `try_reserve` and report failure (`None`, `Error::OutOfMemory`) rather than abort.
 
 ```rust
 pub struct Budget { /* limit, used */ }
@@ -644,79 +348,30 @@ impl Budget {
 impl Memory { pub fn set_budget(&mut self, budget: &BudgetRef) -> bool; pub fn budget(&self) -> Option<&BudgetRef>; }
 impl Table { pub fn set_budget(&mut self, budget: &BudgetRef) -> bool; pub fn budget(&self) -> Option<&BudgetRef>; }
 ```
-Tests: unit tests per module, plus a `wast` runner (`tests/spec.rs`) that runs
-the subset of the official spec test suite covering the required features;
-the `.wast` files are vendored under `crates/kalium-wasm/tests/spec/`.
+
+Tests: unit tests per module, plus a `wast` runner (`tests/spec.rs`) that runs the subset of the official spec test suite covering the required features; the `.wast` files are vendored under `crates/kalium-wasm/tests/spec/`.
 
 ### kalium-hal (aarch64 only)
 
-- `boot.S` / `global_asm!`: `_start` parks all but core 0, drops from EL2 to
-  EL1 if entered at EL2, sets `SP_EL1` to the exception stack and `SP_EL0`
-  to the boot stack and runs the kernel on `SP_EL0` (so every exception
-  lands on its own stack), zeroes `.bss`, keeps `x0` and calls `kmain`.
-- `link.ld` in `kernel/` (load address `0x4020_0000`: 2 MiB above RAM so
-  that QEMU `-kernel` installs the device tree at `0x4000_0000`). Sections
-  on 4 KiB boundaries with their limits exported (`__text_*`, `__rodata_*`,
-  `__data_*`): text, rodata, data, bss, a 16 KiB unmapped guard, the 1 MiB
-  boot stack, a 16 KiB unmapped guard, a 64 KiB exception stack; heap
-  symbols `__heap_start`/`__heap_end`, the latter the fallback RAM end
-  (default 128 MiB from `0x4000_0000`) when no device tree is found.
-- Device tree: a minimal, bounds-checked FDT reader (`fdt.rs`, no external
-  crate, never panics on a malformed blob) finds the `/memory` node and
-  sizes the heap from it; `x0` is honoured when it points at a blob, else
-  the start of RAM is checked.
-- MMU: identity map, W^X. The kernel image through level-3 tables with 4 KiB
-  pages (`.text` RO+X, `.rodata` RO+XN, `.data`/`.bss`/stacks RW+XN, guards
-  unmapped), the device tree area RO+XN, the rest of RAM up to the device
-  tree's size (rounded down to 4 KiB) as normal write-back cacheable RW+XN
-  2 MiB blocks with a partial last block mapped by 4 KiB pages, so that the
-  mapping and the heap end exactly at the end of RAM and nothing without
-  backing memory is mapped; the first 1 GiB (MMIO) as device memory XN,
-  everything else unmapped; `SCTLR_EL1.WXN` set. Enabled before any atomic
-  or allocator use.
-- PL011 UART at `0x0900_0000`: `fn putc(u8)`, `fn write_str`, and a `print!`/
-  `println!` macro pair behind a spinlock.
-- Exception vectors for EL1 (sync, IRQ, FIQ, SError from the current EL and
-  from lower EL) with full register save including FP/SIMD (`q0`–`q31`,
-  `FPCR`, `FPSR`); sync exceptions and SErrors print the decoded class
-  (data/instruction abort, permission/translation fault, level, read/write),
-  FAR, ELR, both stack pointers and the registers, then `exit(2)` so a kernel
-  fault is distinguishable from a panic or scenario failure (1). `svc` from
-  EL1 is a no-op. IRQ dispatches through the GIC.
+- `boot.S` / `global_asm!`: `_start` parks all but core 0, drops from EL2 to EL1 if entered at EL2, sets `SP_EL1` to the exception stack and `SP_EL0` to the boot stack and runs the kernel on `SP_EL0` (so every exception lands on its own stack), zeroes `.bss`, keeps `x0` and calls `kmain`.
+- `link.ld` in `kernel/` (load address `0x4020_0000`: 2 MiB above RAM so that QEMU `-kernel` installs the device tree at `0x4000_0000`). Sections on 4 KiB boundaries with their limits exported (`__text_*`, `__rodata_*`, `__data_*`): text, rodata, data, bss, a 16 KiB unmapped guard, the 1 MiB boot stack, a 16 KiB unmapped guard, a 64 KiB exception stack; heap symbols `__heap_start`/`__heap_end`, the latter the fallback RAM end (default 128 MiB from `0x4000_0000`) when no device tree is found.
+- Device tree: a minimal, bounds-checked FDT reader (`fdt.rs`, no external crate, never panics on a malformed blob) finds the `/memory` node and sizes the heap from it; `x0` is honoured when it points at a blob, else the start of RAM is checked.
+- MMU: identity map, W^X. The kernel image through level-3 tables with 4 KiB pages (`.text` RO+X, `.rodata` RO+XN, `.data`/`.bss`/stacks RW+XN, guards unmapped), the device tree area RO+XN, the rest of RAM up to the device tree's size (rounded down to 4 KiB) as normal write-back cacheable RW+XN 2 MiB blocks with a partial last block mapped by 4 KiB pages, so that the mapping and the heap end exactly at the end of RAM and nothing without backing memory is mapped; the first 1 GiB (MMIO) as device memory XN, everything else unmapped; `SCTLR_EL1.WXN` set. Enabled before any atomic or allocator use.
+- PL011 UART at `0x0900_0000`: `fn putc(u8)`, `fn write_str`, and a `print!`/ `println!` macro pair behind a spinlock.
+- Exception vectors for EL1 (sync, IRQ, FIQ, SError from the current EL and from lower EL) with full register save including FP/SIMD (`q0`–`q31`, `FPCR`, `FPSR`); sync exceptions and SErrors print the decoded class (data/instruction abort, permission/translation fault, level, read/write), FAR, ELR, both stack pointers and the registers, then `exit(2)` so a kernel fault is distinguishable from a panic or scenario failure (1). `svc` from EL1 is a no-op. IRQ dispatches through the GIC.
 - GICv2 (`dist 0x0800_0000`, `cpu 0x0801_0000`): enable, route, ack, EOI.
-- Generic timer: `fn now_ns() -> u64` from `CNTPCT_EL0`/`CNTFRQ_EL0`,
-  `fn set_timer(ns_from_now)`, IRQ 30 (PPI) wired to a handler the scheduler
-  registers: `fn set_tick_handler(fn())`.
-- Exit: semihosting `SYS_EXIT` with an exit code (`fn exit(code: u32) -> !`),
-  so QEMU run with `-semihosting-config enable=on,target=native` propagates
-  the code; fall back to PSCI `SYSTEM_OFF` via HVC.
+- Generic timer: `fn now_ns() -> u64` from `CNTPCT_EL0`/`CNTFRQ_EL0`, `fn set_timer(ns_from_now)`, IRQ 30 (PPI) wired to a handler the scheduler registers: `fn set_tick_handler(fn())`.
+- Exit: semihosting `SYS_EXIT` with an exit code (`fn exit(code: u32) -> !`), so QEMU run with `-semihosting-config enable=on,target=native` propagates the code; fall back to PSCI `SYSTEM_OFF` via HVC.
 - Panic handler that prints the location and message, then `exit(1)`.
 - `fn wait_for_interrupt()` (`wfi`), `fn enable_irqs()`, `fn disable_irqs()`.
 
-Verified by: the kernel binary booting on QEMU, printing, taking 10 timer
-ticks and exiting with code 0 (`cargo xtask boot-test`), and the
-`hal-selftest` feature (`cargo xtask selftest`): `AT`-based checks of every
-region's attributes (including that the mapping ends exactly at the end of
-RAM), deliberate faults (write to `.rodata`/`.text`, execute from
-`.data`/stack/heap, read at the end of RAM, stack overflow into the guard)
-each caught and decoded by the exception handler, and the exception
-round-trip cost; run with the plan's `-m 256M` and again with a RAM size
-that is not a multiple of 2 MiB (`-m 129M`), so the page-mapped tail of RAM
-is exercised. The reader's unit tests run on the host
-(`cargo test -p kalium-hal`).
+Verified by: the kernel binary booting on QEMU, printing, taking 10 timer ticks and exiting with code 0 (`cargo xtask boot-test`), and the `hal-selftest` feature (`cargo xtask selftest`): `AT`-based checks of every region's attributes (including that the mapping ends exactly at the end of RAM), deliberate faults (write to `.rodata`/`.text`, execute from `.data`/stack/heap, read at the end of RAM, stack overflow into the guard) each caught and decoded by the exception handler, and the exception round-trip cost; run with the plan's `-m 256M` and again with a RAM size that is not a multiple of 2 MiB (`-m 129M`), so the page-mapped tail of RAM is exercised. The reader's unit tests run on the host (`cargo test -p kalium-hal`).
 
 ### kalium-mm
 
-- `FrameAllocator`: bitmap over 4 KiB frames in `[__heap_start, __heap_end)`;
-  `alloc_frames(n) -> Option<PhysAddr>`, `free_frames`. Host-testable over a
-  `Vec<u8>` arena.
-- `KernelHeap`: a first-fit free-list allocator with coalescing implementing
-  `core::alloc::GlobalAlloc` behind a spinlock, initialized with a region.
-  Host-tested with randomized alloc/free sequences.
-- `MemObject`: `{ bytes: Vec<u8> }` with `read(offset, buf)`, `write(offset, data)`
-  bounds-checked; size limit enforced at creation, backing allocated with
-  `try_reserve` (`MemError::OutOfMemory`, the ABI's `ENOMEM`). (Backing by
-  frames with MMU mapping is post-M1.)
+- `FrameAllocator`: bitmap over 4 KiB frames in `[__heap_start, __heap_end)`; `alloc_frames(n) -> Option<PhysAddr>`, `free_frames`. Host-testable over a `Vec<u8>` arena.
+- `KernelHeap`: a first-fit free-list allocator with coalescing implementing `core::alloc::GlobalAlloc` behind a spinlock, initialized with a region. Host-tested with randomized alloc/free sequences.
+- `MemObject`: `{ bytes: Vec<u8> }` with `read(offset, buf)`, `write(offset, data)` bounds-checked; size limit enforced at creation, backing allocated with `try_reserve` (`MemError::OutOfMemory`, the ABI's `ENOMEM`). (Backing by frames with MMU mapping is post-M1.)
 
 ### kalium-cap
 
@@ -755,14 +410,8 @@ impl Lineage {
     pub fn is_valid(&self, node: NodeId) -> bool;                       // walks up, at most MAX_DEPTH steps
 }
 ```
-`CapIndex` is a newtype over `u32`; conversion from the ABI's `i32` rejects
-negatives. The object registry (what an `ObjectId` refers to) lives in the
-kernel, not here; the table does not know lineages either, so the kernel
-checks `is_valid` on every lookup and allocates the child node for a
-derivation (`Kernel::derive_into`). `CapTable::insert` and
-`Lineage::root`/`derive` grow their vectors with `try_reserve` and report
-`NoMem` when the heap is short, so a host call never aborts the kernel
-through them; what they free later never has to grow anything.
+
+`CapIndex` is a newtype over `u32`; conversion from the ABI's `i32` rejects negatives. The object registry (what an `ObjectId` refers to) lives in the kernel, not here; the table does not know lineages either, so the kernel checks `is_valid` on every lookup and allocates the child node for a derivation (`Kernel::derive_into`). `CapTable::insert` and `Lineage::root`/`derive` grow their vectors with `try_reserve` and report `NoMem` when the heap is short, so a host call never aborts the kernel through them; what they free later never has to grow anything.
 
 ### kalium-ipc
 
@@ -777,9 +426,8 @@ impl Channel {
     pub fn is_readable(&self) -> bool;
 }
 ```
-Blocking is the scheduler's job: the kernel's host functions return `Block`
-and park the thread on the channel's wait list (`WaitQueue` type in this
-crate: `park(thread_id)`, `wake_one()`, `wake_all()`).
+
+Blocking is the scheduler's job: the kernel's host functions return `Block` and park the thread on the channel's wait list (`WaitQueue` type in this crate: `park(thread_id)`, `wake_one()`, `wake_all()`).
 
 ### kalium-sched
 
@@ -799,78 +447,28 @@ impl Scheduler {
 }
 pub enum RunOutcome { Preempted, Yielded, Blocked, Slept, Exited }
 ```
-Policy: RT threads are released every period with `budget_ns`; runnable RT
-threads are picked earliest-deadline-first ahead of all fair threads; an RT
-thread that exhausts its budget is demoted to the fair queue until its next
-release. Fair threads use weighted round robin with a 1 ms base slice. The
-scheduler is pure (no I/O, no globals) and is host-tested with a simulated
-clock proving the RT guarantee under fair load.
+
+Policy: RT threads are released every period with `budget_ns`; runnable RT threads are picked earliest-deadline-first ahead of all fair threads; an RT thread that exhausts its budget is demoted to the fair queue until its next release. Fair threads use weighted round robin with a 1 ms base slice. The scheduler is pure (no I/O, no globals) and is host-tested with a simulated clock proving the RT guarantee under fair load.
 
 ### kernel
 
-- `kmain`: HAL init (UART, MMU, exceptions, GIC, timer), heap init, print
-  banner, load the boot image, create the init instance with
-  `[Console(WRITE|DERIVE|TRANSFER), Spawn(SPAWN|TRANSFER)]`, run the scheduler
-  loop until no threads remain, then `exit(0)` (or `exit(1)` if any instance
-  trapped unexpectedly, except the `faulty` scenario which is expected).
-- Boot image: `include_bytes!` of the SDK example modules in a fixed order
-  (`init=0, ping=1, pong=2, rt=3, fair=4, faulty=5, park=6, greedy=7,
-  revoked=8, shelf=9, hog=10`, then the WASI demos) via a `build.rs` that
-  reads `target/wasm/*.wasm` produced by `cargo xtask wasm`; a clear error if
-  missing.
-- Host ABI implementation: one `impl Host` that dispatches on `HostFuncId`,
-  with the object registry (keyed by `ObjectId`) holding channels, memory
-  objects, instances, each with its reference count (and how many of the
-  references are capabilities queued in messages, so that an object kept
-  only by unreachable queues is found and collected, see
-  [Reachability](#reachability)), its `Lineage` and
-  what it is charged for (see [Resource quotas](#resource-quotas): the
-  creator's quotas and the kernel-wide budget, a `kalium_wasm::Budget` of
-  the heap minus the kernel's headroom that the instances' memories and
-  tables charge themselves);
-  every capability lookup checks the lineage first (`EBADCAP` for a revoked
-  capability), `cap_revoke` settles channel endpoint counts for the
-  capabilities it kills and wakes the object's waiters; snapshots
-  (`Object::Snapshot`: module index plus the kalium-wasm `Snapshot`) are
-  taken from a parked instance's Wasm state and restored through
-  `Instance::from_snapshot` with the execution started at the chosen
-  export (see "Snapshots" above).
-- The run loop: `pick_next` → run `Execution` with fuel proportional to the
-  slice → map `ExecResult` to `RunOutcome` → handle wakeups (channel sends
-  wake receivers, exits wake waiters, timer ticks wake sleepers and release
-  RT periods).
-- Fuel-to-time: calibrate at boot by running a known loop for 1 ms, or use
-  the timer tick to interrupt: the IRQ handler sets a preempt flag that the
-  interpreter checks (`Execution::run` takes fuel; the kernel passes a
-  moderate fuel and loops, checking the flag between runs).
+- `kmain`: HAL init (UART, MMU, exceptions, GIC, timer), heap init, print banner, load the boot image, create the init instance with `[Console(WRITE|DERIVE|TRANSFER), Spawn(SPAWN|TRANSFER)]`, run the scheduler loop until no threads remain, then `exit(0)` (or `exit(1)` if any instance trapped unexpectedly, except the `faulty` scenario which is expected).
+- Boot image: `include_bytes!` of the SDK example modules in a fixed order (`init=0, ping=1, pong=2, rt=3, fair=4, faulty=5, park=6, greedy=7, revoked=8, shelf=9, hog=10`, then the WASI demos) via a `build.rs` that reads `target/wasm/*.wasm` produced by `cargo xtask wasm`; a clear error if missing.
+- Host ABI implementation: one `impl Host` that dispatches on `HostFuncId`, with the object registry (keyed by `ObjectId`) holding channels, memory objects, instances, each with its reference count (and how many of the references are capabilities queued in messages, so that an object kept only by unreachable queues is found and collected, see [Reachability](#reachability)), its `Lineage` and what it is charged for (see [Resource quotas](#resource-quotas): the creator's quotas and the kernel-wide budget, a `kalium_wasm::Budget` of the heap minus the kernel's headroom that the instances' memories and tables charge themselves); every capability lookup checks the lineage first (`EBADCAP` for a revoked capability), `cap_revoke` settles channel endpoint counts for the capabilities it kills and wakes the object's waiters; snapshots (`Object::Snapshot`: module index plus the kalium-wasm `Snapshot`) are taken from a parked instance's Wasm state and restored through `Instance::from_snapshot` with the execution started at the chosen export (see "Snapshots" above).
+- The run loop: `pick_next` → run `Execution` with fuel proportional to the slice → map `ExecResult` to `RunOutcome` → handle wakeups (channel sends wake receivers, exits wake waiters, timer ticks wake sleepers and release RT periods).
+- Fuel-to-time: calibrate at boot by running a known loop for 1 ms, or use the timer tick to interrupt: the IRQ handler sets a preempt flag that the interpreter checks (`Execution::run` takes fuel; the kernel passes a moderate fuel and loops, checking the flag between runs).
 
 ### SDK and examples
 
-`kalium-sdk` (wasm32, `no_std`): `extern "C"` imports exactly matching the
-ABI tables above (`#[link(name = "kalium:core")]` etc.), safe wrappers
-(`Console::write`, `Channel`, `MemObj`, `spawn`, `instance_snapshot`,
-`spawn_snapshot`, `sleep`, `exit`), a
-`println!` to a console cap, a panic handler calling `exit(101)`, and a
-`#[no_mangle] pub extern "C" fn _start()` convention: each example exports
-`_start` and takes its initial capabilities from slots `0..n`.
+`kalium-sdk` (wasm32, `no_std`): `extern "C"` imports exactly matching the ABI tables above (`#[link(name = "kalium:core")]` etc.), safe wrappers (`Console::write`, `Channel`, `MemObj`, `spawn`, `instance_snapshot`, `spawn_snapshot`, `sleep`, `exit`), a `println!` to a console cap, a panic handler calling `exit(101)`, and a `#[unsafe(no_mangle)] pub extern "C" fn _start()` convention: each example exports `_start` and takes its initial capabilities from slots `0..n`.
 
-Examples (each a `cdylib`/`bin` built with `--target wasm32-unknown-unknown`):
-`init`, `ping`, `pong`, `rt`, `fair`, `faulty`, `park`, `greedy`, `revoked`,
-`shelf` (which exports `resume` beside `_start`), `hog`
-implementing the boot-test scenario in the definition of done. Built by `cargo xtask wasm` into
-`target/wasm/<name>.wasm`.
+Examples (each a `cdylib`/`bin` built with `--target wasm32-unknown-unknown`): `init`, `ping`, `pong`, `rt`, `fair`, `faulty`, `park`, `greedy`, `revoked`, `shelf` (which exports `resume` beside `_start`), `hog` implementing the boot-test scenario in the definition of done. Built by `cargo xtask wasm` into `target/wasm/<name>.wasm`.
 
 ### xtask
 
-`cargo xtask wasm` (build SDK examples), `build` (wasm, then kernel for
-aarch64 in release; `--boot-only`, `--selftest` select the kernel features),
-`run` (build, then QEMU), `boot-test`, `selftest` (HAL checks, see above;
-boots twice, at `-m 256M` and `-m 129M`),
-`test` (host tests, then selftest, then build, then QEMU in boot-test mode
-with a timeout, asserting the expected lines and exit code; exit code 2 is
-reported as a kernel fault), `clippy`, `fmt-check`. QEMU command:
+`cargo xtask wasm` (build SDK examples), `build` (wasm, then kernel for aarch64 in release; `--boot-only`, `--selftest` select the kernel features), `run` (build, then QEMU), `boot-test`, `selftest` (HAL checks, see above; boots twice, at `-m 256M` and `-m 129M`), `test` (host tests, then selftest, then build, then QEMU in boot-test mode with a timeout, asserting the expected lines and exit code; exit code 2 is reported as a kernel fault), `clippy`, `fmt-check`. QEMU command:
 
-```
+```text
 qemu-system-aarch64 -M virt,gic-version=2 -cpu cortex-a72 -m 256M -nographic \
   -semihosting-config enable=on,target=native -no-reboot \
   -kernel target/aarch64-unknown-none/release/kalium
@@ -878,15 +476,15 @@ qemu-system-aarch64 -M virt,gic-version=2 -cpu cortex-a72 -m 256M -nographic \
 
 ## Work breakdown
 
-| Step | Depends on | Output |
-| --- | --- | --- |
-| A. abi + cap | – | constants, tables, tests |
-| B. wasm core (decoder, IR, API skeleton) | – | `Module::new` decoding Rust-emitted modules |
-| C. hal + kernel boot | – | boots on QEMU, prints, exits |
-| D. mm | – | allocators + memobj, host tests |
-| E. wasm validator | B | rejects bad modules, spec subset |
-| F. wasm interpreter | B | runs modules, host calls, fuel, spec subset |
-| G. ipc + sched | A, D | host tests incl. RT guarantee |
-| H. sdk + examples | A | `.wasm` artifacts |
-| I. integration | all | boot-test scenario passes |
-| J. CI, docs, review | I | green workflow, updated README |
+| Step                                     | Depends on | Output                                      |
+| ---------------------------------------- | ---------- | ------------------------------------------- |
+| A. abi + cap                             | –          | constants, tables, tests                    |
+| B. wasm core (decoder, IR, API skeleton) | –          | `Module::new` decoding Rust-emitted modules |
+| C. hal + kernel boot                     | –          | boots on QEMU, prints, exits                |
+| D. mm                                    | –          | allocators + memobj, host tests             |
+| E. wasm validator                        | B          | rejects bad modules, spec subset            |
+| F. wasm interpreter                      | B          | runs modules, host calls, fuel, spec subset |
+| G. ipc + sched                           | A, D       | host tests incl. RT guarantee               |
+| H. sdk + examples                        | A          | `.wasm` artifacts                           |
+| I. integration                           | all        | boot-test scenario passes                   |
+| J. CI, docs, review                      | I          | green workflow, updated README              |

@@ -20,7 +20,7 @@
 //! `Receiver` whose revocation is under test.
 #![no_std]
 
-use kalium_sdk::{exit, Cap, Console, Errno, Receiver, Sender};
+use kalium_sdk::{Cap, Console, Errno, Receiver, Sender, exit};
 
 /// Both uses of the revoked capabilities failed with `EBADCAP`.
 pub const EXIT_REVOKED: i32 = 42;
@@ -31,17 +31,14 @@ pub const EXIT_RECV_STILL_WORKS: i32 = 44;
 /// The setup before the revocation failed.
 pub const EXIT_SETUP: i32 = 45;
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn _start() {
     let console = Console::from_cap(Cap::slot(0));
     let go = Receiver::from_cap(Cap::slot(1));
     let ready = Sender::from_cap(Cap::slot(2));
     let data = Receiver::from_cap(Cap::slot(3));
 
-    if console
-        .println("revoked: hello through a derived console")
-        .is_err()
-    {
+    if console.println("revoked: hello through a derived console").is_err() {
         exit(EXIT_SETUP);
     }
     if ready.send(b"ready", &[]).is_err() {

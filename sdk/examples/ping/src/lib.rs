@@ -5,20 +5,18 @@
 //! init), slot 1 the channel's sender.
 #![no_std]
 
-use kalium_sdk::{exit, yield_now, Cap, Console, Errno, Line, MemObj, Sender};
+use kalium_sdk::{Cap, Console, Errno, Line, MemObj, Sender, exit, yield_now};
 
 const MESSAGES: u32 = 100;
 const MEMOBJ_SIZE: u64 = 64;
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn _start() {
     let console = Console::from_cap(Cap::slot(0));
     let tx = Sender::from_cap(Cap::slot(1));
 
     let memobj = MemObj::create(MEMOBJ_SIZE).unwrap_or_else(|e| fail(console, "memobj_create", e));
-    memobj
-        .write(0, b"hello")
-        .unwrap_or_else(|e| fail(console, "memobj_write", e));
+    memobj.write(0, b"hello").unwrap_or_else(|e| fail(console, "memobj_write", e));
 
     for n in 1..=MESSAGES {
         let msg = Line::new().str("ping ").uint(n as u64);
@@ -37,11 +35,6 @@ pub extern "C" fn _start() {
 }
 
 fn fail(console: Console, what: &str, e: Errno) -> ! {
-    let _ = Line::new()
-        .str("ping: ")
-        .str(what)
-        .str(" failed: ")
-        .errno(e)
-        .println(console);
+    let _ = Line::new().str("ping: ").str(what).str(" failed: ").errno(e).println(console);
     exit(1)
 }

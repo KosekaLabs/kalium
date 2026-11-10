@@ -160,7 +160,7 @@
 //!   values the dispatch is fifteen instructions with no spill, and LLVM
 //!   already outlines the cold paths.
 
-use crate::code::{imm_a, imm_b, imm_c, op, opcode, Func, Program, Word, IMPORTED, RETURN};
+use crate::code::{Func, IMPORTED, Program, RETURN, Word, imm_a, imm_b, imm_c, op, opcode};
 use crate::error::{Error, Trap};
 use crate::instance::{Host, HostCtx, HostFuncId, HostOutcome, Instance};
 use crate::memory::{Memory, MemoryRef};
@@ -316,11 +316,7 @@ fn ref_to_bits(r: Option<u32>) -> u64 {
 
 #[inline(always)]
 fn ref_from_bits(bits: u64) -> Option<u32> {
-    if bits == NULL_REF {
-        None
-    } else {
-        Some(bits as u32)
-    }
+    if bits == NULL_REF { None } else { Some(bits as u32) }
 }
 
 /// A reference value of type `ty`.
@@ -334,11 +330,7 @@ fn ref_value(ty: RefType, r: Option<u32>) -> Value {
 /// The stack bits of a local's initial value.
 #[inline(always)]
 fn default_bits(ty: ValType) -> u64 {
-    if ty.is_ref() {
-        NULL_REF
-    } else {
-        0
-    }
+    if ty.is_ref() { NULL_REF } else { 0 }
 }
 
 /// Numeric types the typed stack helpers move in and out of stack slots.
@@ -449,8 +441,7 @@ fn grow_buf<T: Copy + Default>(mut buf: Vec<T>, len: usize, max: usize) -> Resul
         return Err(Trap::StackOverflow);
     }
     let new_len = buf.len().max(64).saturating_mul(2).min(max).max(len);
-    buf.try_reserve_exact(new_len - buf.len())
-        .map_err(|_| Trap::StackOverflow)?;
+    buf.try_reserve_exact(new_len - buf.len()).map_err(|_| Trap::StackOverflow)?;
     buf.resize(new_len, T::default());
     Ok(buf)
 }
@@ -474,10 +465,7 @@ struct Stack {
 
 impl Stack {
     fn new(max: usize) -> Stack {
-        Stack {
-            max,
-            ..Stack::default()
-        }
+        Stack { max, ..Stack::default() }
     }
 
     /// Make the buffer at least `len` slots long (`Trap::StackOverflow`
@@ -519,12 +507,7 @@ impl Stack {
     }
 
     /// The `n` values below `sp` as typed values, appended to `out`.
-    fn read_values(
-        &mut self,
-        sp: usize,
-        tys: &[ValType],
-        out: &mut Vec<Value>,
-    ) -> Result<(), Trap> {
+    fn read_values(&mut self, sp: usize, tys: &[ValType], out: &mut Vec<Value>) -> Result<(), Trap> {
         self.view().read_values(sp, tys, out)
     }
 }
@@ -639,11 +622,7 @@ impl View<'_> {
     }
 
     #[inline(always)]
-    fn un_try<A: Bits, R: Bits>(
-        &mut self,
-        sp: usize,
-        f: impl FnOnce(A) -> Result<R, Trap>,
-    ) -> Result<(), Trap> {
+    fn un_try<A: Bits, R: Bits>(&mut self, sp: usize, f: impl FnOnce(A) -> Result<R, Trap>) -> Result<(), Trap> {
         let i = sp.wrapping_sub(1);
         self.check(i, A::TY)?;
         let slot = self.buf.get_mut(i).ok_or(Trap::Invalid)?;
@@ -657,11 +636,7 @@ impl View<'_> {
 
     /// Replace the top two values `a b` by `f(a, b)`.
     #[inline(always)]
-    fn bin<A: Bits, B: Bits, R: Bits>(
-        &mut self,
-        sp: &mut usize,
-        f: impl FnOnce(A, B) -> R,
-    ) -> Result<(), Trap> {
+    fn bin<A: Bits, B: Bits, R: Bits>(&mut self, sp: &mut usize, f: impl FnOnce(A, B) -> R) -> Result<(), Trap> {
         self.bin_try(sp, |a, b| Ok(f(a, b)))
     }
 
@@ -831,12 +806,7 @@ impl View<'_> {
 
     /// `local.get a; <const>; <binop>`: push `f(a)`.
     #[inline(always)]
-    fn local_bin<A: Bits, R: Bits>(
-        &mut self,
-        sp: &mut usize,
-        ia: usize,
-        f: impl FnOnce(A) -> R,
-    ) -> Result<(), Trap> {
+    fn local_bin<A: Bits, R: Bits>(&mut self, sp: &mut usize, ia: usize, f: impl FnOnce(A) -> R) -> Result<(), Trap> {
         let a = self.local_as::<A>(ia)?;
         self.push_as(sp, f(a))
     }
@@ -857,12 +827,7 @@ impl View<'_> {
 
     /// `local.get a; <const>; <binop>; local.set d`: `d = f(a)`.
     #[inline(always)]
-    fn local_bin_set<A: Bits, R: Bits>(
-        &mut self,
-        ia: usize,
-        id: usize,
-        f: impl FnOnce(A) -> R,
-    ) -> Result<(), Trap> {
+    fn local_bin_set<A: Bits, R: Bits>(&mut self, ia: usize, id: usize, f: impl FnOnce(A) -> R) -> Result<(), Trap> {
         let a = self.local_as::<A>(ia)?;
         self.set_slot(id, f(a).to_bits(), shadow(R::TY))
     }
@@ -875,12 +840,7 @@ impl View<'_> {
 
     /// `<binop>; local.set d`: pop `a b`, `d = f(a, b)`.
     #[inline(always)]
-    fn bin_set<A: Bits, B: Bits, R: Bits>(
-        &mut self,
-        sp: &mut usize,
-        id: usize,
-        f: impl FnOnce(A, B) -> R,
-    ) -> Result<(), Trap> {
+    fn bin_set<A: Bits, B: Bits, R: Bits>(&mut self, sp: &mut usize, id: usize, f: impl FnOnce(A, B) -> R) -> Result<(), Trap> {
         let (a, b) = self.pop2::<A, B>(sp)?;
         self.set_slot(id, f(a, b).to_bits(), shadow(R::TY))
     }
@@ -1039,11 +999,7 @@ fn f32_min(a: f32, b: f32) -> f32 {
     } else if b.is_nan() {
         quiet_f32(b)
     } else if a == b {
-        if a.is_sign_negative() {
-            a
-        } else {
-            b
-        }
+        if a.is_sign_negative() { a } else { b }
     } else if a < b {
         a
     } else {
@@ -1057,11 +1013,7 @@ fn f32_max(a: f32, b: f32) -> f32 {
     } else if b.is_nan() {
         quiet_f32(b)
     } else if a == b {
-        if a.is_sign_positive() {
-            a
-        } else {
-            b
-        }
+        if a.is_sign_positive() { a } else { b }
     } else if a > b {
         a
     } else {
@@ -1075,11 +1027,7 @@ fn f64_min(a: f64, b: f64) -> f64 {
     } else if b.is_nan() {
         quiet_f64(b)
     } else if a == b {
-        if a.is_sign_negative() {
-            a
-        } else {
-            b
-        }
+        if a.is_sign_negative() { a } else { b }
     } else if a < b {
         a
     } else {
@@ -1093,11 +1041,7 @@ fn f64_max(a: f64, b: f64) -> f64 {
     } else if b.is_nan() {
         quiet_f64(b)
     } else if a == b {
-        if a.is_sign_positive() {
-            a
-        } else {
-            b
-        }
+        if a.is_sign_positive() { a } else { b }
     } else if a > b {
         a
     } else {
@@ -1107,19 +1051,11 @@ fn f64_max(a: f64, b: f64) -> f64 {
 
 /// Apply a rounding function, quieting NaN inputs.
 fn round_f32(x: f32, f: fn(f32) -> f32) -> f32 {
-    if x.is_nan() {
-        quiet_f32(x)
-    } else {
-        f(x)
-    }
+    if x.is_nan() { quiet_f32(x) } else { f(x) }
 }
 
 fn round_f64(x: f64, f: fn(f64) -> f64) -> f64 {
-    if x.is_nan() {
-        quiet_f64(x)
-    } else {
-        f(x)
-    }
+    if x.is_nan() { quiet_f64(x) } else { f(x) }
 }
 
 fn f32_sqrt(x: f32) -> f32 {
@@ -1143,19 +1079,11 @@ fn f64_sqrt(x: f64) -> f64 {
 }
 
 fn f32_demote(x: f64) -> f32 {
-    if x.is_nan() {
-        f32::NAN
-    } else {
-        x as f32
-    }
+    if x.is_nan() { f32::NAN } else { x as f32 }
 }
 
 fn f64_promote(x: f32) -> f64 {
-    if x.is_nan() {
-        f64::NAN
-    } else {
-        x as f64
-    }
+    if x.is_nan() { f64::NAN } else { x as f64 }
 }
 
 /// Trapping float-to-integer truncation. `lo`/`hi` bound the truncated
@@ -1167,74 +1095,24 @@ macro_rules! trunc_trap {
                 return Err(Trap::InvalidConversion);
             }
             let t = $trunc(x);
-            if t > $lo && t < $hi {
-                Ok(t as $to)
-            } else {
-                Err(Trap::IntegerOverflow)
-            }
+            if t > $lo && t < $hi { Ok(t as $to) } else { Err(Trap::IntegerOverflow) }
         }
     };
 }
 
-trunc_trap!(
-    i32_trunc_f32_s,
-    f32,
-    i32,
-    libm::truncf,
-    -2147483904.0,
-    2147483648.0
-);
+trunc_trap!(i32_trunc_f32_s, f32, i32, libm::truncf, -2147483904.0, 2147483648.0);
 trunc_trap!(i32_trunc_f32_u, f32, u32, libm::truncf, -1.0, 4294967296.0);
-trunc_trap!(
-    i32_trunc_f64_s,
-    f64,
-    i32,
-    libm::trunc,
-    -2147483649.0,
-    2147483648.0
-);
+trunc_trap!(i32_trunc_f64_s, f64, i32, libm::trunc, -2147483649.0, 2147483648.0);
 trunc_trap!(i32_trunc_f64_u, f64, u32, libm::trunc, -1.0, 4294967296.0);
-trunc_trap!(
-    i64_trunc_f32_s,
-    f32,
-    i64,
-    libm::truncf,
-    -9223373136366403584.0,
-    9223372036854775808.0
-);
-trunc_trap!(
-    i64_trunc_f32_u,
-    f32,
-    u64,
-    libm::truncf,
-    -1.0,
-    18446744073709551616.0
-);
-trunc_trap!(
-    i64_trunc_f64_s,
-    f64,
-    i64,
-    libm::trunc,
-    -9223372036854777856.0,
-    9223372036854775808.0
-);
-trunc_trap!(
-    i64_trunc_f64_u,
-    f64,
-    u64,
-    libm::trunc,
-    -1.0,
-    18446744073709551616.0
-);
+trunc_trap!(i64_trunc_f32_s, f32, i64, libm::truncf, -9223373136366403584.0, 9223372036854775808.0);
+trunc_trap!(i64_trunc_f32_u, f32, u64, libm::truncf, -1.0, 18446744073709551616.0);
+trunc_trap!(i64_trunc_f64_s, f64, i64, libm::trunc, -9223372036854777856.0, 9223372036854775808.0);
+trunc_trap!(i64_trunc_f64_u, f64, u64, libm::trunc, -1.0, 18446744073709551616.0);
 
 #[cold]
 #[inline(never)]
 fn div_s_trap<T: PartialEq>(b: T, zero: T) -> Trap {
-    if b == zero {
-        Trap::IntegerDivideByZero
-    } else {
-        Trap::IntegerOverflow
-    }
+    if b == zero { Trap::IntegerDivideByZero } else { Trap::IntegerOverflow }
 }
 
 #[inline(always)]
@@ -1273,30 +1151,22 @@ fn host_call(
     let (id, ty): (Result<HostFuncId, u32>, _) = match target {
         HostTarget::Import(func) => (
             Ok(inst.host_func(func).ok_or(Trap::Invalid)?),
-            inst.func_type_index(func)
-                .and_then(|t| module.types.get(t as usize))
-                .ok_or(Trap::Invalid)?,
+            inst.func_type_index(func).and_then(|t| module.types.get(t as usize)).ok_or(Trap::Invalid)?,
         ),
-        HostTarget::Foreign { addr, ty } => (
-            Err(addr),
-            module.types.get(ty as usize).ok_or(Trap::Invalid)?,
-        ),
+        HostTarget::Foreign { addr, ty } => (Err(addr), module.types.get(ty as usize).ok_or(Trap::Invalid)?),
     };
     let start = sp.checked_sub(ty.params.len()).ok_or(Trap::Invalid)?;
     args.clear();
     results.clear();
     stack.read_values(*sp, &ty.params, args)?;
     results.extend(ty.results.iter().map(|&t| Value::default_for(t)));
-    let mut ctx = HostCtx {
-        memory: &inst.memory,
-    };
+    let mut ctx = HostCtx { memory: &inst.memory };
     let outcome = match id {
         Ok(id) => host.call(&mut ctx, id, args, results),
         Err(addr) => host.call_foreign(&mut ctx, addr, ty, args, results),
     }?;
     if outcome == HostOutcome::Continue {
-        let well_typed = results.len() == ty.results.len()
-            && results.iter().zip(&ty.results).all(|(v, &t)| v.ty() == t);
+        let well_typed = results.len() == ty.results.len() && results.iter().zip(&ty.results).all(|(v, &t)| v.ty() == t);
         if !well_typed {
             return Err(Trap::Host);
         }
@@ -1353,29 +1223,18 @@ impl Execution {
                 if exec.max_depth == 0 {
                     return Err(Trap::CallDepth);
                 }
-                let locals = program
-                    .locals
-                    .get(f.locals_start as usize..f.locals_end as usize)
-                    .ok_or(Trap::Invalid)?;
+                let locals = program.locals.get(f.locals_start as usize..f.locals_end as usize).ok_or(Trap::Invalid)?;
                 exec.stack.reserve(f.stack as usize)?;
                 exec.stack.view().push_locals(&mut sp, locals)?;
-                exec.frames.push(Frame {
-                    pc: f.entry,
-                    base: 0,
-                    arity: f.nresults,
-                });
+                exec.frames.push(Frame { pc: f.entry, base: 0, arity: f.nresults });
             }
             exec.sp = sp;
             Ok(())
         })();
         match setup {
             Ok(()) => Ok(exec),
-            Err(Trap::CallDepth) => Err(Error::Limit {
-                msg: "call depth limit too small",
-            }),
-            Err(Trap::StackOverflow) => Err(Error::Limit {
-                msg: "value stack limit too small",
-            }),
+            Err(Trap::CallDepth) => Err(Error::Limit { msg: "call depth limit too small" }),
+            Err(Trap::StackOverflow) => Err(Error::Limit { msg: "value stack limit too small" }),
             Err(_) => Err(Error::NoSuchFunction { func }),
         }
     }
@@ -1456,13 +1315,7 @@ impl Execution {
 
     /// An execution whose entry function is an import: one host call with
     /// the arguments on the stack.
-    fn run_entry_import(
-        &mut self,
-        module: &Module,
-        inst: &mut Instance,
-        host: &mut dyn Host,
-        fuel: u64,
-    ) -> Result<Flow, Trap> {
+    fn run_entry_import(&mut self, module: &Module, inst: &mut Instance, host: &mut dyn Host, fuel: u64) -> Result<Flow, Trap> {
         if fuel == 0 {
             return Ok(Flow::OutOfFuel);
         }
@@ -1488,13 +1341,7 @@ impl Execution {
 
     // ---- the interpreter loop -------------------------------------------
 
-    fn run_inner(
-        &mut self,
-        module: &Module,
-        inst: &mut Instance,
-        host: &mut dyn Host,
-        fuel: u64,
-    ) -> Result<Flow, Trap> {
+    fn run_inner(&mut self, module: &Module, inst: &mut Instance, host: &mut dyn Host, fuel: u64) -> Result<Flow, Trap> {
         let mut left = fuel;
         let r = self.run_slices(module, inst, host, &mut left);
         self.fuel_used += fuel - left;
@@ -1503,22 +1350,12 @@ impl Execution {
 
     /// Run the interpreter loop, growing the value stack when a call needs
     /// more than it has (see [`Stack`]).
-    fn run_slices(
-        &mut self,
-        module: &Module,
-        inst: &mut Instance,
-        host: &mut dyn Host,
-        fuel: &mut u64,
-    ) -> Result<Flow, Trap> {
+    fn run_slices(&mut self, module: &Module, inst: &mut Instance, host: &mut dyn Host, fuel: &mut u64) -> Result<Flow, Trap> {
         let memory = inst.memory.clone();
         let program = inst.program().clone();
         loop {
             match self.run_loop(&program, module, inst, host, &memory, fuel)? {
-                Flow::Grow {
-                    len,
-                    restore,
-                    width,
-                } => {
+                Flow::Grow { len, restore, width } => {
                     self.stack.reserve(len)?;
                     if let Some(v) = restore {
                         self.stack.push_i32(&mut self.sp, v)?;
@@ -1594,11 +1431,7 @@ impl Execution {
         // continue at the target.
         macro_rules! br {
             ($target:expr, $height:expr, $arity:expr) => {{
-                stack.unwind(
-                    &mut sp,
-                    base.wrapping_add($height as usize),
-                    $arity as usize,
-                )?;
+                stack.unwind(&mut sp, base.wrapping_add($height as usize), $arity as usize)?;
                 pc = $target as usize;
             }};
         }
@@ -1618,16 +1451,8 @@ impl Execution {
         macro_rules! host_dispatch {
             ($target:expr, $restore:expr, $width:expr) => {{
                 drop(guard);
-                let outcome = host_call(
-                    &mut stack,
-                    &mut sp,
-                    &mut self.host_args,
-                    &mut self.host_results,
-                    module,
-                    inst,
-                    host,
-                    $target,
-                );
+                let outcome =
+                    host_call(&mut stack, &mut sp, &mut self.host_args, &mut self.host_results, module, inst, host, $target);
                 guard = memory.try_borrow_mut().map_err(|_| Trap::Host)?;
                 mem = &mut guard;
                 match outcome? {
@@ -1676,25 +1501,14 @@ impl Execution {
                 let extent = callee_base.saturating_add(f.stack as usize);
                 if extent > stack.buf.len() {
                     save!();
-                    return Ok(Flow::Grow {
-                        len: extent,
-                        restore: $restore,
-                        width: $width,
-                    });
+                    return Ok(Flow::Grow { len: extent, restore: $restore, width: $width });
                 }
-                let locals = program
-                    .locals
-                    .get(f.locals_start as usize..f.locals_end as usize)
-                    .ok_or(Trap::Invalid)?;
+                let locals = program.locals.get(f.locals_start as usize..f.locals_end as usize).ok_or(Trap::Invalid)?;
                 stack.push_locals(&mut sp, locals)?;
                 if let Some(caller) = frames.last_mut() {
                     caller.pc = pc as u32;
                 }
-                frames.push(Frame {
-                    pc: f.entry,
-                    base: callee_base as u32,
-                    arity: f.nresults,
-                });
+                frames.push(Frame { pc: f.entry, base: callee_base as u32, arity: f.nresults });
                 pc = f.entry as usize;
                 base = callee_base;
             }};
@@ -1722,11 +1536,7 @@ impl Execution {
         // A table, borrowed for the current instruction.
         macro_rules! table {
             ($idx:expr) => {
-                inst.tables
-                    .get($idx as usize)
-                    .ok_or(Trap::Invalid)?
-                    .try_borrow_mut()
-                    .map_err(|_| Trap::Host)?
+                inst.tables.get($idx as usize).ok_or(Trap::Invalid)?.try_borrow_mut().map_err(|_| Trap::Host)?
             };
         }
         macro_rules! pop {
@@ -1903,11 +1713,7 @@ impl Execution {
                 op::BR_TABLE => {
                     let i = pop!(i32) as u32;
                     let table = program.br_tables.get(a as usize).ok_or(Trap::Invalid)?;
-                    let b = table
-                        .targets
-                        .get(i as usize)
-                        .copied()
-                        .unwrap_or(table.default);
+                    let b = table.targets.get(i as usize).copied().unwrap_or(table.default);
                     if b.target == RETURN {
                         ret!();
                     } else {
@@ -1917,20 +1723,11 @@ impl Execution {
                 op::RETURN => ret!(),
                 op::CALL => call!(a),
                 op::CALL_INDIRECT | op::CALL_INDIRECT_W => {
-                    let (table, width) = if opcode(w) == op::CALL_INDIRECT {
-                        (imm_b(w), 1)
-                    } else {
-                        (next_word!() as u32, 2)
-                    };
+                    let (table, width) = if opcode(w) == op::CALL_INDIRECT { (imm_b(w), 1) } else { (next_word!() as u32, 2) };
                     let ty = a;
                     let i = pop!(i32) as u32;
-                    let entry = inst
-                        .tables
-                        .get(table as usize)
-                        .ok_or(Trap::Invalid)?
-                        .try_borrow()
-                        .map_err(|_| Trap::Host)?
-                        .get(i);
+                    let entry =
+                        inst.tables.get(table as usize).ok_or(Trap::Invalid)?.try_borrow().map_err(|_| Trap::Host)?.get(i);
                     let addr = match entry {
                         Ok(Value::FuncRef(Some(a))) => a,
                         Ok(Value::FuncRef(None)) => return Err(Trap::UninitializedElement),
@@ -1941,9 +1738,7 @@ impl Execution {
                     // common case, one subtraction and two compares), one
                     // of its imports, or a foreign function.
                     let f = addr.wrapping_sub(inst.func_base);
-                    let local = if (f as usize) < inst.num_funcs()
-                        && (f as usize) >= inst.num_imported_funcs()
-                    {
+                    let local = if (f as usize) < inst.num_funcs() && (f as usize) >= inst.num_imported_funcs() {
                         Some(f)
                     } else {
                         inst.import_by_addr(addr)
@@ -1953,8 +1748,7 @@ impl Execution {
                             let actual = inst.func_type_index(f).ok_or(Trap::Invalid)?;
                             if actual != ty {
                                 let module = inst.module();
-                                let expected =
-                                    module.types.get(ty as usize).ok_or(Trap::Invalid)?;
+                                let expected = module.types.get(ty as usize).ok_or(Trap::Invalid)?;
                                 let got = module.types.get(actual as usize).ok_or(Trap::Invalid)?;
                                 if expected != got {
                                     return Err(Trap::IndirectCallTypeMismatch);
@@ -1996,11 +1790,7 @@ impl Execution {
 
                 // ---- references ---------------------------------------
                 op::REF_NULL => {
-                    let t = if a == 0 {
-                        RefType::FuncRef
-                    } else {
-                        RefType::ExternRef
-                    };
+                    let t = if a == 0 { RefType::FuncRef } else { RefType::ExternRef };
                     stack.push_ref(&mut sp, t, None)?;
                 }
                 op::REF_IS_NULL => {
@@ -2033,9 +1823,7 @@ impl Execution {
                     let n = pop!(i32) as u32;
                     let init = stack.pop_ref(&mut sp)?;
                     let elem = table!(a).elem_type();
-                    let r = inst
-                        .grow_table(a, n, ref_value(elem, init))?
-                        .map_or(-1, |old| old as i32);
+                    let r = inst.grow_table(a, n, ref_value(elem, init))?.map_or(-1, |old| old as i32);
                     push!(r);
                 }
                 op::TABLE_FILL => {
@@ -2055,14 +1843,10 @@ impl Execution {
                     let st = inst.tables.get(src as usize).ok_or(Trap::Invalid)?;
                     // Two table indices may name one shared table.
                     if Rc::ptr_eq(dt, st) {
-                        dt.try_borrow_mut()
-                            .map_err(|_| Trap::Host)?
-                            .copy_within(d, s, n)?;
+                        dt.try_borrow_mut().map_err(|_| Trap::Host)?.copy_within(d, s, n)?;
                     } else {
                         let st = st.try_borrow().map_err(|_| Trap::Host)?;
-                        dt.try_borrow_mut()
-                            .map_err(|_| Trap::Host)?
-                            .init(d, st.entries(), s, n)?;
+                        dt.try_borrow_mut().map_err(|_| Trap::Host)?.init(d, st.entries(), s, n)?;
                     }
                 }
                 op::TABLE_INIT => {
@@ -2122,11 +1906,7 @@ impl Execution {
                     let (d, s) = stack.pop2::<i32, i32>(&mut sp)?;
                     let dropped = *inst.data_dropped.get(a as usize).ok_or(Trap::Invalid)?;
                     let module = inst.module();
-                    let data: &[u8] = if dropped {
-                        &[]
-                    } else {
-                        &module.data.get(a as usize).ok_or(Trap::Invalid)?.bytes
-                    };
+                    let data: &[u8] = if dropped { &[] } else { &module.data.get(a as usize).ok_or(Trap::Invalid)?.bytes };
                     let start = s as u32 as usize;
                     let end = start.checked_add(n as usize).ok_or(Trap::OutOfBounds)?;
                     if end > data.len() {
@@ -2165,23 +1945,13 @@ impl Execution {
                 op::I32_MUL => bin!(|a: i32, b: i32| a.wrapping_mul(b)),
                 op::I32_DIV_S => bin_try!(i32_div_s),
                 op::I32_DIV_U => bin_try!(|a: i32, b: i32| {
-                    (a as u32)
-                        .checked_div(b as u32)
-                        .map(|v| v as i32)
-                        .ok_or(Trap::IntegerDivideByZero)
+                    (a as u32).checked_div(b as u32).map(|v| v as i32).ok_or(Trap::IntegerDivideByZero)
                 }),
-                op::I32_REM_S => bin_try!(|a: i32, b: i32| {
-                    if b == 0 {
-                        Err(Trap::IntegerDivideByZero)
-                    } else {
-                        Ok(a.wrapping_rem(b))
-                    }
-                }),
+                op::I32_REM_S => {
+                    bin_try!(|a: i32, b: i32| { if b == 0 { Err(Trap::IntegerDivideByZero) } else { Ok(a.wrapping_rem(b)) } })
+                }
                 op::I32_REM_U => bin_try!(|a: i32, b: i32| {
-                    (a as u32)
-                        .checked_rem(b as u32)
-                        .map(|v| v as i32)
-                        .ok_or(Trap::IntegerDivideByZero)
+                    (a as u32).checked_rem(b as u32).map(|v| v as i32).ok_or(Trap::IntegerDivideByZero)
                 }),
                 op::I32_AND => bin!(|a: i32, b: i32| a & b),
                 op::I32_OR => bin!(|a: i32, b: i32| a | b),
@@ -2214,23 +1984,13 @@ impl Execution {
                 op::I64_MUL => bin!(|a: i64, b: i64| a.wrapping_mul(b)),
                 op::I64_DIV_S => bin_try!(i64_div_s),
                 op::I64_DIV_U => bin_try!(|a: i64, b: i64| {
-                    (a as u64)
-                        .checked_div(b as u64)
-                        .map(|v| v as i64)
-                        .ok_or(Trap::IntegerDivideByZero)
+                    (a as u64).checked_div(b as u64).map(|v| v as i64).ok_or(Trap::IntegerDivideByZero)
                 }),
-                op::I64_REM_S => bin_try!(|a: i64, b: i64| {
-                    if b == 0 {
-                        Err(Trap::IntegerDivideByZero)
-                    } else {
-                        Ok(a.wrapping_rem(b))
-                    }
-                }),
+                op::I64_REM_S => {
+                    bin_try!(|a: i64, b: i64| { if b == 0 { Err(Trap::IntegerDivideByZero) } else { Ok(a.wrapping_rem(b)) } })
+                }
                 op::I64_REM_U => bin_try!(|a: i64, b: i64| {
-                    (a as u64)
-                        .checked_rem(b as u64)
-                        .map(|v| v as i64)
-                        .ok_or(Trap::IntegerDivideByZero)
+                    (a as u64).checked_rem(b as u64).map(|v| v as i64).ok_or(Trap::IntegerDivideByZero)
                 }),
                 op::I64_AND => bin!(|a: i64, b: i64| a & b),
                 op::I64_OR => bin!(|a: i64, b: i64| a | b),
@@ -2377,8 +2137,7 @@ impl Execution {
                     local_get_const_binop!(a, |x: i32, c: i32| x.wrapping_shl(c as u32))
                 }
                 op::LOCAL_GET_I32_CONST_I32_SHR_U => {
-                    local_get_const_binop!(a, |x: i32, c: i32| (x as u32).wrapping_shr(c as u32)
-                        as i32)
+                    local_get_const_binop!(a, |x: i32, c: i32| (x as u32).wrapping_shr(c as u32) as i32)
                 }
                 op::LOCAL_GET_I32_CONST_I32_LT_U => {
                     local_get_const_binop!(a, |x: i32, c: i32| (x as u32) < (c as u32))
@@ -2402,9 +2161,7 @@ impl Execution {
                     let b = imm_a(word_at!(0));
                     let d = imm_a(word_at!(2));
                     pc += 3;
-                    stack.local2_bin_set(local!(a), local!(b), local!(d), |x: i32, y: i32| {
-                        x.wrapping_add(y)
-                    })?;
+                    stack.local2_bin_set(local!(a), local!(b), local!(d), |x: i32, y: i32| x.wrapping_add(y))?;
                 }),
                 op::LOCAL_GET_I32_CONST_I32_ADD_LOCAL_SET => fused!(3, local_get!(a), {
                     let c = imm_a(word_at!(0)) as i32;
@@ -2525,9 +2282,7 @@ mod tests {
     }
 
     fn call(inst: &mut Instance, name: &str, args: &[Value]) -> ExecResult {
-        let f = inst
-            .export_func(name)
-            .unwrap_or_else(|| panic!("no export {name}"));
+        let f = inst.export_func(name).unwrap_or_else(|| panic!("no export {name}"));
         let mut e = Execution::new(inst, f, args).unwrap();
         e.run(inst, &mut NoHost, u64::MAX)
     }
@@ -2606,37 +2361,19 @@ mod tests {
         assert_eq!(one(i, "add", &[i32v(i32::MAX), i32v(1)]), i32v(i32::MIN));
         assert_eq!(one(i, "mul", &[i32v(0x10000), i32v(0x10000)]), i32v(0));
         assert_eq!(one(i, "div_s", &[i32v(-7), i32v(2)]), i32v(-3));
-        assert_eq!(
-            trap(i, "div_s", &[i32v(1), i32v(0)]),
-            Trap::IntegerDivideByZero
-        );
-        assert_eq!(
-            trap(i, "div_s", &[i32v(i32::MIN), i32v(-1)]),
-            Trap::IntegerOverflow
-        );
+        assert_eq!(trap(i, "div_s", &[i32v(1), i32v(0)]), Trap::IntegerDivideByZero);
+        assert_eq!(trap(i, "div_s", &[i32v(i32::MIN), i32v(-1)]), Trap::IntegerOverflow);
         assert_eq!(one(i, "div_u", &[i32v(-1), i32v(2)]), i32v(0x7fff_ffff));
-        assert_eq!(
-            trap(i, "div_u", &[i32v(1), i32v(0)]),
-            Trap::IntegerDivideByZero
-        );
+        assert_eq!(trap(i, "div_u", &[i32v(1), i32v(0)]), Trap::IntegerDivideByZero);
         assert_eq!(one(i, "rem_s", &[i32v(i32::MIN), i32v(-1)]), i32v(0));
         assert_eq!(one(i, "rem_s", &[i32v(-7), i32v(2)]), i32v(-1));
-        assert_eq!(
-            trap(i, "rem_s", &[i32v(1), i32v(0)]),
-            Trap::IntegerDivideByZero
-        );
+        assert_eq!(trap(i, "rem_s", &[i32v(1), i32v(0)]), Trap::IntegerDivideByZero);
         assert_eq!(one(i, "rem_u", &[i32v(-1), i32v(2)]), i32v(1));
-        assert_eq!(
-            trap(i, "rem_u", &[i32v(1), i32v(0)]),
-            Trap::IntegerDivideByZero
-        );
+        assert_eq!(trap(i, "rem_u", &[i32v(1), i32v(0)]), Trap::IntegerDivideByZero);
         assert_eq!(one(i, "shl", &[i32v(1), i32v(33)]), i32v(2));
         assert_eq!(one(i, "shr_s", &[i32v(-8), i32v(1)]), i32v(-4));
         assert_eq!(one(i, "shr_u", &[i32v(-8), i32v(1)]), i32v(0x7fff_fffc));
-        assert_eq!(
-            one(i, "rotl", &[i32v(0x8000_0001u32 as i32), i32v(33)]),
-            i32v(3)
-        );
+        assert_eq!(one(i, "rotl", &[i32v(0x8000_0001u32 as i32), i32v(33)]), i32v(3));
         assert_eq!(one(i, "rotr", &[i32v(1), i32v(1)]), i32v(i32::MIN));
         assert_eq!(one(i, "clz", &[i32v(0)]), i32v(32));
         assert_eq!(one(i, "ctz", &[i32v(0)]), i32v(32));
@@ -2644,10 +2381,7 @@ mod tests {
         assert_eq!(one(i, "ext8", &[i32v(0x80)]), i32v(-128));
         assert_eq!(one(i, "ext16", &[i32v(0x8000)]), i32v(-32768));
         assert_eq!(one(i, "lt_u", &[i32v(-1), i32v(0)]), i32v(0));
-        assert_eq!(
-            trap(i, "div_s64", &[i64v(i64::MIN), i64v(-1)]),
-            Trap::IntegerOverflow
-        );
+        assert_eq!(trap(i, "div_s64", &[i64v(i64::MIN), i64v(-1)]), Trap::IntegerOverflow);
         assert_eq!(one(i, "rem_s64", &[i64v(i64::MIN), i64v(-1)]), i64v(0));
         assert_eq!(one(i, "rotl64", &[i64v(1), i64v(65)]), i64v(2));
         assert_eq!(one(i, "shr_u64", &[i64v(-1), i64v(63)]), i64v(1));
@@ -2690,21 +2424,11 @@ mod tests {
         assert_eq!(bits32(one(i, "min", &[f32v(0.0), f32v(-0.0)])), 0x8000_0000);
         assert_eq!(bits32(one(i, "max", &[f32v(-0.0), f32v(0.0)])), 0);
         assert_eq!(one(i, "min", &[f32v(1.0), f32v(2.0)]), f32v(1.0));
-        assert_eq!(
-            one(i, "max", &[f32v(-1.0), f32v(f32::NEG_INFINITY)]),
-            f32v(-1.0)
-        );
+        assert_eq!(one(i, "max", &[f32v(-1.0), f32v(f32::NEG_INFINITY)]), f32v(-1.0));
         let snan = f32::from_bits(0x7f80_0001);
         let r = bits32(one(i, "min", &[f32v(1.0), f32v(snan)]));
-        assert_eq!(
-            r & 0x7fc0_0000,
-            0x7fc0_0000,
-            "quiet NaN expected, got {r:#x}"
-        );
-        assert!(one(i, "max", &[f32v(f32::NAN), f32v(1.0)])
-            .as_f32()
-            .unwrap()
-            .is_nan());
+        assert_eq!(r & 0x7fc0_0000, 0x7fc0_0000, "quiet NaN expected, got {r:#x}");
+        assert!(one(i, "max", &[f32v(f32::NAN), f32v(1.0)]).as_f32().unwrap().is_nan());
         // nearest: ties to even, sign of zero kept.
         assert_eq!(one(i, "nearest", &[f32v(2.5)]), f32v(2.0));
         assert_eq!(one(i, "nearest", &[f32v(3.5)]), f32v(4.0));
@@ -2715,22 +2439,9 @@ mod tests {
         let r = bits32(one(i, "nearest", &[f32v(snan)]));
         assert_eq!(r, 0x7fc0_0001);
         // bit-exact sign ops, NaN payload preserved.
-        assert_eq!(
-            bits32(one(i, "copysign", &[f32v(snan), f32v(-1.0)])),
-            0xff80_0001
-        );
-        assert_eq!(
-            bits32(one(i, "abs", &[f32v(f32::from_bits(0xff80_0001))])),
-            0x7f80_0001
-        );
-        assert_eq!(
-            bits64(one(
-                i,
-                "neg",
-                &[f64v(f64::from_bits(0x7ff0_0000_0000_0001))]
-            )),
-            0xfff0_0000_0000_0001
-        );
+        assert_eq!(bits32(one(i, "copysign", &[f32v(snan), f32v(-1.0)])), 0xff80_0001);
+        assert_eq!(bits32(one(i, "abs", &[f32v(f32::from_bits(0xff80_0001))])), 0x7f80_0001);
+        assert_eq!(bits64(one(i, "neg", &[f64v(f64::from_bits(0x7ff0_0000_0000_0001))])), 0xfff0_0000_0000_0001);
         assert_eq!(bits32(one(i, "sqrt", &[f32v(-0.0)])), 0x8000_0000);
         assert!(one(i, "sqrt", &[f32v(-1.0)]).as_f32().unwrap().is_nan());
         assert_eq!(one(i, "sqrt", &[f32v(16.0)]), f32v(4.0));
@@ -2738,45 +2449,18 @@ mod tests {
         assert_eq!(one(i, "trunc_s", &[f32v(-2147483648.0)]), i32v(i32::MIN));
         assert_eq!(one(i, "trunc_s", &[f32v(2147483520.0)]), i32v(2147483520));
         assert_eq!(one(i, "trunc_s", &[f32v(-0.9)]), i32v(0));
-        assert_eq!(
-            trap(i, "trunc_s", &[f32v(2147483648.0)]),
-            Trap::IntegerOverflow
-        );
-        assert_eq!(
-            trap(i, "trunc_s", &[f32v(-2147483904.0)]),
-            Trap::IntegerOverflow
-        );
-        assert_eq!(
-            trap(i, "trunc_s", &[f32v(f32::NAN)]),
-            Trap::InvalidConversion
-        );
-        assert_eq!(
-            trap(i, "trunc_s", &[f32v(f32::INFINITY)]),
-            Trap::IntegerOverflow
-        );
+        assert_eq!(trap(i, "trunc_s", &[f32v(2147483648.0)]), Trap::IntegerOverflow);
+        assert_eq!(trap(i, "trunc_s", &[f32v(-2147483904.0)]), Trap::IntegerOverflow);
+        assert_eq!(trap(i, "trunc_s", &[f32v(f32::NAN)]), Trap::InvalidConversion);
+        assert_eq!(trap(i, "trunc_s", &[f32v(f32::INFINITY)]), Trap::IntegerOverflow);
         assert_eq!(one(i, "trunc_u", &[f64v(-0.9)]), i32v(0));
         assert_eq!(one(i, "trunc_u", &[f64v(4294967295.0)]), i32v(-1));
-        assert_eq!(
-            trap(i, "trunc_u", &[f64v(4294967296.0)]),
-            Trap::IntegerOverflow
-        );
+        assert_eq!(trap(i, "trunc_u", &[f64v(4294967296.0)]), Trap::IntegerOverflow);
         assert_eq!(trap(i, "trunc_u", &[f64v(-1.0)]), Trap::IntegerOverflow);
-        assert_eq!(
-            one(i, "trunc64_s", &[f64v(-9223372036854775808.0)]),
-            i64v(i64::MIN)
-        );
-        assert_eq!(
-            trap(i, "trunc64_s", &[f64v(9223372036854775808.0)]),
-            Trap::IntegerOverflow
-        );
-        assert_eq!(
-            one(i, "trunc64_u", &[f32v(18446742974197923840.0)]),
-            i64v(-1099511627776)
-        );
-        assert_eq!(
-            trap(i, "trunc64_u", &[f32v(18446744073709551616.0)]),
-            Trap::IntegerOverflow
-        );
+        assert_eq!(one(i, "trunc64_s", &[f64v(-9223372036854775808.0)]), i64v(i64::MIN));
+        assert_eq!(trap(i, "trunc64_s", &[f64v(9223372036854775808.0)]), Trap::IntegerOverflow);
+        assert_eq!(one(i, "trunc64_u", &[f32v(18446742974197923840.0)]), i64v(-1099511627776));
+        assert_eq!(trap(i, "trunc64_u", &[f32v(18446744073709551616.0)]), Trap::IntegerOverflow);
         // saturating truncation.
         assert_eq!(one(i, "sat_s", &[f32v(f32::NAN)]), i32v(0));
         assert_eq!(one(i, "sat_s", &[f32v(1e10)]), i32v(i32::MAX));
@@ -2785,27 +2469,15 @@ mod tests {
         assert_eq!(one(i, "sat_u", &[f64v(1e10)]), i32v(-1));
         assert_eq!(one(i, "sat64_u", &[f64v(f64::INFINITY)]), i64v(-1));
         // conversions.
-        assert!(one(i, "demote", &[f64v(f64::NAN)])
-            .as_f32()
-            .unwrap()
-            .is_nan());
+        assert!(one(i, "demote", &[f64v(f64::NAN)]).as_f32().unwrap().is_nan());
         assert_eq!(one(i, "demote", &[f64v(1e40)]), f32v(f32::INFINITY));
         assert_eq!(one(i, "promote", &[f32v(0.5)]), f64v(0.5));
-        assert_eq!(
-            bits32(one(i, "reinterpret", &[i32v(0x7f80_0001)])),
-            0x7f80_0001
-        );
+        assert_eq!(bits32(one(i, "reinterpret", &[i32v(0x7f80_0001)])), 0x7f80_0001);
         assert_eq!(one(i, "reinterpret64", &[f64v(-0.0)]), i64v(i64::MIN));
-        assert_eq!(
-            one(i, "convert_u", &[i64v(-1)]),
-            f32v(18446744073709551616.0)
-        );
+        assert_eq!(one(i, "convert_u", &[i64v(-1)]), f32v(18446744073709551616.0));
         assert_eq!(one(i, "convert_s", &[i32v(i32::MIN)]), f64v(-2147483648.0));
         assert_eq!(one(i, "div", &[f64v(1.0), f64v(0.0)]), f64v(f64::INFINITY));
-        assert_eq!(
-            bits64(one(i, "div", &[f64v(-1.0), f64v(0.0)])),
-            f64::NEG_INFINITY.to_bits()
-        );
+        assert_eq!(bits64(one(i, "div", &[f64v(-1.0), f64v(0.0)])), f64::NEG_INFINITY.to_bits());
     }
 
     const MEMORY: &str = r#"(module
@@ -2858,10 +2530,7 @@ mod tests {
         assert_eq!(one(i, "load", &[i32v(0)]), i32v(0x3fc0_0000));
         assert_eq!(trap(i, "store", &[i32v(65533), i32v(0)]), Trap::OutOfBounds);
         ok(i, "store", &[i32v(65532), i32v(0x0a0b_0c0d)]);
-        assert_eq!(
-            one(i, "loadf64", &[i32v(8)]),
-            f64v(f64::from_bits(0x0807_0605_0403_0201))
-        );
+        assert_eq!(one(i, "loadf64", &[i32v(8)]), f64v(f64::from_bits(0x0807_0605_0403_0201)));
         // grow: type max 3 and instance limit.
         assert_eq!(one(i, "size", &[]), i32v(1));
         assert_eq!(one(i, "grow", &[i32v(1)]), i32v(1));
@@ -2871,51 +2540,27 @@ mod tests {
         assert_eq!(one(i, "size", &[]), i32v(3));
         assert_eq!(one(i, "load", &[i32v(3 * 65536 - 4)]), i32v(0));
         // bulk ops: bounds checked before any write.
-        assert_eq!(
-            trap(i, "fill", &[i32v(3 * 65536 - 2), i32v(0xaa), i32v(3)]),
-            Trap::OutOfBounds
-        );
+        assert_eq!(trap(i, "fill", &[i32v(3 * 65536 - 2), i32v(0xaa), i32v(3)]), Trap::OutOfBounds);
         assert_eq!(one(i, "load", &[i32v(3 * 65536 - 4)]), i32v(0));
         ok(i, "fill", &[i32v(100), i32v(0xaa), i32v(4)]);
         assert_eq!(one(i, "load", &[i32v(100)]), i32v(0xaaaa_aaaau32 as i32));
         ok(i, "fill", &[i32v(3 * 65536), i32v(1), i32v(0)]);
-        assert_eq!(
-            trap(i, "fill", &[i32v(3 * 65536 + 1), i32v(1), i32v(0)]),
-            Trap::OutOfBounds
-        );
-        assert_eq!(
-            trap(i, "copy", &[i32v(0), i32v(3 * 65536 - 2), i32v(4)]),
-            Trap::OutOfBounds
-        );
-        assert_eq!(
-            trap(i, "copy", &[i32v(3 * 65536 - 2), i32v(0), i32v(4)]),
-            Trap::OutOfBounds
-        );
+        assert_eq!(trap(i, "fill", &[i32v(3 * 65536 + 1), i32v(1), i32v(0)]), Trap::OutOfBounds);
+        assert_eq!(trap(i, "copy", &[i32v(0), i32v(3 * 65536 - 2), i32v(4)]), Trap::OutOfBounds);
+        assert_eq!(trap(i, "copy", &[i32v(3 * 65536 - 2), i32v(0), i32v(4)]), Trap::OutOfBounds);
         ok(i, "copy", &[i32v(200), i32v(8), i32v(8)]);
         assert_eq!(one(i, "load64", &[i32v(200)]), i64v(0x0807_0605_0403_0201));
         ok(i, "copy", &[i32v(201), i32v(200), i32v(7)]);
         assert_eq!(one(i, "load64", &[i32v(200)]), i64v(0x0706_0504_0302_0101));
-        assert_eq!(
-            trap(i, "init", &[i32v(0), i32v(1), i32v(4)]),
-            Trap::OutOfBounds
-        );
-        assert_eq!(
-            trap(i, "init", &[i32v(3 * 65536 - 2), i32v(0), i32v(4)]),
-            Trap::OutOfBounds
-        );
+        assert_eq!(trap(i, "init", &[i32v(0), i32v(1), i32v(4)]), Trap::OutOfBounds);
+        assert_eq!(trap(i, "init", &[i32v(3 * 65536 - 2), i32v(0), i32v(4)]), Trap::OutOfBounds);
         assert_eq!(one(i, "load", &[i32v(0)]), i32v(0x3fc0_0000));
         ok(i, "init", &[i32v(0), i32v(1), i32v(3)]);
         assert_eq!(one(i, "load", &[i32v(0)]), i32v(0x3f40_3020));
         ok(i, "drop", &[]);
         ok(i, "init", &[i32v(0), i32v(0), i32v(0)]);
-        assert_eq!(
-            trap(i, "init", &[i32v(0), i32v(0), i32v(1)]),
-            Trap::OutOfBounds
-        );
-        assert_eq!(
-            trap(i, "init", &[i32v(0), i32v(1), i32v(0)]),
-            Trap::OutOfBounds
-        );
+        assert_eq!(trap(i, "init", &[i32v(0), i32v(0), i32v(1)]), Trap::OutOfBounds);
+        assert_eq!(trap(i, "init", &[i32v(0), i32v(1), i32v(0)]), Trap::OutOfBounds);
         // The host sees the same memory.
         let mut buf = [0u8; 4];
         inst.memory().read(0, &mut buf).unwrap();
@@ -3036,19 +2681,13 @@ mod tests {
         assert_eq!(trap(i, "call", &[i32v(0)]), Trap::UninitializedElement);
         assert_eq!(trap(i, "call", &[i32v(4)]), Trap::UndefinedElement);
         assert_eq!(trap(i, "call", &[i32v(-1)]), Trap::UndefinedElement);
-        assert_eq!(
-            trap(i, "call_ii", &[i32v(1)]),
-            Trap::IndirectCallTypeMismatch
-        );
+        assert_eq!(trap(i, "call_ii", &[i32v(1)]), Trap::IndirectCallTypeMismatch);
         ok(i, "set", &[i32v(0), Value::FuncRef(Some(2))]);
         assert_eq!(one(i, "call_ii", &[i32v(0)]), i32v(8));
         assert_eq!(one(i, "get", &[i32v(0)]), Value::FuncRef(Some(2)));
         assert_eq!(one(i, "get", &[i32v(3)]), Value::FuncRef(None));
         assert_eq!(trap(i, "get", &[i32v(4)]), Trap::TableOutOfBounds);
-        assert_eq!(
-            trap(i, "set", &[i32v(4), Value::FuncRef(None)]),
-            Trap::TableOutOfBounds
-        );
+        assert_eq!(trap(i, "set", &[i32v(4), Value::FuncRef(None)]), Trap::TableOutOfBounds);
         assert_eq!(one(i, "is_null", &[i32v(3)]), i32v(1));
         assert_eq!(one(i, "is_null", &[i32v(1)]), i32v(0));
         assert_eq!(one(i, "ref_inc", &[]), Value::FuncRef(Some(2)));
@@ -3061,16 +2700,10 @@ mod tests {
         assert_eq!(one(i, "get", &[i32v(5)]), Value::FuncRef(Some(2)));
         ok(i, "fill", &[i32v(4), i32v(2)]);
         assert_eq!(one(i, "get", &[i32v(5)]), Value::FuncRef(None));
-        assert_eq!(
-            trap(i, "copy", &[i32v(5), i32v(0), i32v(2)]),
-            Trap::TableOutOfBounds
-        );
+        assert_eq!(trap(i, "copy", &[i32v(5), i32v(0), i32v(2)]), Trap::TableOutOfBounds);
         ok(i, "copy", &[i32v(3), i32v(0), i32v(3)]);
         assert_eq!(one(i, "get", &[i32v(5)]), Value::FuncRef(Some(1)));
-        assert_eq!(
-            trap(i, "init", &[i32v(0), i32v(2), i32v(2)]),
-            Trap::TableOutOfBounds
-        );
+        assert_eq!(trap(i, "init", &[i32v(0), i32v(2), i32v(2)]), Trap::TableOutOfBounds);
         ok(i, "init", &[i32v(0), i32v(0), i32v(3)]);
         assert_eq!(one(i, "call", &[i32v(0)]), i32v(2));
         assert_eq!(one(i, "call", &[i32v(2)]), i32v(1));
@@ -3078,10 +2711,7 @@ mod tests {
         assert_eq!(one(i, "get", &[i32v(1)]), Value::FuncRef(None));
         ok(i, "drop", &[]);
         ok(i, "init", &[i32v(0), i32v(0), i32v(0)]);
-        assert_eq!(
-            trap(i, "init", &[i32v(0), i32v(0), i32v(1)]),
-            Trap::TableOutOfBounds
-        );
+        assert_eq!(trap(i, "init", &[i32v(0), i32v(0), i32v(1)]), Trap::TableOutOfBounds);
         assert_eq!(one(i, "uget", &[i32v(1)]), Value::ExternRef(None));
         ok(i, "uset", &[i32v(1), Value::ExternRef(Some(42))]);
         assert_eq!(one(i, "uget", &[i32v(1)]), Value::ExternRef(Some(42)));
@@ -3145,10 +2775,7 @@ mod tests {
             results: &mut [Value],
         ) -> Result<HostOutcome, Trap> {
             self.calls.push((func.0, args.to_vec()));
-            ctx.memory
-                .try_borrow_mut()
-                .map_err(|_| Trap::Host)?
-                .write(0, &(self.calls.len() as u32).to_le_bytes())?;
+            ctx.memory.try_borrow_mut().map_err(|_| Trap::Host)?.write(0, &(self.calls.len() as u32).to_le_bytes())?;
             match func.0 {
                 0 => {
                     if self.blocks > 0 {
@@ -3172,11 +2799,7 @@ mod tests {
     #[test]
     fn host_block_continue_exit() {
         let mut inst = instantiate(HOSTED);
-        let mut host = CountingHost {
-            blocks: 2,
-            calls: Vec::new(),
-            exit_code: 0,
-        };
+        let mut host = CountingHost { blocks: 2, calls: Vec::new(), exit_code: 0 };
         let run = inst.export_func("run").unwrap();
         let mut e = Execution::new(&inst, run, &[i32v(41)]).unwrap();
         // Blocked twice: the arguments stay on the stack and the call is
@@ -3186,10 +2809,7 @@ mod tests {
         assert_eq!(e.run(&mut inst, &mut host, 1000), ExecResult::Blocked);
         assert_eq!(e.stack_len(), stack_after_block);
         assert!(!e.is_finished());
-        assert_eq!(
-            e.run(&mut inst, &mut host, 1000),
-            ExecResult::Done(vec![i32v(142)])
-        );
+        assert_eq!(e.run(&mut inst, &mut host, 1000), ExecResult::Done(vec![i32v(142)]));
         assert!(e.is_finished());
         assert_eq!(host.calls.len(), 3);
         for (f, args) in &host.calls {
@@ -3200,10 +2820,7 @@ mod tests {
         inst.memory().read(0, &mut buf).unwrap();
         assert_eq!(u32::from_le_bytes(buf), 3);
         // A finished execution keeps returning its result.
-        assert_eq!(
-            e.run(&mut inst, &mut host, 1000),
-            ExecResult::Done(vec![i32v(142)])
-        );
+        assert_eq!(e.run(&mut inst, &mut host, 1000), ExecResult::Done(vec![i32v(142)]));
 
         // Exit.
         let quit = inst.export_func("quit").unwrap();
@@ -3215,10 +2832,7 @@ mod tests {
         // Host trap.
         let none = inst.export_func("none").unwrap();
         let mut e = Execution::new(&inst, none, &[]).unwrap();
-        assert_eq!(
-            e.run(&mut inst, &mut host, 1000),
-            ExecResult::Trap(Trap::Host)
-        );
+        assert_eq!(e.run(&mut inst, &mut host, 1000), ExecResult::Trap(Trap::Host));
 
         // Host result of the wrong type is a host trap too.
         struct BadHost;
@@ -3235,10 +2849,7 @@ mod tests {
             }
         }
         let mut e = Execution::new(&inst, run, &[i32v(1)]).unwrap();
-        assert_eq!(
-            e.run(&mut inst, &mut BadHost, 1000),
-            ExecResult::Trap(Trap::Host)
-        );
+        assert_eq!(e.run(&mut inst, &mut BadHost, 1000), ExecResult::Trap(Trap::Host));
 
         // An import can be the entry function: the execution is one host
         // call, with the same blocking and exit behaviour.
@@ -3247,18 +2858,12 @@ mod tests {
         assert_eq!(e.run(&mut inst, &mut host, 0), ExecResult::OutOfFuel);
         assert_eq!(e.run(&mut inst, &mut host, 1), ExecResult::Blocked);
         assert_eq!(e.stack_len(), 2);
-        assert_eq!(
-            e.run(&mut inst, &mut host, 1),
-            ExecResult::Done(vec![i32v(3)])
-        );
+        assert_eq!(e.run(&mut inst, &mut host, 1), ExecResult::Done(vec![i32v(3)]));
         let mut e = Execution::new(&inst, 1, &[i32v(5)]).unwrap();
         assert_eq!(e.run(&mut inst, &mut host, 1), ExecResult::Exited(5));
         let mut e = Execution::new(&inst, 2, &[]).unwrap();
         assert_eq!(e.run(&mut inst, &mut host, 1), ExecResult::Trap(Trap::Host));
-        assert_eq!(
-            Execution::new(&inst, 0, &[i32v(1)]).err(),
-            Some(Error::ArgumentMismatch)
-        );
+        assert_eq!(Execution::new(&inst, 0, &[i32v(1)]).err(), Some(Error::ArgumentMismatch));
     }
 
     /// A host that blocks the first call to each function and answers the
@@ -3315,10 +2920,7 @@ mod tests {
                     (call_indirect (type $nullary) (i32.const 1)))
             )"#,
         );
-        let mut host = BlockOnceHost {
-            seen: Vec::new(),
-            calls: Vec::new(),
-        };
+        let mut host = BlockOnceHost { seen: Vec::new(), calls: Vec::new() };
 
         // Two arguments: the slot index (0) sits above them when the host
         // blocks and must still be there on resume.
@@ -3327,14 +2929,8 @@ mod tests {
         assert_eq!(e.run(&mut inst, &mut host, 1000), ExecResult::Blocked);
         // Local 0, the two arguments and the table index.
         assert_eq!(e.stack_len(), 4);
-        assert_eq!(
-            e.run(&mut inst, &mut host, 1000),
-            ExecResult::Done(vec![i32v(42)])
-        );
-        assert_eq!(
-            host.calls,
-            vec![(0, vec![i32v(41), i32v(1)]), (0, vec![i32v(41), i32v(1)])]
-        );
+        assert_eq!(e.run(&mut inst, &mut host, 1000), ExecResult::Done(vec![i32v(42)]));
+        assert_eq!(host.calls, vec![(0, vec![i32v(41), i32v(1)]), (0, vec![i32v(41), i32v(1)])]);
 
         // Zero arguments: the value below the index (7) must not be taken
         // for the index on resume.
@@ -3343,10 +2939,7 @@ mod tests {
         let mut e = Execution::new(&inst, nullary, &[]).unwrap();
         assert_eq!(e.run(&mut inst, &mut host, 1000), ExecResult::Blocked);
         assert_eq!(e.stack_len(), 2);
-        assert_eq!(
-            e.run(&mut inst, &mut host, 1000),
-            ExecResult::Done(vec![i32v(7)])
-        );
+        assert_eq!(e.run(&mut inst, &mut host, 1000), ExecResult::Done(vec![i32v(7)]));
         assert_eq!(host.calls, vec![(1, vec![]), (1, vec![])]);
     }
 
@@ -3354,21 +2947,12 @@ mod tests {
     /// (`Limits::max_table_elements`), not only per table (KW-2).
     #[test]
     fn table_element_budget() {
-        let budget = |n| Limits {
-            max_table_elements: n,
-            ..Limits::default()
-        };
+        let budget = |n| Limits { max_table_elements: n, ..Limits::default() };
         // Declared minimums are summed over all tables.
         let two = "(module (table 100 funcref) (table 100 externref))";
-        assert!(matches!(
-            instantiate_with(two, &budget(150)),
-            Err(Error::Limit { .. })
-        ));
+        assert!(matches!(instantiate_with(two, &budget(150)), Err(Error::Limit { .. })));
         assert!(instantiate_with(two, &budget(200)).is_ok());
-        assert!(matches!(
-            instantiate_with("(module (table 151 funcref))", &budget(150)),
-            Err(Error::Limit { .. })
-        ));
+        assert!(matches!(instantiate_with("(module (table 151 funcref))", &budget(150)), Err(Error::Limit { .. })));
         // An absurd minimum (u32::MAX elements would be 64 GiB) is rejected
         // under the default limits without allocating anything.
         assert!(matches!(
@@ -3376,10 +2960,7 @@ mod tests {
             Err(Error::Limit { .. })
         ));
         assert!(matches!(
-            instantiate_with(
-                "(module (table 40000 funcref) (table 30000 funcref))",
-                &Limits::default()
-            ),
+            instantiate_with("(module (table 40000 funcref) (table 30000 funcref))", &Limits::default()),
             Err(Error::Limit { .. })
         ));
 
@@ -3431,18 +3012,12 @@ mod tests {
             }
         };
         assert_eq!(result, expected);
-        assert!(
-            runs > 50,
-            "fac(10) takes more than 50 instructions, ran {runs}"
-        );
+        assert!(runs > 50, "fac(10) takes more than 50 instructions, ran {runs}");
 
         // Exactly that many instructions as one budget finishes it; one less
         // does not.
         let mut e = Execution::new(&inst, fac, &[i64v(10)]).unwrap();
-        assert_eq!(
-            e.run(&mut inst, &mut NoHost, runs - 1),
-            ExecResult::OutOfFuel
-        );
+        assert_eq!(e.run(&mut inst, &mut NoHost, runs - 1), ExecResult::OutOfFuel);
         assert_eq!(e.run(&mut inst, &mut NoHost, 1), expected);
         let mut e = Execution::new(&inst, fac, &[i64v(10)]).unwrap();
         assert_eq!(e.run(&mut inst, &mut NoHost, runs), expected);
@@ -3475,11 +3050,7 @@ mod tests {
 
         // Fuel and host blocking interleaved.
         let mut inst = instantiate(HOSTED);
-        let mut host = CountingHost {
-            blocks: 3,
-            calls: Vec::new(),
-            exit_code: 0,
-        };
+        let mut host = CountingHost { blocks: 3, calls: Vec::new(), exit_code: 0 };
         let run = inst.export_func("run").unwrap();
         let mut e = Execution::new(&inst, run, &[i32v(1)]).unwrap();
         let mut blocked = 0;
@@ -3507,12 +3078,7 @@ mod tests {
                 (local i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64)
                 (if (local.get 0) (then (call 2 (i32.sub (local.get 0) (i32.const 1))))))
         )"#;
-        let limits = Limits {
-            max_memory_pages: 1,
-            max_stack_values: 1000,
-            max_call_depth: 100,
-            max_table_elements: 100,
-        };
+        let limits = Limits { max_memory_pages: 1, max_stack_values: 1000, max_call_depth: 100, max_table_elements: 100 };
         let mut inst = instantiate_with(wat, &limits).unwrap();
         assert_eq!(trap(&mut inst, "runaway", &[]), Trap::CallDepth);
         assert_eq!(one(&mut inst, "deep", &[i32v(99)]), i32v(99));
@@ -3523,25 +3089,13 @@ mod tests {
         assert_eq!(ok(&mut inst, "locals", &[i32v(50)]), vec![]);
 
         // Limits too small to even start.
-        let zero = Limits {
-            max_call_depth: 0,
-            ..limits
-        };
+        let zero = Limits { max_call_depth: 0, ..limits };
         let inst = instantiate_with(wat, &zero).unwrap();
         let f = inst.export_func("deep").unwrap();
-        assert!(matches!(
-            Execution::new(&inst, f, &[i32v(1)]),
-            Err(Error::Limit { .. })
-        ));
-        let tiny = Limits {
-            max_stack_values: 0,
-            ..limits
-        };
+        assert!(matches!(Execution::new(&inst, f, &[i32v(1)]), Err(Error::Limit { .. })));
+        let tiny = Limits { max_stack_values: 0, ..limits };
         let inst = instantiate_with(wat, &tiny).unwrap();
-        assert!(matches!(
-            Execution::new(&inst, f, &[i32v(1)]),
-            Err(Error::Limit { .. })
-        ));
+        assert!(matches!(Execution::new(&inst, f, &[i32v(1)]), Err(Error::Limit { .. })));
     }
 
     #[test]
@@ -3551,11 +3105,7 @@ mod tests {
         let r = Instance::new(
             m,
             &mut |_, name, _| {
-                if name == "b" {
-                    Ok(HostFuncId(0))
-                } else {
-                    Err(())
-                }
+                if name == "b" { Ok(HostFuncId(0)) } else { Err(()) }
             },
             &Limits::default(),
         );
@@ -3563,49 +3113,23 @@ mod tests {
         // The functions-only front end does not resolve other imports: a
         // link error, like any import the resolver does not know.
         for imp in ["(table 1 funcref)", "(memory 1)", "(global i32)"] {
-            let r = instantiate_with(
-                &alloc::format!(r#"(module (import "a" "b" {imp}))"#),
-                &Limits::default(),
-            );
+            let r = instantiate_with(&alloc::format!(r#"(module (import "a" "b" {imp}))"#), &Limits::default());
             assert_eq!(r.err(), Some(Error::Link { import: 0 }), "{imp}");
         }
         // Out-of-bounds active segments trap at instantiation.
-        let r = instantiate_with(
-            r#"(module (memory 1) (data (i32.const 65535) "ab"))"#,
-            &Limits::default(),
-        );
+        let r = instantiate_with(r#"(module (memory 1) (data (i32.const 65535) "ab"))"#, &Limits::default());
         assert_eq!(r.err(), Some(Error::Trap(Trap::OutOfBounds)));
-        let r = instantiate_with(
-            r#"(module (table 1 funcref) (func) (elem (i32.const 1) func 0))"#,
-            &Limits::default(),
-        );
+        let r = instantiate_with(r#"(module (table 1 funcref) (func) (elem (i32.const 1) func 0))"#, &Limits::default());
         assert_eq!(r.err(), Some(Error::Trap(Trap::TableOutOfBounds)));
-        assert!(instantiate_with(
-            r#"(module (memory 0) (data (i32.const 0) ""))"#,
-            &Limits::default()
-        )
-        .is_ok());
-        assert!(instantiate_with(
-            r#"(module (memory 0) (data (i32.const 1) ""))"#,
-            &Limits::default()
-        )
-        .is_err());
+        assert!(instantiate_with(r#"(module (memory 0) (data (i32.const 0) ""))"#, &Limits::default()).is_ok());
+        assert!(instantiate_with(r#"(module (memory 0) (data (i32.const 1) ""))"#, &Limits::default()).is_err());
         // Memory larger than the limit.
-        let r = instantiate_with(
-            "(module (memory 2))",
-            &Limits {
-                max_memory_pages: 1,
-                ..Limits::default()
-            },
-        );
+        let r = instantiate_with("(module (memory 2))", &Limits { max_memory_pages: 1, ..Limits::default() });
         assert!(matches!(r, Err(Error::Limit { .. })));
         // The limit caps growth below the type's own maximum.
         let mut inst = instantiate_with(
             r#"(module (memory 1 10) (func (export "grow") (param i32) (result i32) (memory.grow (local.get 0))))"#,
-            &Limits {
-                max_memory_pages: 2,
-                ..Limits::default()
-            },
+            &Limits { max_memory_pages: 2, ..Limits::default() },
         )
         .unwrap();
         assert_eq!(one(&mut inst, "grow", &[i32v(1)]), i32v(1));
@@ -3635,18 +3159,9 @@ mod tests {
         // Execution::new argument checks.
         let inst = instantiate(CONTROL);
         let fac = inst.export_func("fac").unwrap();
-        assert_eq!(
-            Execution::new(&inst, fac, &[]).err(),
-            Some(Error::ArgumentMismatch)
-        );
-        assert_eq!(
-            Execution::new(&inst, fac, &[i32v(1)]).err(),
-            Some(Error::ArgumentMismatch)
-        );
-        assert_eq!(
-            Execution::new(&inst, 999, &[]).err(),
-            Some(Error::NoSuchFunction { func: 999 })
-        );
+        assert_eq!(Execution::new(&inst, fac, &[]).err(), Some(Error::ArgumentMismatch));
+        assert_eq!(Execution::new(&inst, fac, &[i32v(1)]).err(), Some(Error::ArgumentMismatch));
+        assert_eq!(Execution::new(&inst, 999, &[]).err(), Some(Error::NoSuchFunction { func: 999 }));
         assert!(Execution::new(&inst, fac, &[i64v(1)]).is_ok());
     }
 }

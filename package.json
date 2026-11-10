@@ -1,0 +1,35 @@
+{
+	"name": "kalium",
+	"version": "0.0.0",
+	"type": "module",
+	"authors": [
+		"Amon Rayfa <amon@koseka.net>"
+	],
+	"description": "The kernel of QualiaOS: a Rust kernel that runs only WebAssembly.",
+	"keywords": [
+		"kernel",
+		"webassembly",
+		"wasm",
+		"rust",
+		"qualiaos"
+	],
+	"homepage": "https://github.com/KosekaLabs/kalium",
+	"repository": "github:KosekaLabs/kalium",
+	"license": "Apache-2.0",
+	"engines": {
+		"node": ">=23.x.x",
+		"npm": ">=11.x.x"
+	},
+	"scripts": {
+		"trunk": "trunk",
+		"check": "trunk check",
+		"fmt": "trunk fmt"
+	},
+	"devDependencies": {
+		"@trunkio/launcher": "^1.3.4"
+	},
+	"overrides": {
+		"tar": "^7.5.22"
+	},
+	"private": true
+}

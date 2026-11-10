@@ -115,14 +115,7 @@ impl Table {
         let mut entries = Vec::new();
         entries.try_reserve_exact(ty.limits.min as usize).ok()?;
         entries.resize(ty.limits.min as usize, Value::null(ty.elem));
-        Some(Table {
-            elem: ty.elem,
-            entries,
-            max,
-            declared_max: ty.limits.max,
-            budget: None,
-            charged: 0,
-        })
+        Some(Table { elem: ty.elem, entries, max, declared_max: ty.limits.max, budget: None, charged: 0 })
     }
 
     /// Create a table of type `ty` (capped like [`Table::new`]) holding
@@ -139,14 +132,7 @@ impl Table {
         if entries.iter().any(|v| v.ty() != ty.elem.into()) {
             return None;
         }
-        Some(Table {
-            elem: ty.elem,
-            entries,
-            max,
-            declared_max: ty.limits.max,
-            budget: None,
-            charged: 0,
-        })
+        Some(Table { elem: ty.elem, entries, max, declared_max: ty.limits.max, budget: None, charged: 0 })
     }
 
     /// Wrap the table in a shared handle.
@@ -162,13 +148,7 @@ impl Table {
     /// The table's current type: its size as the minimum and the declared
     /// maximum. This is what an import of the table is matched against.
     pub fn ty(&self) -> TableType {
-        TableType {
-            elem: self.elem,
-            limits: ResizableLimits {
-                min: self.size(),
-                max: self.declared_max,
-            },
-        }
+        TableType { elem: self.elem, limits: ResizableLimits { min: self.size(), max: self.declared_max } }
     }
 
     /// Whether this table can be imported as `import` (import matching per
@@ -195,18 +175,12 @@ impl Table {
 
     /// `table.get`.
     pub fn get(&self, idx: u32) -> Result<Value, Trap> {
-        self.entries
-            .get(idx as usize)
-            .copied()
-            .ok_or(Trap::TableOutOfBounds)
+        self.entries.get(idx as usize).copied().ok_or(Trap::TableOutOfBounds)
     }
 
     /// `table.set`.
     pub fn set(&mut self, idx: u32, value: Value) -> Result<(), Trap> {
-        let slot = self
-            .entries
-            .get_mut(idx as usize)
-            .ok_or(Trap::TableOutOfBounds)?;
+        let slot = self.entries.get_mut(idx as usize).ok_or(Trap::TableOutOfBounds)?;
         *slot = value;
         Ok(())
     }
@@ -241,9 +215,7 @@ impl Table {
     /// The index range `[off, off + len)` if it lies within the table.
     fn range(&self, off: u32, len: u32) -> Result<core::ops::Range<usize>, Trap> {
         let start = off as usize;
-        let end = start
-            .checked_add(len as usize)
-            .ok_or(Trap::TableOutOfBounds)?;
+        let end = start.checked_add(len as usize).ok_or(Trap::TableOutOfBounds)?;
         if end > self.entries.len() {
             return Err(Trap::TableOutOfBounds);
         }
@@ -287,10 +259,7 @@ mod tests {
     use crate::types::ResizableLimits;
 
     fn ty(min: u32, max: Option<u32>) -> TableType {
-        TableType {
-            elem: RefType::FuncRef,
-            limits: ResizableLimits { min, max },
-        }
+        TableType { elem: RefType::FuncRef, limits: ResizableLimits { min, max } }
     }
 
     #[test]
@@ -321,10 +290,7 @@ mod tests {
         assert!(!t.matches(&ty(3, None)));
         // No declared maximum: the runtime cap is not a type maximum.
         assert!(!t.matches(&ty(0, Some(10))));
-        assert!(!t.matches(&TableType {
-            elem: RefType::ExternRef,
-            limits: ResizableLimits { min: 0, max: None },
-        }));
+        assert!(!t.matches(&TableType { elem: RefType::ExternRef, limits: ResizableLimits { min: 0, max: None } }));
         assert_eq!(t.grow(1, Value::FuncRef(None)), Some(2));
         assert_eq!(t.ty(), ty(3, None));
         let t = Table::new(ty(10, Some(20)), MAX_TABLE_ELEMENTS).unwrap();

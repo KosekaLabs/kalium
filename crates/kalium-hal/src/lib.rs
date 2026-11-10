@@ -37,7 +37,7 @@ mod aarch64;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub use aarch64::{
     boot,
-    boot::{boot_el, dtb_address, heap_region, kernel_image_range, ram_info, RamInfo, RamSource},
+    boot::{RamInfo, RamSource, boot_el, dtb_address, heap_region, kernel_image_range, ram_info},
     console, cpu,
     cpu::{disable_irqs, enable_irqs, irqs_enabled, wait_for_interrupt},
     exceptions, exit,

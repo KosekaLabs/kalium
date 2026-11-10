@@ -27,10 +27,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use kalium_wasm::{
-    ExecResult, Execution, Host, HostCtx, HostFuncId, HostOutcome, Instance, Limits, Module, Trap,
-    Value,
-};
+use kalium_wasm::{ExecResult, Execution, Host, HostCtx, HostFuncId, HostOutcome, Instance, Limits, Module, Trap, Value};
 
 /// `env.inc(x) -> x + 1`, the host function of the host-call workload.
 struct IncHost {
@@ -103,9 +100,7 @@ fn workloads(scale: u64) -> Vec<Workload> {
                 (local.get $sum)))"#
         ),
         args: vec![],
-        expect: Some(Value::I32(
-            (0..loop_n).fold(0u32, |s, i| s.wrapping_add(i as u32)) as i32,
-        )),
+        expect: Some(Value::I32((0..loop_n).fold(0u32, |s, i| s.wrapping_add(i as u32)) as i32)),
         bytes: 0,
     });
 
@@ -219,9 +214,7 @@ fn workloads(scale: u64) -> Vec<Workload> {
                 (local.get $acc)))"#
         ),
         args: vec![],
-        expect: Some(Value::I32(
-            ((ind_n.div_ceil(2) * 3) as i64 - (ind_n / 2) as i64) as i32,
-        )),
+        expect: Some(Value::I32(((ind_n.div_ceil(2) * 3) as i64 - (ind_n / 2) as i64) as i32)),
         bytes: 0,
     });
 
@@ -277,17 +270,11 @@ fn rate(instrs: u64, d: Duration) -> f64 {
 }
 
 fn main() {
-    let scale: u64 = std::env::var("KALIUM_BENCH_SCALE")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(100);
+    let scale: u64 = std::env::var("KALIUM_BENCH_SCALE").ok().and_then(|s| s.parse().ok()).unwrap_or(100);
     let only = std::env::var("KALIUM_BENCH_ONLY").ok();
     let reps = 3;
 
-    println!(
-        "{:<14} {:>14} {:>10} {:>12} {:>10}",
-        "workload", "instructions", "best ms", "M instr/s", "MB/s"
-    );
+    println!("{:<14} {:>14} {:>10} {:>12} {:>10}", "workload", "instructions", "best ms", "M instr/s", "MB/s");
     let mut total = Duration::ZERO;
     let mut loop_unbounded: Option<(Duration, u64)> = None;
     for w in workloads(scale) {
@@ -311,33 +298,17 @@ fn main() {
         }
         let (d, instrs) = best.expect("at least one rep");
         total += d;
-        let mbs = if w.bytes > 0 {
-            format!("{:>10.1}", w.bytes as f64 / d.as_secs_f64() / 1e6)
-        } else {
-            format!("{:>10}", "-")
-        };
-        println!(
-            "{:<14} {:>14} {:>10.1} {:>12.1} {}",
-            w.name,
-            instrs,
-            d.as_secs_f64() * 1e3,
-            rate(instrs, d),
-            mbs
-        );
+        let mbs =
+            if w.bytes > 0 { format!("{:>10.1}", w.bytes as f64 / d.as_secs_f64() / 1e6) } else { format!("{:>10}", "-") };
+        println!("{:<14} {:>14} {:>10.1} {:>12.1} {}", w.name, instrs, d.as_secs_f64() * 1e3, rate(instrs, d), mbs);
         if w.name == "loop" {
             loop_unbounded = Some((d, instrs));
         }
     }
-    println!(
-        "total best-of-{reps} time: {:.1} ms",
-        total.as_secs_f64() * 1e3
-    );
+    println!("total best-of-{reps} time: {:.1} ms", total.as_secs_f64() * 1e3);
 
     if let Some((unbounded, instrs)) = loop_unbounded {
-        let w = workloads(scale)
-            .into_iter()
-            .find(|w| w.name == "loop")
-            .expect("loop workload");
+        let w = workloads(scale).into_iter().find(|w| w.name == "loop").expect("loop workload");
         let mut inst = instantiate(&w.wat);
         let mut best = Duration::MAX;
         for _ in 0..reps {

@@ -92,8 +92,8 @@ use crate::instr::{ConstExpr, Instr};
 use crate::memory::{Memory, MemoryRef};
 use crate::module::{DataMode, ElemItems, ElemMode, ImportDesc, Module};
 use crate::snapshot::Snapshot;
-use crate::table::{Table, TableRef, MAX_TABLE_ELEMENTS};
-use crate::types::{FuncType, GlobalType, MemType, TableType, PAGE_SIZE};
+use crate::table::{MAX_TABLE_ELEMENTS, Table, TableRef};
+use crate::types::{FuncType, GlobalType, MemType, PAGE_SIZE, TableType};
 use alloc::rc::Rc;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -223,12 +223,7 @@ pub struct Limits {
 
 impl Default for Limits {
     fn default() -> Limits {
-        Limits {
-            max_memory_pages: 256,
-            max_stack_values: 64 * 1024,
-            max_call_depth: 1024,
-            max_table_elements: 65536,
-        }
+        Limits { max_memory_pages: 256, max_stack_values: 64 * 1024, max_call_depth: 1024, max_table_elements: 65536 }
     }
 }
 
@@ -273,10 +268,7 @@ pub struct Instance {
 impl fmt::Debug for Instance {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Instance")
-            .field(
-                "memory_pages",
-                &self.memory.try_borrow().map(|m| m.size_pages()).ok(),
-            )
+            .field("memory_pages", &self.memory.try_borrow().map(|m| m.size_pages()).ok())
             .field("tables", &self.tables.len())
             .field("globals", &self.globals.len())
             .field("imported_funcs", &self.host_funcs.len())
@@ -286,11 +278,7 @@ impl fmt::Debug for Instance {
 }
 
 fn invalid(msg: &'static str) -> Error {
-    Error::Invalid {
-        msg,
-        func: None,
-        instr: None,
-    }
+    Error::Invalid { msg, func: None, instr: None }
 }
 
 /// A shared object is mutably borrowed by the host while the instance
@@ -310,10 +298,7 @@ fn bad_snapshot(msg: &'static str) -> Error {
 /// Whether `module` imports a table, memory or global: objects that belong
 /// to their exporter and so are neither captured nor restored.
 fn imports_objects(module: &Module) -> bool {
-    module
-        .imports
-        .iter()
-        .any(|i| !matches!(i.desc, ImportDesc::Func(_)))
+    module.imports.iter().any(|i| !matches!(i.desc, ImportDesc::Func(_)))
 }
 
 /// The function address space of an instance under construction.
@@ -351,9 +336,7 @@ impl Addrs<'_> {
 /// Evaluate a constant expression (global initializer, segment offset or
 /// element item) against the globals initialized so far.
 fn eval_const(addrs: &Addrs<'_>, globals: &[GlobalRef], expr: &ConstExpr) -> Result<Value, Error> {
-    let instr = expr
-        .single()
-        .ok_or_else(|| invalid("constant expression must be a single instruction"))?;
+    let instr = expr.single().ok_or_else(|| invalid("constant expression must be a single instruction"))?;
     Ok(match instr {
         Instr::I32Const(v) => Value::I32(v),
         Instr::I64Const(v) => Value::I64(v),
@@ -361,9 +344,7 @@ fn eval_const(addrs: &Addrs<'_>, globals: &[GlobalRef], expr: &ConstExpr) -> Res
         Instr::F64Const(bits) => Value::F64(f64::from_bits(bits)),
         Instr::RefNull(t) => Value::null(t),
         Instr::RefFunc(f) => {
-            Value::FuncRef(Some(addrs.addr(f).ok_or_else(|| {
-                invalid("ref.func in constant expression: unknown function")
-            })?))
+            Value::FuncRef(Some(addrs.addr(f).ok_or_else(|| invalid("ref.func in constant expression: unknown function"))?))
         }
         Instr::GlobalGet(g) => globals
             .get(g as usize)
@@ -391,11 +372,7 @@ impl Instance {
         Instance::instantiate(
             module,
             &mut |m, n, ty| match *ty {
-                ExternType::Func(ft) => resolve(m, n, ft).ok().map(|id| Extern::Func {
-                    id,
-                    ty: ft.clone(),
-                    addr: None,
-                }),
+                ExternType::Func(ft) => resolve(m, n, ft).ok().map(|id| Extern::Func { id, ty: ft.clone(), addr: None }),
                 _ => None,
             },
             limits,
@@ -477,9 +454,7 @@ impl Instance {
         func_base: u32,
     ) -> Result<Instance, Error> {
         if imports_objects(&module) {
-            return Err(unsupported(
-                "restoring a snapshot into a module that imports a table, memory or global",
-            ));
+            return Err(unsupported("restoring a snapshot into a module that imports a table, memory or global"));
         }
         Instance::build(module, resolve, limits, func_base, Some(snapshot))
     }
@@ -500,9 +475,7 @@ impl Instance {
         u32::try_from(num_funcs)
             .ok()
             .and_then(|n| func_base.checked_add(n))
-            .ok_or(Error::Limit {
-                msg: "function address range overflows",
-            })?;
+            .ok_or(Error::Limit { msg: "function address range overflows" })?;
 
         // Imports, in order; each kind goes to the front of its index space.
         let mut host_funcs = Vec::new();
@@ -514,11 +487,9 @@ impl Instance {
         for (i, imp) in module.imports.iter().enumerate() {
             let import = i as u32;
             let ety = match &imp.desc {
-                ImportDesc::Func(ty) => ExternType::Func(
-                    module
-                        .get_type(*ty)
-                        .ok_or_else(|| invalid("import type index out of range"))?,
-                ),
+                ImportDesc::Func(ty) => {
+                    ExternType::Func(module.get_type(*ty).ok_or_else(|| invalid("import type index out of range"))?)
+                }
                 ImportDesc::Table(t) => ExternType::Table(*t),
                 ImportDesc::Memory(m) => ExternType::Memory(*m),
                 ImportDesc::Global(g) => ExternType::Global(*g),
@@ -526,14 +497,7 @@ impl Instance {
             let ext = resolve(&imp.module, &imp.name, &ety).ok_or(Error::Link { import })?;
             let incompatible = Error::IncompatibleImport { import };
             match (ety, ext) {
-                (
-                    ExternType::Func(expected),
-                    Extern::Func {
-                        id,
-                        ty: actual,
-                        addr,
-                    },
-                ) => {
+                (ExternType::Func(expected), Extern::Func { id, ty: actual, addr }) => {
                     if actual != *expected {
                         return Err(incompatible);
                     }
@@ -586,11 +550,7 @@ impl Instance {
             }
             func_types.push(ty);
         }
-        let addrs = Addrs {
-            base: func_base,
-            import_addrs: &import_addrs,
-            num_funcs,
-        };
+        let addrs = Addrs { base: func_base, import_addrs: &import_addrs, num_funcs };
 
         // Defined globals, in order; initializers may read earlier globals.
         // From a snapshot, the captured values (which the snapshot of a
@@ -599,8 +559,7 @@ impl Instance {
             None => {
                 for g in &module.globals {
                     let v = eval_const(&addrs, &globals, &g.init)?;
-                    let global = Global::new(g.ty, v)
-                        .ok_or_else(|| invalid("global initializer has the wrong type"))?;
+                    let global = Global::new(g.ty, v).ok_or_else(|| invalid("global initializer has the wrong type"))?;
                     globals.push(global.into_shared());
                 }
             }
@@ -609,8 +568,8 @@ impl Instance {
                     return Err(bad_snapshot("global count does not match the module"));
                 }
                 for (g, &v) in module.globals.iter().zip(&snap.globals) {
-                    let global = Global::new(g.ty, addrs.relocate(v)?)
-                        .ok_or_else(|| bad_snapshot("global value has the wrong type"))?;
+                    let global =
+                        Global::new(g.ty, addrs.relocate(v)?).ok_or_else(|| bad_snapshot("global value has the wrong type"))?;
                     globals.push(global.into_shared());
                 }
             }
@@ -626,16 +585,12 @@ impl Instance {
             declared = declared
                 .checked_add(t.limits.min)
                 .filter(|&n| n <= limits.max_table_elements)
-                .ok_or(Error::Limit {
-                    msg: "declared table sizes exceed the instance's table element limit",
-                })?;
+                .ok_or(Error::Limit { msg: "declared table sizes exceed the instance's table element limit" })?;
         }
         match snapshot {
             None => {
                 for t in &module.tables {
-                    let table = Table::new(*t, per_table).ok_or(Error::Limit {
-                        msg: "table size exceeds limit",
-                    })?;
+                    let table = Table::new(*t, per_table).ok_or(Error::Limit { msg: "table size exceeds limit" })?;
                     tables.push(table.into_shared());
                 }
             }
@@ -649,19 +604,14 @@ impl Instance {
                         .ok()
                         .and_then(|n| total.checked_add(n))
                         .filter(|&n| n <= limits.max_table_elements)
-                        .ok_or_else(|| {
-                            bad_snapshot("table sizes exceed the instance's table element limit")
-                        })?;
+                        .ok_or_else(|| bad_snapshot("table sizes exceed the instance's table element limit"))?;
                     let mut relocated = Vec::new();
-                    relocated
-                        .try_reserve_exact(entries.len())
-                        .map_err(|_| Error::OutOfMemory)?;
+                    relocated.try_reserve_exact(entries.len()).map_err(|_| Error::OutOfMemory)?;
                     for &v in entries {
                         relocated.push(addrs.relocate(v)?);
                     }
-                    let table = Table::with_entries(*t, relocated, per_table).ok_or_else(|| {
-                        bad_snapshot("table length or entry type does not match the module")
-                    })?;
+                    let table = Table::with_entries(*t, relocated, per_table)
+                        .ok_or_else(|| bad_snapshot("table length or entry type does not match the module"))?;
                     tables.push(table.into_shared());
                 }
             }
@@ -669,10 +619,7 @@ impl Instance {
 
         // Memory 0 (an empty, non-growable one when the module has none).
         if memories.len() + module.memories.len() > 1 {
-            return Err(Error::Unsupported {
-                offset: 0,
-                msg: "multiple memories are not supported",
-            });
+            return Err(Error::Unsupported { offset: 0, msg: "multiple memories are not supported" });
         }
         let memory = match (memories.pop(), module.memories.first(), snapshot) {
             (Some(imported), _, None) => imported,
@@ -680,24 +627,14 @@ impl Instance {
                 return Err(bad_snapshot("the module imports its memory"));
             }
             (None, Some(m), None) => {
-                let cap = m
-                    .limits
-                    .max
-                    .map_or(limits.max_memory_pages, |x| x.min(limits.max_memory_pages));
+                let cap = m.limits.max.map_or(limits.max_memory_pages, |x| x.min(limits.max_memory_pages));
                 if m.limits.min > cap {
-                    return Err(Error::Limit {
-                        msg: "memory size exceeds limit",
-                    });
+                    return Err(Error::Limit { msg: "memory size exceeds limit" });
                 }
-                Memory::with_type(*m, limits.max_memory_pages)
-                    .ok_or(Error::OutOfMemory)?
-                    .into_shared()
+                Memory::with_type(*m, limits.max_memory_pages).ok_or(Error::OutOfMemory)?.into_shared()
             }
             (None, Some(m), Some(snap)) => {
-                let cap = m
-                    .limits
-                    .max
-                    .map_or(limits.max_memory_pages, |x| x.min(limits.max_memory_pages));
+                let cap = m.limits.max.map_or(limits.max_memory_pages, |x| x.min(limits.max_memory_pages));
                 let pages = snap.memory_pages();
                 if !snap.memory.len().is_multiple_of(PAGE_SIZE) {
                     return Err(bad_snapshot("memory contents are not whole pages"));
@@ -706,23 +643,17 @@ impl Instance {
                     return Err(bad_snapshot("memory is smaller than the module's minimum"));
                 }
                 if pages > cap {
-                    return Err(bad_snapshot(
-                        "memory exceeds the module's maximum or the limit",
-                    ));
+                    return Err(bad_snapshot("memory exceeds the module's maximum or the limit"));
                 }
                 let mut bytes = Vec::new();
-                bytes
-                    .try_reserve_exact(snap.memory.len())
-                    .map_err(|_| Error::OutOfMemory)?;
+                bytes.try_reserve_exact(snap.memory.len()).map_err(|_| Error::OutOfMemory)?;
                 bytes.extend_from_slice(&snap.memory);
                 Memory::with_contents(*m, bytes, limits.max_memory_pages)
                     .ok_or_else(|| bad_snapshot("memory does not fit the module's type"))?
                     .into_shared()
             }
             (None, None, Some(snap)) if !snap.memory.is_empty() => {
-                return Err(bad_snapshot(
-                    "memory contents for a module without a memory",
-                ));
+                return Err(bad_snapshot("memory contents for a module without a memory"));
             }
             (None, None, _) => Memory::new(0, 0).ok_or(Error::OutOfMemory)?.into_shared(),
         };
@@ -734,9 +665,7 @@ impl Instance {
                 ElemItems::Funcs(fs) => {
                     let mut v = Vec::with_capacity(fs.len());
                     for &f in fs {
-                        let a = addrs
-                            .addr(f)
-                            .ok_or_else(|| invalid("element segment: unknown function"))?;
+                        let a = addrs.addr(f).ok_or_else(|| invalid("element segment: unknown function"))?;
                         v.push(Value::FuncRef(Some(a)));
                     }
                     v
@@ -762,9 +691,7 @@ impl Instance {
         let mut data_dropped = alloc::vec![false; module.data.len()];
         if let Some(snap) = snapshot {
             if snap.elem_dropped.len() != elems.len() {
-                return Err(bad_snapshot(
-                    "element segment count does not match the module",
-                ));
+                return Err(bad_snapshot("element segment count does not match the module"));
             }
             if snap.data_dropped.len() != data_dropped.len() {
                 return Err(bad_snapshot("data segment count does not match the module"));
@@ -825,64 +752,42 @@ impl Instance {
     /// its budget only once it exists.
     pub fn snapshot(&self) -> Result<Snapshot, Error> {
         if imports_objects(&self.module) {
-            return Err(unsupported(
-                "snapshot of an instance that imports a table, memory or global",
-            ));
+            return Err(unsupported("snapshot of an instance that imports a table, memory or global"));
         }
         let shared = Rc::strong_count(&self.memory) != 1
             || self.tables.iter().any(|t| Rc::strong_count(t) != 1)
             || self.globals.iter().any(|g| Rc::strong_count(g) != 1);
         if shared {
-            return Err(unsupported(
-                "snapshot of an instance whose memory, table or global is shared",
-            ));
+            return Err(unsupported("snapshot of an instance whose memory, table or global is shared"));
         }
         let memory = self.memory.try_borrow().map_err(|_| busy())?;
         let mut bytes = Vec::new();
-        bytes
-            .try_reserve_exact(memory.size_bytes())
-            .map_err(|_| Error::OutOfMemory)?;
+        bytes.try_reserve_exact(memory.size_bytes()).map_err(|_| Error::OutOfMemory)?;
         bytes.extend_from_slice(memory.as_slice());
         drop(memory);
         let mut globals = Vec::new();
-        globals
-            .try_reserve_exact(self.globals.len())
-            .map_err(|_| Error::OutOfMemory)?;
+        globals.try_reserve_exact(self.globals.len()).map_err(|_| Error::OutOfMemory)?;
         for g in &self.globals {
             globals.push(self.unrelocate(g.get())?);
         }
         let mut tables = Vec::new();
-        tables
-            .try_reserve_exact(self.tables.len())
-            .map_err(|_| Error::OutOfMemory)?;
+        tables.try_reserve_exact(self.tables.len()).map_err(|_| Error::OutOfMemory)?;
         for t in &self.tables {
             let t = t.try_borrow().map_err(|_| busy())?;
             let mut entries = Vec::new();
-            entries
-                .try_reserve_exact(t.entries().len())
-                .map_err(|_| Error::OutOfMemory)?;
+            entries.try_reserve_exact(t.entries().len()).map_err(|_| Error::OutOfMemory)?;
             for &v in t.entries() {
                 entries.push(self.unrelocate(v)?);
             }
             tables.push(entries);
         }
         let mut data_dropped = Vec::new();
-        data_dropped
-            .try_reserve_exact(self.data_dropped.len())
-            .map_err(|_| Error::OutOfMemory)?;
+        data_dropped.try_reserve_exact(self.data_dropped.len()).map_err(|_| Error::OutOfMemory)?;
         data_dropped.extend_from_slice(&self.data_dropped);
         let mut elem_dropped = Vec::new();
-        elem_dropped
-            .try_reserve_exact(self.elems.len())
-            .map_err(|_| Error::OutOfMemory)?;
+        elem_dropped.try_reserve_exact(self.elems.len()).map_err(|_| Error::OutOfMemory)?;
         elem_dropped.extend(self.elems.iter().map(Vec::is_empty));
-        Ok(Snapshot {
-            memory: bytes,
-            globals,
-            tables,
-            data_dropped,
-            elem_dropped,
-        })
+        Ok(Snapshot { memory: bytes, globals, tables, data_dropped, elem_dropped })
     }
 
     /// A value as the snapshot stores it: a function reference by function
@@ -892,9 +797,7 @@ impl Instance {
             Value::FuncRef(Some(addr)) => self
                 .local_func(addr)
                 .map(|f| Value::FuncRef(Some(f)))
-                .ok_or_else(|| {
-                    unsupported("snapshot of a reference to another instance's function")
-                }),
+                .ok_or_else(|| unsupported("snapshot of a reference to another instance's function")),
             other => Ok(other),
         }
     }
@@ -915,11 +818,7 @@ impl Instance {
         }
         self.initialized = true;
         let module = self.module.clone();
-        let addrs = Addrs {
-            base: self.func_base,
-            import_addrs: &self.import_addrs,
-            num_funcs: self.func_types.len(),
-        };
+        let addrs = Addrs { base: self.func_base, import_addrs: &self.import_addrs, num_funcs: self.func_types.len() };
         let offset_of = |expr| match eval_const(&addrs, &self.globals, expr) {
             Ok(Value::I32(v)) => Ok(v as u32),
             _ => Err(Trap::Invalid),
@@ -947,19 +846,12 @@ impl Instance {
         }
 
         for (i, d) in module.data.iter().enumerate() {
-            if let DataMode::Active {
-                memory: mem_idx,
-                offset,
-            } = &d.mode
-            {
+            if let DataMode::Active { memory: mem_idx, offset } = &d.mode {
                 if *mem_idx != 0 || module.num_memories() == 0 {
                     return Err(Trap::Invalid);
                 }
                 let dst = offset_of(offset)?;
-                self.memory
-                    .try_borrow_mut()
-                    .map_err(|_| Trap::Host)?
-                    .write(dst, &d.bytes)?;
+                self.memory.try_borrow_mut().map_err(|_| Trap::Host)?.write(dst, &d.bytes)?;
                 *self.data_dropped.get_mut(i).ok_or(Trap::Invalid)? = true;
             }
         }
@@ -1055,9 +947,7 @@ impl Instance {
     /// over, after which grows through this instance fail). A table the
     /// host holds a mutable borrow of counts as full.
     pub fn table_elements(&self) -> u32 {
-        self.tables.iter().fold(0u32, |n, t| {
-            n.saturating_add(t.try_borrow().map_or(u32::MAX, |t| t.size()))
-        })
+        self.tables.iter().fold(0u32, |n, t| n.saturating_add(t.try_borrow().map_or(u32::MAX, |t| t.size())))
     }
 
     /// `table.grow` on table `idx`: grow by `delta` entries set to `init`.
@@ -1066,19 +956,13 @@ impl Instance {
     /// budget ([`Limits::max_table_elements`]) would be exceeded.
     /// `Trap::Invalid` names a table that does not exist; `Trap::Host`
     /// reports a table the host has mutably borrowed.
-    pub(crate) fn grow_table(
-        &mut self,
-        idx: u32,
-        delta: u32,
-        init: Value,
-    ) -> Result<Option<u32>, Trap> {
+    pub(crate) fn grow_table(&mut self, idx: u32, delta: u32, init: Value) -> Result<Option<u32>, Trap> {
         let in_use = self.table_elements();
         let table = self.tables.get(idx as usize).ok_or(Trap::Invalid)?;
         match in_use.checked_add(delta) {
-            Some(total) if total <= self.limits.max_table_elements => Ok(table
-                .try_borrow_mut()
-                .map_err(|_| Trap::Host)?
-                .grow(delta, init)),
+            Some(total) if total <= self.limits.max_table_elements => {
+                Ok(table.try_borrow_mut().map_err(|_| Trap::Host)?.grow(delta, init))
+            }
             _ => Ok(None),
         }
     }
@@ -1091,10 +975,7 @@ impl Instance {
     /// Set global `idx`. Fails if the index is unknown or the value has the
     /// wrong type (mutability is not checked: this is the host's door).
     pub fn set_global(&mut self, idx: u32, value: Value) -> Result<(), Error> {
-        self.globals
-            .get(idx as usize)
-            .ok_or_else(|| invalid("unknown global"))?
-            .set(value)
+        self.globals.get(idx as usize).ok_or_else(|| invalid("unknown global"))?.set(value)
     }
 
     /// The shared handle of global `idx`, if it exists.
@@ -1161,10 +1042,7 @@ impl Instance {
     /// The import whose function address is `addr`, if any.
     #[inline(never)]
     pub(crate) fn import_by_addr(&self, addr: u32) -> Option<u32> {
-        self.import_addrs
-            .iter()
-            .position(|&a| a == addr)
-            .map(|i| i as u32)
+        self.import_addrs.iter().position(|&a| a == addr).map(|i| i as u32)
     }
 
     /// The type index of function `func` (function index space).
@@ -1199,12 +1077,7 @@ mod tests {
     /// Instantiate `wat` with every import resolved from `exporter`'s
     /// exports under module name "a" (functions become cross calls served
     /// by [`Store`]), at function address range `base`.
-    fn link(
-        wat: &str,
-        exporter: Option<&Instance>,
-        base: u32,
-        store: &mut Store,
-    ) -> Result<Instance, Error> {
+    fn link(wat: &str, exporter: Option<&Instance>, base: u32, store: &mut Store) -> Result<Instance, Error> {
         let mut resolve = |m: &str, n: &str, _ty: &ExternType<'_>| -> Option<Extern> {
             if m != "a" {
                 return None;
@@ -1214,11 +1087,7 @@ mod tests {
                 crate::module::ExportDesc::Func(f) => {
                     let id = HostFuncId(store.cross.len() as u32);
                     store.cross.push(f);
-                    Extern::Func {
-                        id,
-                        ty: ex.func_type(f)?.clone(),
-                        addr: ex.func_addr(f),
-                    }
+                    Extern::Func { id, ty: ex.func_type(f)?.clone(), addr: ex.func_addr(f) }
                 }
                 crate::module::ExportDesc::Table(t) => Extern::Table(ex.table_ref(t)?.clone()),
                 crate::module::ExportDesc::Memory(_) => Extern::Memory(ex.memory_ref().clone()),
@@ -1239,15 +1108,9 @@ mod tests {
     }
 
     impl Store {
-        fn run_other(
-            &mut self,
-            func: u32,
-            args: &[Value],
-            results: &mut [Value],
-        ) -> Result<HostOutcome, Trap> {
+        fn run_other(&mut self, func: u32, args: &[Value], results: &mut [Value]) -> Result<HostOutcome, Trap> {
             let mut other = self.other.take().ok_or(Trap::Host)?;
-            let r =
-                Execution::new(&other, func, args).map(|mut e| e.run(&mut other, self, 1 << 20));
+            let r = Execution::new(&other, func, args).map(|mut e| e.run(&mut other, self, 1 << 20));
             self.other = Some(other);
             match r {
                 Ok(ExecResult::Done(v)) if v.len() == results.len() => {
@@ -1291,12 +1154,8 @@ mod tests {
     }
 
     fn call(inst: &mut Instance, host: &mut dyn Host, name: &str, args: &[Value]) -> ExecResult {
-        let f = inst
-            .export_func(name)
-            .unwrap_or_else(|| panic!("no export {name}"));
-        Execution::new(inst, f, args)
-            .unwrap()
-            .run(inst, host, 1 << 20)
+        let f = inst.export_func(name).unwrap_or_else(|| panic!("no export {name}"));
+        Execution::new(inst, f, args).unwrap().run(inst, host, 1 << 20)
     }
 
     fn one(inst: &mut Instance, host: &mut dyn Host, name: &str, args: &[Value]) -> Value {
@@ -1347,23 +1206,14 @@ mod tests {
         )
         .unwrap();
         store.other = Some(a);
-        assert!(Rc::ptr_eq(
-            b.memory_ref(),
-            store.other.as_ref().unwrap().memory_ref()
-        ));
+        assert!(Rc::ptr_eq(b.memory_ref(), store.other.as_ref().unwrap().memory_ref()));
         assert_eq!(one(&mut b, &mut store, "size", &[]), Value::I32(1));
 
         // Grown through the importer: the exporter sees it, and vice versa.
-        assert_eq!(
-            one(&mut b, &mut store, "grow", &[Value::I32(1)]),
-            Value::I32(1)
-        );
+        assert_eq!(one(&mut b, &mut store, "grow", &[Value::I32(1)]), Value::I32(1));
         let mut a = store.other.take().unwrap();
         assert_eq!(one(&mut a, &mut store, "size", &[]), Value::I32(2));
-        assert_eq!(
-            one(&mut a, &mut store, "grow", &[Value::I32(1)]),
-            Value::I32(2)
-        );
+        assert_eq!(one(&mut a, &mut store, "grow", &[Value::I32(1)]), Value::I32(2));
         assert_eq!(a.memory().size_pages(), 3);
         store.other = Some(a);
         assert_eq!(one(&mut b, &mut store, "size", &[]), Value::I32(3));
@@ -1376,29 +1226,12 @@ mod tests {
         let mut e = Execution::new(&b, spin, &[Value::I32(1000), Value::I32(addr)]).unwrap();
         assert_eq!(e.run(&mut b, &mut store, 100), ExecResult::OutOfFuel);
         let mut a = store.other.take().unwrap();
-        assert_eq!(
-            one(&mut a, &mut store, "grow", &[Value::I32(1)]),
-            Value::I32(3)
-        );
-        assert_eq!(
-            call(
-                &mut a,
-                &mut store,
-                "store8",
-                &[Value::I32(addr), Value::I32(0x5A)]
-            ),
-            ExecResult::Done(vec![])
-        );
+        assert_eq!(one(&mut a, &mut store, "grow", &[Value::I32(1)]), Value::I32(3));
+        assert_eq!(call(&mut a, &mut store, "store8", &[Value::I32(addr), Value::I32(0x5A)]), ExecResult::Done(vec![]));
         store.other = Some(a);
-        assert_eq!(
-            e.run(&mut b, &mut store, u64::MAX),
-            ExecResult::Done(vec![Value::I32(0x5A)])
-        );
+        assert_eq!(e.run(&mut b, &mut store, u64::MAX), ExecResult::Done(vec![Value::I32(0x5A)]));
         // The limit of the exporter's type (4 pages) holds for everyone.
-        assert_eq!(
-            one(&mut b, &mut store, "grow", &[Value::I32(1)]),
-            Value::I32(-1)
-        );
+        assert_eq!(one(&mut b, &mut store, "grow", &[Value::I32(1)]), Value::I32(-1));
         assert_eq!(one(&mut b, &mut store, "size", &[]), Value::I32(4));
     }
 
@@ -1436,10 +1269,7 @@ mod tests {
             &Limits::default(),
         )
         .unwrap();
-        assert_eq!(
-            call(&mut inst, &mut Grower, "run", &[]),
-            ExecResult::Done(vec![Value::I32(0x0403_0201)])
-        );
+        assert_eq!(call(&mut inst, &mut Grower, "run", &[]), ExecResult::Done(vec![Value::I32(0x0403_0201)]));
         assert_eq!(inst.memory().size_pages(), 2);
     }
 
@@ -1477,14 +1307,8 @@ mod tests {
         assert_eq!(b.local_func(1002), Some(2));
         assert_eq!(b.local_func(500), None);
         store.other = Some(a);
-        assert_eq!(
-            one(&mut b, &mut store, "ref_four", &[]),
-            Value::FuncRef(Some(a_four))
-        );
-        assert_eq!(
-            one(&mut b, &mut store, "ref_five", &[]),
-            Value::FuncRef(Some(1002))
-        );
+        assert_eq!(one(&mut b, &mut store, "ref_four", &[]), Value::FuncRef(Some(a_four)));
+        assert_eq!(one(&mut b, &mut store, "ref_five", &[]), Value::FuncRef(Some(1002)));
         // The elem segment went into the shared table.
         let a = store.other.take().unwrap();
         let tab = a.table(0).unwrap();
@@ -1498,76 +1322,39 @@ mod tests {
 
         // From b: index 2 is a's `four` through the import (a cross call),
         // index 1 is b's own function, index 3 has the wrong type.
-        assert_eq!(
-            one(&mut b, &mut store, "call", &[Value::I32(2)]),
-            Value::I32(4)
-        );
-        assert_eq!(
-            one(&mut b, &mut store, "call", &[Value::I32(1)]),
-            Value::I32(5)
-        );
-        assert_eq!(
-            call(&mut b, &mut store, "call", &[Value::I32(3)]),
-            ExecResult::Trap(Trap::IndirectCallTypeMismatch)
-        );
+        assert_eq!(one(&mut b, &mut store, "call", &[Value::I32(2)]), Value::I32(4));
+        assert_eq!(one(&mut b, &mut store, "call", &[Value::I32(1)]), Value::I32(5));
+        assert_eq!(call(&mut b, &mut store, "call", &[Value::I32(3)]), ExecResult::Trap(Trap::IndirectCallTypeMismatch));
         assert_eq!(store.foreign_calls, 0);
 
         // From a: index 1 is b's `five`, a foreign function, served by the
         // host; the type check is the host's too.
         let mut a = store.other.take().unwrap();
         store.other = Some(b);
-        assert_eq!(
-            one(&mut a, &mut store, "call", &[Value::I32(0)]),
-            Value::I32(4)
-        );
-        assert_eq!(
-            one(&mut a, &mut store, "call", &[Value::I32(1)]),
-            Value::I32(5)
-        );
+        assert_eq!(one(&mut a, &mut store, "call", &[Value::I32(0)]), Value::I32(4));
+        assert_eq!(one(&mut a, &mut store, "call", &[Value::I32(1)]), Value::I32(5));
         assert_eq!(store.foreign_calls, 1);
         // Index 3 is a's own `load8`, of the wrong type: checked locally.
-        assert_eq!(
-            call(&mut a, &mut store, "call", &[Value::I32(3)]),
-            ExecResult::Trap(Trap::IndirectCallTypeMismatch)
-        );
+        assert_eq!(call(&mut a, &mut store, "call", &[Value::I32(3)]), ExecResult::Trap(Trap::IndirectCallTypeMismatch));
         assert_eq!(store.foreign_calls, 1);
-        assert_eq!(
-            call(&mut a, &mut store, "call", &[Value::I32(4)]),
-            ExecResult::Trap(Trap::UndefinedElement)
-        );
+        assert_eq!(call(&mut a, &mut store, "call", &[Value::I32(4)]), ExecResult::Trap(Trap::UndefinedElement));
         // A foreign call with a mismatching type: b's `call` (param i32)
         // put into the table by the host and called as () -> i32.
         let b_ref = store.other.as_ref().unwrap();
         let b_call = b_ref.export_func("call").unwrap();
         let b_call_addr = b_ref.func_addr(b_call).unwrap();
-        a.table_ref(0)
-            .unwrap()
-            .borrow_mut()
-            .set(0, Value::FuncRef(Some(b_call_addr)))
-            .unwrap();
-        assert_eq!(
-            call(&mut a, &mut store, "call", &[Value::I32(0)]),
-            ExecResult::Trap(Trap::IndirectCallTypeMismatch)
-        );
+        a.table_ref(0).unwrap().borrow_mut().set(0, Value::FuncRef(Some(b_call_addr))).unwrap();
+        assert_eq!(call(&mut a, &mut store, "call", &[Value::I32(0)]), ExecResult::Trap(Trap::IndirectCallTypeMismatch));
         assert_eq!(store.foreign_calls, 2);
         // Without an embedder that knows the address, a foreign call is a
         // host error (the default `call_foreign`).
         struct NoForeign;
         impl Host for NoForeign {
-            fn call(
-                &mut self,
-                _: &mut HostCtx<'_>,
-                _: HostFuncId,
-                _: &[Value],
-                _: &mut [Value],
-            ) -> Result<HostOutcome, Trap> {
+            fn call(&mut self, _: &mut HostCtx<'_>, _: HostFuncId, _: &[Value], _: &mut [Value]) -> Result<HostOutcome, Trap> {
                 Err(Trap::Host)
             }
         }
-        assert_eq!(
-            call(&mut a, &mut NoForeign, "call", &[Value::I32(1)]),
-            ExecResult::Trap(Trap::Host)
-        );
+        assert_eq!(call(&mut a, &mut NoForeign, "call", &[Value::I32(1)]), ExecResult::Trap(Trap::Host));
     }
 
     #[test]
@@ -1587,16 +1374,10 @@ mod tests {
             &mut store,
         )
         .unwrap();
-        assert!(Rc::ptr_eq(
-            b.global_ref(0).unwrap(),
-            a.global_ref(0).unwrap()
-        ));
+        assert!(Rc::ptr_eq(b.global_ref(0).unwrap(), a.global_ref(0).unwrap()));
         assert_eq!(b.num_globals(), 3);
         assert_eq!(one(&mut b, &mut store, "get", &[]), Value::I32(17));
-        assert_eq!(
-            call(&mut b, &mut store, "set", &[Value::I32(32)]),
-            ExecResult::Done(vec![])
-        );
+        assert_eq!(call(&mut b, &mut store, "set", &[Value::I32(32)]), ExecResult::Done(vec![]));
         store.other = Some(a);
         let mut a = store.other.take().unwrap();
         assert_eq!(one(&mut a, &mut store, "get", &[]), Value::I32(32));
@@ -1643,62 +1424,31 @@ mod tests {
             r#"(import "a" "g" (table 1 funcref))"#,
         ];
         for imp in incompatible {
-            let r = link(
-                &alloc::format!(r#"(module (import "a" "four" (func)) {imp})"#),
-                Some(&a),
-                50,
-                &mut store,
-            );
+            let r = link(&alloc::format!(r#"(module (import "a" "four" (func)) {imp})"#), Some(&a), 50, &mut store);
             // The first import is incompatible too (wrong result type), so
             // the reported index must be 0: imports are checked in order.
-            assert_eq!(
-                r.err(),
-                Some(Error::IncompatibleImport { import: 0 }),
-                "{imp}"
-            );
+            assert_eq!(r.err(), Some(Error::IncompatibleImport { import: 0 }), "{imp}");
             let r = link(&alloc::format!("(module {imp})"), Some(&a), 50, &mut store);
             let e = r.err().unwrap_or_else(|| panic!("{imp}: linked"));
             assert_eq!(e, Error::IncompatibleImport { import: 0 }, "{imp}");
             assert_eq!(e.message(), "incompatible import type");
         }
-        for imp in [
-            r#"(import "a" "nope" (memory 1))"#,
-            r#"(import "b" "mem" (memory 1))"#,
-        ] {
-            let r = link(
-                &alloc::format!(r#"(module (import "a" "c" (global i32)) {imp})"#),
-                Some(&a),
-                50,
-                &mut store,
-            );
+        for imp in [r#"(import "a" "nope" (memory 1))"#, r#"(import "b" "mem" (memory 1))"#] {
+            let r = link(&alloc::format!(r#"(module (import "a" "c" (global i32)) {imp})"#), Some(&a), 50, &mut store);
             assert_eq!(r.err(), Some(Error::Link { import: 1 }), "{imp}");
         }
         // A memory of a type declared without a maximum cannot satisfy an
         // import that wants one, however small the runtime cap is.
         let nomax = link("(module (memory (export \"mem\") 1))", None, 0, &mut store).unwrap();
-        assert!(link(
-            r#"(module (import "a" "mem" (memory 1)))"#,
-            Some(&nomax),
-            9,
-            &mut store
-        )
-        .is_ok());
+        assert!(link(r#"(module (import "a" "mem" (memory 1)))"#, Some(&nomax), 9, &mut store).is_ok());
         assert_eq!(
-            link(
-                r#"(module (import "a" "mem" (memory 1 256)))"#,
-                Some(&nomax),
-                9,
-                &mut store
-            )
-            .err(),
+            link(r#"(module (import "a" "mem" (memory 1 256)))"#, Some(&nomax), 9, &mut store).err(),
             Some(Error::IncompatibleImport { import: 0 })
         );
         // The address range must fit.
         assert_eq!(
             link("(module (func) (func))", None, u32::MAX - 1, &mut store).err(),
-            Some(Error::Limit {
-                msg: "function address range overflows"
-            })
+            Some(Error::Limit { msg: "function address range overflows" })
         );
         assert!(link("(module (func) (func))", None, u32::MAX - 2, &mut store).is_ok());
     }
@@ -1726,11 +1476,7 @@ mod tests {
                     let ExternType::Func(ft) = *ty else {
                         return None;
                     };
-                    Some(Extern::Func {
-                        id: HostFuncId(0),
-                        ty: ft.clone(),
-                        addr,
-                    })
+                    Some(Extern::Func { id: HostFuncId(0), ty: ft.clone(), addr })
                 },
                 &Limits::default(),
                 base,
@@ -1769,22 +1515,11 @@ mod tests {
         }
         // Just outside the range, far away, and no address at all: linked,
         // and `call_indirect` through `ref.func $f` reaches the host.
-        for (addr, base) in [
-            (Some(1003), 1000),
-            (Some(999), 1000),
-            (Some(5000), 1000),
-            (None, 1000),
-            (None, 0),
-        ] {
-            let mut inst = instantiate(addr, base)
-                .unwrap_or_else(|e| panic!("base {base}, addr {addr:?}: {e}"));
+        for (addr, base) in [(Some(1003), 1000), (Some(999), 1000), (Some(5000), 1000), (None, 1000), (None, 0)] {
+            let mut inst = instantiate(addr, base).unwrap_or_else(|e| panic!("base {base}, addr {addr:?}: {e}"));
             assert_eq!(inst.func_addr(0), Some(addr.unwrap_or(base)));
             let mut host = Hundred { calls: 0 };
-            assert_eq!(
-                one(&mut inst, &mut host, "go", &[]),
-                Value::I32(100),
-                "base {base}, addr {addr:?}"
-            );
+            assert_eq!(one(&mut inst, &mut host, "go", &[]), Value::I32(100), "base {base}, addr {addr:?}");
             assert_eq!(host.calls, 1);
         }
     }
@@ -1809,25 +1544,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(b.num_tables(), 2);
-        assert_eq!(
-            call(
-                &mut b,
-                &mut store,
-                "copy",
-                &[Value::I32(1), Value::I32(0), Value::I32(3)]
-            ),
-            ExecResult::Done(vec![])
-        );
+        assert_eq!(call(&mut b, &mut store, "copy", &[Value::I32(1), Value::I32(0), Value::I32(3)]), ExecResult::Done(vec![]));
         // `[four, null, null, null]` copied onto itself one slot up.
         let four = a.export_func("four").unwrap();
         assert_eq!(a.table(0).unwrap().get(1), Ok(Value::FuncRef(Some(four))));
         assert_eq!(a.table(0).unwrap().get(3), Ok(Value::FuncRef(None)));
         // The element budget counts the shared table once per index.
         assert_eq!(b.table_elements(), 8);
-        assert_eq!(
-            one(&mut b, &mut store, "grow1", &[Value::I32(2)]),
-            Value::I32(4)
-        );
+        assert_eq!(one(&mut b, &mut store, "grow1", &[Value::I32(2)]), Value::I32(4));
         assert_eq!(one(&mut b, &mut store, "size2", &[]), Value::I32(6));
         assert_eq!(a.table(0).unwrap().size(), 6);
     }
@@ -1852,8 +1576,7 @@ mod tests {
             "mem" => Some(Extern::Memory(a.memory_ref().clone())),
             _ => None,
         };
-        let mut b =
-            Instance::allocate(module.clone(), &mut resolve, &Limits::default(), 100).unwrap();
+        let mut b = Instance::allocate(module.clone(), &mut resolve, &Limits::default(), 100).unwrap();
         // Nothing applied yet.
         assert_eq!(a.table(0).unwrap().get(3), Ok(Value::FuncRef(None)));
         assert_eq!(b.init_segments(), Err(Trap::TableOutOfBounds));
@@ -1873,10 +1596,7 @@ mod tests {
         // Through the exporter, the foreign function is callable.
         store.other = Some(b);
         let mut a = a;
-        assert_eq!(
-            one(&mut a, &mut store, "call", &[Value::I32(3)]),
-            Value::I32(9)
-        );
+        assert_eq!(one(&mut a, &mut store, "call", &[Value::I32(3)]), Value::I32(9));
     }
 
     /// A host that keeps a borrow of a shared object while the interpreter
@@ -1885,42 +1605,23 @@ mod tests {
     fn busy_borrows_trap_instead_of_panicking() {
         struct NoHost;
         impl Host for NoHost {
-            fn call(
-                &mut self,
-                _: &mut HostCtx<'_>,
-                _: HostFuncId,
-                _: &[Value],
-                _: &mut [Value],
-            ) -> Result<HostOutcome, Trap> {
+            fn call(&mut self, _: &mut HostCtx<'_>, _: HostFuncId, _: &[Value], _: &mut [Value]) -> Result<HostOutcome, Trap> {
                 Err(Trap::Host)
             }
         }
-        let mut inst =
-            Instance::new(module(EXPORTER), &mut |_, _, _| Err(()), &Limits::default()).unwrap();
+        let mut inst = Instance::new(module(EXPORTER), &mut |_, _, _| Err(()), &Limits::default()).unwrap();
         let size = inst.export_func("size").unwrap();
         let held = inst.memory_ref().clone();
         let guard = held.borrow_mut();
         let mut e = Execution::new(&inst, size, &[]).unwrap();
-        assert_eq!(
-            e.run(&mut inst, &mut NoHost, 100),
-            ExecResult::Trap(Trap::Host)
-        );
+        assert_eq!(e.run(&mut inst, &mut NoHost, 100), ExecResult::Trap(Trap::Host));
         drop(guard);
-        assert_eq!(
-            call(&mut inst, &mut NoHost, "size", &[]),
-            ExecResult::Done(vec![Value::I32(1)])
-        );
+        assert_eq!(call(&mut inst, &mut NoHost, "size", &[]), ExecResult::Done(vec![Value::I32(1)]));
         let tab = inst.table_ref(0).unwrap().clone();
         let guard = tab.borrow_mut();
-        assert_eq!(
-            call(&mut inst, &mut NoHost, "call", &[Value::I32(0)]),
-            ExecResult::Trap(Trap::Host)
-        );
+        assert_eq!(call(&mut inst, &mut NoHost, "call", &[Value::I32(0)]), ExecResult::Trap(Trap::Host));
         drop(guard);
-        assert_eq!(
-            one(&mut inst, &mut NoHost, "call", &[Value::I32(0)]),
-            Value::I32(4)
-        );
+        assert_eq!(one(&mut inst, &mut NoHost, "call", &[Value::I32(0)]), Value::I32(4));
         assert!(alloc::format!("{inst:?}").contains("func_base: 0"));
     }
 
@@ -1933,20 +1634,12 @@ mod tests {
         assert!(Arc::ptr_eq(a.program(), b.program()));
         assert!(m.program.get().is_some_and(|p| Arc::ptr_eq(p, a.program())));
         // A clone of the module shares the program too.
-        let c = Instance::new(
-            Arc::new((*m).clone()),
-            &mut |_, _, _| Err(()),
-            &Limits::default(),
-        )
-        .unwrap();
+        let c = Instance::new(Arc::new((*m).clone()), &mut |_, _, _| Err(()), &Limits::default()).unwrap();
         assert!(Arc::ptr_eq(a.program(), c.program()));
         // A module built without `Module::new` has no cache; its instances
         // compile their own, equal, programs, and it compares equal to the
         // compiled module (the cache is not part of the module's identity).
-        let bare = Arc::new(Module {
-            program: Default::default(),
-            ..(*m).clone()
-        });
+        let bare = Arc::new(Module { program: Default::default(), ..(*m).clone() });
         assert!(!bare.program.is_compiled());
         assert_eq!(*bare, *m);
         let d = Instance::new(bare.clone(), &mut |_, _, _| Err(()), &Limits::default()).unwrap();
@@ -1955,10 +1648,7 @@ mod tests {
         assert_eq!(**d.program(), **a.program());
         assert_eq!(alloc::format!("{:?}", m.program), "ProgramCache(compiled)");
         let mut inst = a;
-        assert_eq!(
-            one(&mut inst, &mut Store::default(), "four", &[]),
-            Value::I32(4)
-        );
+        assert_eq!(one(&mut inst, &mut Store::default(), "four", &[]), Value::I32(4));
     }
 
     /// A module with every kind of state a snapshot covers.
@@ -2001,13 +1691,7 @@ mod tests {
             (table.init $passive (i32.const 0) (i32.const 0) (i32.const 1))))"#;
 
     fn stateful(base: u32) -> Instance {
-        Instance::instantiate(
-            module(STATEFUL),
-            &mut |_, _, _| None,
-            &Limits::default(),
-            base,
-        )
-        .unwrap()
+        Instance::instantiate(module(STATEFUL), &mut |_, _, _| None, &Limits::default(), base).unwrap()
     }
 
     fn restore(snap: &Snapshot, base: u32, limits: &Limits) -> Result<Instance, Error> {
@@ -2023,10 +1707,7 @@ mod tests {
         assert_eq!(&fresh.memory()[16..20], b"init");
         assert_eq!(fresh.data_dropped, [true, false]);
         assert_eq!(fresh.elem_dropped, [true, false, true]);
-        assert_eq!(
-            call(&mut a, &mut host, "mutate", &[]),
-            ExecResult::Done(vec![])
-        );
+        assert_eq!(call(&mut a, &mut host, "mutate", &[]), ExecResult::Done(vec![]));
         let snap = a.snapshot().unwrap();
         assert_eq!(snap.memory_pages(), 2);
         assert_eq!(snap.memory()[65536], 0xAB);
@@ -2050,46 +1731,22 @@ mod tests {
         assert_eq!(b.snapshot().unwrap(), snap);
         assert_eq!(one(&mut b, &mut host, "size", &[]), Value::I32(2));
         assert_eq!(one(&mut b, &mut host, "tsize", &[]), Value::I32(6));
-        assert_eq!(
-            one(&mut b, &mut host, "load8", &[Value::I32(65536)]),
-            Value::I32(0xAB)
-        );
-        assert_eq!(
-            one(&mut b, &mut host, "load8", &[Value::I32(16)]),
-            Value::I32(0x55)
-        );
+        assert_eq!(one(&mut b, &mut host, "load8", &[Value::I32(65536)]), Value::I32(0xAB));
+        assert_eq!(one(&mut b, &mut host, "load8", &[Value::I32(16)]), Value::I32(0x55));
         assert_eq!(one(&mut b, &mut host, "g", &[]), Value::I32(42));
         assert_eq!(one(&mut b, &mut host, "f", &[]), Value::F64(-0.0));
         assert!(matches!(one(&mut b, &mut host, "f", &[]), Value::F64(f) if f.is_sign_negative()));
         // The relocated references call the right functions.
         assert_eq!(b.global(1), Some(Value::FuncRef(Some(1001))));
         assert_eq!(one(&mut b, &mut host, "call_r", &[]), Value::I32(2));
-        assert_eq!(
-            one(&mut b, &mut host, "call", &[Value::I32(3)]),
-            Value::I32(1)
-        );
-        assert_eq!(
-            one(&mut b, &mut host, "call", &[Value::I32(4)]),
-            Value::I32(2)
-        );
-        assert_eq!(
-            call(&mut b, &mut host, "call", &[Value::I32(5)]),
-            ExecResult::Trap(Trap::UninitializedElement)
-        );
+        assert_eq!(one(&mut b, &mut host, "call", &[Value::I32(3)]), Value::I32(1));
+        assert_eq!(one(&mut b, &mut host, "call", &[Value::I32(4)]), Value::I32(2));
+        assert_eq!(call(&mut b, &mut host, "call", &[Value::I32(5)]), ExecResult::Trap(Trap::UninitializedElement));
         // Dropped segments stay dropped, and nothing is re-applied.
-        assert_eq!(
-            call(&mut b, &mut host, "init_pd", &[]),
-            ExecResult::Trap(Trap::OutOfBounds)
-        );
-        assert_eq!(
-            call(&mut b, &mut host, "init_passive", &[]),
-            ExecResult::Trap(Trap::TableOutOfBounds)
-        );
+        assert_eq!(call(&mut b, &mut host, "init_pd", &[]), ExecResult::Trap(Trap::OutOfBounds));
+        assert_eq!(call(&mut b, &mut host, "init_passive", &[]), ExecResult::Trap(Trap::TableOutOfBounds));
         assert_eq!(b.init_segments(), Ok(()));
-        assert_eq!(
-            one(&mut b, &mut host, "load8", &[Value::I32(16)]),
-            Value::I32(0x55)
-        );
+        assert_eq!(one(&mut b, &mut host, "load8", &[Value::I32(16)]), Value::I32(0x55));
         // What was run since (`call_r` overwrote table entry 0) shows.
         let after = b.snapshot().unwrap();
         assert_eq!(after.tables[0][0], Value::FuncRef(Some(1)));
@@ -2099,28 +1756,17 @@ mod tests {
         // passive segments are still usable.
         let mut c = restore(&fresh, 7, &Limits::default()).unwrap();
         assert_eq!(c.snapshot().unwrap(), fresh);
-        assert_eq!(
-            call(&mut c, &mut host, "init_pd", &[]),
-            ExecResult::Done(vec![])
-        );
-        assert_eq!(
-            one(&mut c, &mut host, "load8", &[Value::I32(0)]),
-            Value::I32(b'p' as i32)
-        );
-        assert_eq!(
-            call(&mut c, &mut host, "init_passive", &[]),
-            ExecResult::Done(vec![])
-        );
-        assert_eq!(
-            one(&mut c, &mut host, "call", &[Value::I32(0)]),
-            Value::I32(2)
-        );
+        assert_eq!(call(&mut c, &mut host, "init_pd", &[]), ExecResult::Done(vec![]));
+        assert_eq!(one(&mut c, &mut host, "load8", &[Value::I32(0)]), Value::I32(b'p' as i32));
+        assert_eq!(call(&mut c, &mut host, "init_passive", &[]), ExecResult::Done(vec![]));
+        assert_eq!(one(&mut c, &mut host, "call", &[Value::I32(0)]), Value::I32(2));
     }
 
     #[test]
     fn snapshot_requires_unshared_objects() {
         let inst = stateful(0);
-        let shared = |r: &Result<Snapshot, Error>| matches!(r, Err(Error::Unsupported { offset: 0, msg }) if msg.contains("shared"));
+        let shared =
+            |r: &Result<Snapshot, Error>| matches!(r, Err(Error::Unsupported { offset: 0, msg }) if msg.contains("shared"));
         assert!(inst.snapshot().is_ok());
         let held = inst.memory_ref().clone();
         assert!(shared(&inst.snapshot()));
@@ -2141,16 +1787,9 @@ mod tests {
         // Exporting to another live instance shares the objects; the
         // importer cannot be snapshotted either, since it imports them.
         let mut store = Store::default();
-        let exporter =
-            Instance::new(module(EXPORTER), &mut |_, _, _| Err(()), &Limits::default()).unwrap();
+        let exporter = Instance::new(module(EXPORTER), &mut |_, _, _| Err(()), &Limits::default()).unwrap();
         assert!(exporter.snapshot().is_ok());
-        let importer = link(
-            r#"(module (import "a" "mem" (memory 1)))"#,
-            Some(&exporter),
-            100,
-            &mut store,
-        )
-        .unwrap();
+        let importer = link(r#"(module (import "a" "mem" (memory 1)))"#, Some(&exporter), 100, &mut store).unwrap();
         assert!(shared(&exporter.snapshot()));
         assert!(matches!(
             importer.snapshot(),
@@ -2178,20 +1817,12 @@ mod tests {
 
         // A foreign function reference in a table cannot be captured.
         let lone = stateful(0);
-        lone.table_ref(0)
-            .unwrap()
-            .borrow_mut()
-            .set(0, Value::FuncRef(Some(5000)))
-            .unwrap();
+        lone.table_ref(0).unwrap().borrow_mut().set(0, Value::FuncRef(Some(5000))).unwrap();
         assert!(matches!(
             lone.snapshot(),
             Err(Error::Unsupported { offset: 0, msg }) if msg.contains("another instance")
         ));
-        lone.table_ref(0)
-            .unwrap()
-            .borrow_mut()
-            .set(0, Value::FuncRef(None))
-            .unwrap();
+        lone.table_ref(0).unwrap().borrow_mut().set(0, Value::FuncRef(None)).unwrap();
         assert!(lone.snapshot().is_ok());
     }
 
@@ -2199,8 +1830,7 @@ mod tests {
     fn restore_validates_the_snapshot() {
         let good = stateful(0).snapshot().unwrap();
         assert!(restore(&good, 0, &Limits::default()).is_ok());
-        let rejected = |snap: &Snapshot, limits: &Limits, what: &str| match restore(snap, 0, limits)
-        {
+        let rejected = |snap: &Snapshot, limits: &Limits, what: &str| match restore(snap, 0, limits) {
             Err(Error::Snapshot { msg }) => assert!(msg.contains(what), "{msg} / {what}"),
             other => panic!("{what}: {other:?}"),
         };
@@ -2213,75 +1843,29 @@ mod tests {
         // Memory: below the minimum, above the maximum, above the limit,
         // not whole pages.
         rejected(&with(&|s| s.memory.clear()), &limits, "smaller");
-        rejected(
-            &with(&|s| s.memory = alloc::vec![0; 5 * 65536]),
-            &limits,
-            "exceeds",
-        );
-        rejected(
-            &with(&|s| s.memory = alloc::vec![0; 2 * 65536]),
-            &Limits {
-                max_memory_pages: 1,
-                ..limits
-            },
-            "exceeds",
-        );
+        rejected(&with(&|s| s.memory = alloc::vec![0; 5 * 65536]), &limits, "exceeds");
+        rejected(&with(&|s| s.memory = alloc::vec![0; 2 * 65536]), &Limits { max_memory_pages: 1, ..limits }, "exceeds");
         rejected(&with(&|s| s.memory.push(0)), &limits, "whole pages");
         // Globals: count and type, and a reference that names no function.
         rejected(&with(&|s| s.globals.truncate(2)), &limits, "global count");
-        rejected(
-            &with(&|s| s.globals[0] = Value::I64(1)),
-            &limits,
-            "wrong type",
-        );
-        rejected(
-            &with(&|s| s.globals[1] = Value::FuncRef(Some(99))),
-            &limits,
-            "names no function",
-        );
+        rejected(&with(&|s| s.globals[0] = Value::I64(1)), &limits, "wrong type");
+        rejected(&with(&|s| s.globals[1] = Value::FuncRef(Some(99))), &limits, "names no function");
         // Tables: count, length under the minimum and over the maximum,
         // the element budget, entry types, unknown functions.
         rejected(&with(&|s| s.tables.clear()), &limits, "table count");
         rejected(&with(&|s| s.tables[0].truncate(3)), &limits, "table length");
-        rejected(
-            &with(&|s| s.tables[0].resize(9, Value::FuncRef(None))),
-            &limits,
-            "table length",
-        );
+        rejected(&with(&|s| s.tables[0].resize(9, Value::FuncRef(None))), &limits, "table length");
         rejected(
             &with(&|s| s.tables[0].resize(5, Value::FuncRef(None))),
-            &Limits {
-                max_table_elements: 4,
-                ..limits
-            },
+            &Limits { max_table_elements: 4, ..limits },
             "element limit",
         );
-        rejected(
-            &with(&|s| s.tables[0][0] = Value::ExternRef(None)),
-            &limits,
-            "entry type",
-        );
-        rejected(
-            &with(&|s| s.tables[0][0] = Value::I32(0)),
-            &limits,
-            "entry type",
-        );
-        rejected(
-            &with(&|s| s.tables[0][0] = Value::FuncRef(Some(99))),
-            &limits,
-            "names no function",
-        );
+        rejected(&with(&|s| s.tables[0][0] = Value::ExternRef(None)), &limits, "entry type");
+        rejected(&with(&|s| s.tables[0][0] = Value::I32(0)), &limits, "entry type");
+        rejected(&with(&|s| s.tables[0][0] = Value::FuncRef(Some(99))), &limits, "names no function");
         // Segment flags.
-        rejected(
-            &with(&|s| s.data_dropped.push(true)),
-            &limits,
-            "data segment count",
-        );
-        rejected(
-            &with(&|s| s.elem_dropped.truncate(2)),
-            &limits,
-            "element segment count",
-        );
+        rejected(&with(&|s| s.data_dropped.push(true)), &limits, "data segment count");
+        rejected(&with(&|s| s.elem_dropped.truncate(2)), &limits, "element segment count");
         // A module without a memory takes no memory contents.
         let no_mem = module("(module)");
         let snap = Snapshot {
@@ -2295,12 +1879,8 @@ mod tests {
             Instance::from_snapshot(no_mem.clone(), &snap, &mut |_, _, _| None, &limits, 0),
             Err(Error::Snapshot { msg }) if msg.contains("without a memory")
         ));
-        let empty = Snapshot {
-            memory: Vec::new(),
-            ..snap
-        };
-        let inst =
-            Instance::from_snapshot(no_mem, &empty, &mut |_, _, _| None, &limits, 0).unwrap();
+        let empty = Snapshot { memory: Vec::new(), ..snap };
+        let inst = Instance::from_snapshot(no_mem, &empty, &mut |_, _, _| None, &limits, 0).unwrap();
         assert_eq!(inst.snapshot().unwrap(), empty);
     }
 
@@ -2352,11 +1932,7 @@ mod tests {
                 (call $probe)))"#;
         let m = module(wat);
         let mut resolve = |_: &str, _: &str, ty: &ExternType<'_>| match ty {
-            ExternType::Func(ft) => Some(Extern::Func {
-                id: HostFuncId(0),
-                ty: (*ft).clone(),
-                addr: None,
-            }),
+            ExternType::Func(ft) => Some(Extern::Func { id: HostFuncId(0), ty: (*ft).clone(), addr: None }),
             _ => None,
         };
         let mut a = Instance::instantiate(m.clone(), &mut resolve, &Limits::default(), 0).unwrap();
@@ -2371,18 +1947,10 @@ mod tests {
         assert_eq!(snap.globals, [Value::I32(5)]);
         assert_eq!(snap.tables[0][1], Value::FuncRef(Some(1)));
         let bytes = snap.to_bytes();
-        let mut b = Instance::from_snapshot(
-            m,
-            &Snapshot::from_bytes(&bytes).unwrap(),
-            &mut resolve,
-            &Limits::default(),
-            500,
-        )
-        .unwrap();
+        let mut b =
+            Instance::from_snapshot(m, &Snapshot::from_bytes(&bytes).unwrap(), &mut resolve, &Limits::default(), 500).unwrap();
         let probe = b.export_func("probe").unwrap();
-        let restored = Execution::new(&b, probe, &[])
-            .unwrap()
-            .run(&mut b, &mut host, 1 << 20);
+        let restored = Execution::new(&b, probe, &[]).unwrap().run(&mut b, &mut host, 1 << 20);
         assert_eq!(host.calls, 1);
 
         // The original resumes, re-issues the call, and finishes.

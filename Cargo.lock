@@ -38,22 +38,22 @@ dependencies = [
 
 [[package]]
 name = "kalium-abi"
-version = "0.1.0"
+version = "0.0.0"
 
 [[package]]
 name = "kalium-cap"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "kalium-abi",
 ]
 
 [[package]]
 name = "kalium-hal"
-version = "0.1.0"
+version = "0.0.0"
 
 [[package]]
 name = "kalium-ipc"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "kalium-abi",
  "kalium-cap",
@@ -61,7 +61,7 @@ dependencies = [
 
 [[package]]
 name = "kalium-kernel"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "kalium-abi",
  "kalium-cap",
@@ -74,18 +74,18 @@ dependencies = [
 
 [[package]]
 name = "kalium-mm"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "kalium-abi",
 ]
 
 [[package]]
 name = "kalium-sched"
-version = "0.1.0"
+version = "0.0.0"
 
 [[package]]
 name = "kalium-wasm"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "libm",
  "wast",
@@ -167,7 +167,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "kalium-abi",
  "kalium-ipc",

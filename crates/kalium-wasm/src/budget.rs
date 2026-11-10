@@ -36,10 +36,7 @@ pub struct Budget {
 impl Budget {
     /// A budget of `limit` bytes with nothing charged.
     pub const fn new(limit: usize) -> Budget {
-        Budget {
-            limit,
-            used: Cell::new(0),
-        }
+        Budget { limit, used: Cell::new(0) }
     }
 
     /// A budget that refuses nothing (`usize::MAX`).
@@ -88,7 +85,7 @@ impl Budget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{MemType, RefType, ResizableLimits, TableType, PAGE_SIZE};
+    use crate::types::{MemType, PAGE_SIZE, RefType, ResizableLimits, TableType};
     use crate::{Memory, Table, Value};
 
     #[test]
@@ -160,10 +157,7 @@ mod tests {
     fn table_charges_its_entries() {
         let entry = core::mem::size_of::<Value>();
         let budget = Budget::new(10 * entry).into_shared();
-        let ty = TableType {
-            elem: RefType::FuncRef,
-            limits: ResizableLimits { min: 4, max: None },
-        };
+        let ty = TableType { elem: RefType::FuncRef, limits: ResizableLimits { min: 4, max: None } };
         let mut t = Table::new(ty, 100).unwrap();
         assert!(t.set_budget(&budget));
         assert_eq!(budget.used(), 4 * entry);
@@ -173,13 +167,7 @@ mod tests {
         assert_eq!(t.size(), 10);
         drop(t);
         assert_eq!(budget.used(), 0);
-        let m = Memory::with_type(
-            MemType {
-                limits: ResizableLimits { min: 0, max: None },
-            },
-            1,
-        )
-        .unwrap();
+        let m = Memory::with_type(MemType { limits: ResizableLimits { min: 0, max: None } }, 1).unwrap();
         assert_eq!(m.size_bytes(), 0);
     }
 }

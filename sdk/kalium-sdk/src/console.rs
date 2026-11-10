@@ -2,7 +2,7 @@
 
 use core::fmt;
 
-use crate::{raw, Cap, Errno};
+use crate::{Cap, Errno, raw};
 
 /// A `Console` capability: bytes written to it go to the UART.
 ///
@@ -77,12 +77,7 @@ pub struct Writer {
 impl Writer {
     /// A writer with an empty buffer.
     pub const fn new(console: Console) -> Writer {
-        Writer {
-            console,
-            buf: [0; WRITER_BUF],
-            len: 0,
-            error: None,
-        }
+        Writer { console, buf: [0; WRITER_BUF], len: 0, error: None }
     }
 
     /// The first error the console reported, if any.
@@ -113,10 +108,10 @@ impl Writer {
         }
         let r = self.console.write(self.buf.get(..self.len).unwrap_or(&[]));
         self.len = 0;
-        if let Err(e) = r {
-            if self.error.is_none() {
-                self.error = Some(e);
-            }
+        if let Err(e) = r
+            && self.error.is_none()
+        {
+            self.error = Some(e);
         }
         r
     }
@@ -176,7 +171,7 @@ macro_rules! println {
 /// Formats to a specific console: `cprint!(console, "{}", x)`.
 #[macro_export]
 macro_rules! cprint {
-    ($console:expr, $($arg:tt)*) => {
+    ($console:expr_2021, $($arg:tt)*) => {
         $crate::console::_print(::core::option::Option::Some($console), ::core::format_args!($($arg)*), false)
     };
 }
@@ -184,10 +179,10 @@ macro_rules! cprint {
 /// Formats a line to a specific console: `cprintln!(console, "{}", x)`.
 #[macro_export]
 macro_rules! cprintln {
-    ($console:expr) => {
+    ($console:expr_2021) => {
         $crate::console::_print(::core::option::Option::Some($console), ::core::format_args!(""), true)
     };
-    ($console:expr, $($arg:tt)*) => {
+    ($console:expr_2021, $($arg:tt)*) => {
         $crate::console::_print(::core::option::Option::Some($console), ::core::format_args!($($arg)*), true)
     };
 }

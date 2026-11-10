@@ -6,9 +6,9 @@
 //! Initial capabilities: slot 0 a channel `Receiver`.
 #![no_std]
 
-use kalium_sdk::{exit, Cap, Errno, Receiver};
+use kalium_sdk::{Cap, Errno, Receiver, exit};
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn _start() {
     let rx = Receiver::from_cap(Cap::slot(0));
     match rx.recv(&mut [], &mut []) {

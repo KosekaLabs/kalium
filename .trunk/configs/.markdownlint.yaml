@@ -1,0 +1,9 @@
+# Prettier friendly markdownlint config (all formatting rules disabled).
+extends: markdownlint/style/prettier
+
+# Disables specific rules.
+MD013: false # Disables line length limit
+MD024: false # Allows multiple headers with the same content.
+MD033: false # Allows inline HTML.
+MD041: false # Allows the first line to not be a top-level heading.
+

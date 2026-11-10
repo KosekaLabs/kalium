@@ -21,10 +21,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use kalium_wasm::{
-    ExecResult, Execution, Host, HostCtx, HostFuncId, HostOutcome, Instance, Limits, Module, Trap,
-    Value,
-};
+use kalium_wasm::{ExecResult, Execution, Host, HostCtx, HostFuncId, HostOutcome, Instance, Limits, Module, Trap, Value};
 
 /// Blocks on the first host call, then answers every call with zero
 /// results (which ends `_start` of a WASI program at its first `fd_write`
@@ -51,8 +48,7 @@ fn resolve_all(_: &str, _: &str, _: &kalium_wasm::FuncType) -> Result<HostFuncId
 }
 
 fn instantiate(module: &Arc<Module>) -> Instance {
-    Instance::new(module.clone(), &mut resolve_all, &Limits::default())
-        .unwrap_or_else(|e| panic!("instantiation failed: {e}"))
+    Instance::new(module.clone(), &mut resolve_all, &Limits::default()).unwrap_or_else(|e| panic!("instantiation failed: {e}"))
 }
 
 /// Best-of-three mean time of `f` over batches of `n`.
@@ -75,11 +71,7 @@ fn us(d: Duration) -> f64 {
 fn main() {
     let only = std::env::var("KALIUM_BENCH_ONLY").ok();
     let fixture: &[u8] = include_bytes!("../tests/fixtures/rust_fixture.wasm");
-    let hello = std::fs::read(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../target/wasm/hello_std.wasm"
-    ))
-    .ok();
+    let hello = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/wasm/hello_std.wasm")).ok();
     let mut modules: Vec<(&str, &str, Vec<u8>)> = vec![("fixture", "greet", fixture.to_vec())];
     match hello {
         Some(bytes) => modules.push(("hello_std", "_start", bytes)),
@@ -133,11 +125,9 @@ fn main() {
                 module.clone(),
                 snapshot,
                 &mut |_, _, ty| match ty {
-                    kalium_wasm::ExternType::Func(ft) => Some(kalium_wasm::Extern::Func {
-                        id: HostFuncId(0),
-                        ty: (*ft).clone(),
-                        addr: None,
-                    }),
+                    kalium_wasm::ExternType::Func(ft) => {
+                        Some(kalium_wasm::Extern::Func { id: HostFuncId(0), ty: (*ft).clone(), addr: None })
+                    }
                     _ => None,
                 },
                 &Limits::default(),
@@ -148,9 +138,7 @@ fn main() {
         let restore_t = measure(200, || restore(&snapshot));
         let encoded = snapshot.to_bytes();
         let to_bytes_t = measure(100, || snapshot.to_bytes());
-        let from_bytes_t = measure(100, || {
-            kalium_wasm::Snapshot::from_bytes(&encoded).expect("decode")
-        });
+        let from_bytes_t = measure(100, || kalium_wasm::Snapshot::from_bytes(&encoded).expect("decode"));
         // The restored instance holds exactly the captured state.
         let restored = restore(&snapshot);
         assert_eq!(restored.snapshot().expect("snapshot"), snapshot);

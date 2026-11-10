@@ -162,11 +162,7 @@ pub struct Sig {
 use ValType::{I32, I64};
 
 const fn sig(name: &'static str, params: &'static [ValType]) -> Sig {
-    Sig {
-        name,
-        params,
-        results: &[I32],
-    }
+    Sig { name, params, results: &[I32] }
 }
 
 /// Every function of `wasi_snapshot_preview1` with its signature, in the
@@ -204,10 +200,7 @@ pub const TABLE: [Sig; 46] = [
     sig("fd_write", &[I32, I32, I32, I32]),
     sig("path_create_directory", &[I32, I32, I32]),
     sig("path_filestat_get", &[I32, I32, I32, I32, I32]),
-    sig(
-        "path_filestat_set_times",
-        &[I32, I32, I32, I32, I64, I64, I32],
-    ),
+    sig("path_filestat_set_times", &[I32, I32, I32, I32, I64, I64, I32]),
     sig("path_link", &[I32, I32, I32, I32, I32, I32, I32]),
     sig("path_open", &[I32, I32, I32, I32, I32, I64, I64, I32, I32]),
     sig("path_readlink", &[I32, I32, I32, I32, I32, I32]),
@@ -216,11 +209,7 @@ pub const TABLE: [Sig; 46] = [
     sig("path_symlink", &[I32, I32, I32, I32, I32]),
     sig("path_unlink_file", &[I32, I32, I32]),
     sig("poll_oneoff", &[I32, I32, I32, I32]),
-    Sig {
-        name: "proc_exit",
-        params: &[I32],
-        results: &[],
-    },
+    Sig { name: "proc_exit", params: &[I32], results: &[] },
     sig("proc_raise", &[I32]),
     sig("sched_yield", &[]),
     sig("random_get", &[I32, I32]),
@@ -256,11 +245,7 @@ pub fn check_table() -> Result<(), &'static str> {
         if (s.results.is_empty()) != (s.name == "proc_exit") {
             return Err("WASI function with a wrong result type");
         }
-        if resolve(
-            s.name,
-            &FuncType::new(s.params.to_vec(), s.results.to_vec()),
-        ) != Ok(HostFuncId(BASE + i as u32))
-        {
+        if resolve(s.name, &FuncType::new(s.params.to_vec(), s.results.to_vec())) != Ok(HostFuncId(BASE + i as u32)) {
             return Err("WASI function does not resolve to its own id");
         }
     }
@@ -289,11 +274,7 @@ const OK: R = Ok(Step::Ret(errno::SUCCESS));
 /// the WASI value: `EINVAL` stays a bad argument, everything else is a bad
 /// pointer.
 fn map_fault(e: i32) -> i32 {
-    if e == kalium_abi::errno::EINVAL {
-        errno::INVAL
-    } else {
-        errno::FAULT
-    }
+    if e == kalium_abi::errno::EINVAL { errno::INVAL } else { errno::FAULT }
 }
 
 fn range(mem: &Memory, ptr: i32, len: i32) -> Result<(u32, usize), i32> {
@@ -323,9 +304,7 @@ fn read_u32(mem: &Memory, ptr: u32) -> Result<u32, i32> {
 
 fn read_u64(mem: &Memory, ptr: u32) -> Result<u64, i32> {
     let b = mem.slice(ptr, 8).map_err(|_| errno::FAULT)?;
-    Ok(u64::from_le_bytes([
-        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
-    ]))
+    Ok(u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]))
 }
 
 /// The buffers named by an iovec array, each bounds-checked.
@@ -333,9 +312,7 @@ fn iovecs(mem: &Memory, iovs: i32, iovs_len: i32) -> Result<Vec<(u32, usize)>, i
     let (p, _) = range_n(mem, iovs, iovs_len, IOVEC_SIZE)?;
     let mut v = host::try_vec(iovs_len as usize).map_err(|_| errno::NOMEM)?;
     for i in 0..iovs_len as u32 {
-        let at = p
-            .checked_add(i.checked_mul(IOVEC_SIZE as u32).ok_or(errno::FAULT)?)
-            .ok_or(errno::FAULT)?;
+        let at = p.checked_add(i.checked_mul(IOVEC_SIZE as u32).ok_or(errno::FAULT)?).ok_or(errno::FAULT)?;
         let buf = read_u32(mem, at)?;
         let len = read_u32(mem, at + 4)?;
         let len = i32::try_from(len).map_err(|_| errno::FAULT)?;
@@ -374,27 +351,16 @@ impl HostCall<'_> {
     /// The console object behind fds 1 and 2, if the instance has one.
     fn stdout_console(&mut self) -> Option<kalium_cap::ObjectId> {
         let idx = host::cap_index(abi::STDOUT_CONSOLE_SLOT).ok()?;
-        self.check_cap(idx, ObjectKind::Console, Rights::WRITE)
-            .ok()
-            .map(|c| c.object)
+        self.check_cap(idx, ObjectKind::Console, Rights::WRITE).ok().map(|c| c.object)
     }
 
     /// The channel behind fd 0, if the instance has one.
     fn stdin_channel(&mut self) -> Option<kalium_cap::ObjectId> {
         let idx = host::cap_index(abi::STDIN_CHANNEL_SLOT).ok()?;
-        self.check_cap(idx, ObjectKind::Channel, Rights::RECV)
-            .ok()
-            .map(|c| c.object)
+        self.check_cap(idx, ObjectKind::Channel, Rights::RECV).ok().map(|c| c.object)
     }
 
-    fn fd_write(
-        &mut self,
-        mem: &mut Memory,
-        fd: i32,
-        iovs: i32,
-        iovs_len: i32,
-        nwritten: i32,
-    ) -> R {
+    fn fd_write(&mut self, mem: &mut Memory, fd: i32, iovs: i32, iovs_len: i32, nwritten: i32) -> R {
         let (np, _) = range(mem, nwritten, 4)?;
         let bufs = iovecs(mem, iovs, iovs_len)?;
         if !is_std(fd) {
@@ -578,11 +544,7 @@ impl HostCall<'_> {
             let timeout = read_u64(mem, at + 24)?;
             let flags = mem.slice(at + 40, 2).map_err(|_| errno::FAULT)?;
             let flags = u16::from_le_bytes([flags[0], flags[1]]);
-            let deadline = if flags & SUBCLOCKFLAGS_ABSTIME != 0 {
-                timeout
-            } else {
-                started.saturating_add(timeout)
-            };
+            let deadline = if flags & SUBCLOCKFLAGS_ABSTIME != 0 { timeout } else { started.saturating_add(timeout) };
             list.push((userdata, deadline));
         }
         let earliest = list.iter().map(|&(_, d)| d).min().unwrap_or(now);

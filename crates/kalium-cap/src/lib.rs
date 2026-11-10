@@ -118,11 +118,7 @@ impl Rights {
 
     /// Builds a rights set, rejecting any bit the ABI does not define.
     pub const fn from_bits(bits: u64) -> Option<Rights> {
-        if bits & !rights::MASK == 0 {
-            Some(Rights(bits))
-        } else {
-            None
-        }
+        if bits & !rights::MASK == 0 { Some(Rights(bits)) } else { None }
     }
 
     /// Builds a rights set, silently dropping bits the ABI does not define.
@@ -346,18 +342,8 @@ impl Capability {
     /// Builds a capability at `node`, a node of `object`'s lineage. Only the
     /// kernel (or tests) should call this; instances obtain capabilities
     /// through host calls.
-    pub const fn new(
-        object: ObjectId,
-        kind: ObjectKind,
-        rights: Rights,
-        node: NodeId,
-    ) -> Capability {
-        Capability {
-            object,
-            kind,
-            rights,
-            node,
-        }
+    pub const fn new(object: ObjectId, kind: ObjectKind, rights: Rights, node: NodeId) -> Capability {
+        Capability { object, kind, rights, node }
     }
 
     /// The same object, kind and rights at another node of the lineage.
@@ -372,11 +358,7 @@ impl Capability {
 
     /// Checks kind and rights; [`CapError::Perm`] if either does not match.
     pub const fn check(&self, kind: ObjectKind, rights: Rights) -> Result<(), CapError> {
-        if self.kind as u32 == kind as u32 && self.rights.contains(rights) {
-            Ok(())
-        } else {
-            Err(CapError::Perm)
-        }
+        if self.kind as u32 == kind as u32 && self.rights.contains(rights) { Ok(()) } else { Err(CapError::Perm) }
     }
 
     /// The rights a derivation of `self` would carry, per `cap_derive`:
@@ -402,22 +384,14 @@ impl Capability {
     /// The rights rule is [`derived_rights`](Capability::derived_rights).
     pub const fn derive(&self, requested: Rights, child: NodeId) -> Result<Capability, CapError> {
         match self.derived_rights(requested) {
-            Ok(rights) => Ok(Capability {
-                object: self.object,
-                kind: self.kind,
-                rights,
-                node: child,
-            }),
+            Ok(rights) => Ok(Capability { object: self.object, kind: self.kind, rights, node: child }),
             Err(e) => Err(e),
         }
     }
 
     /// The `{kind, rights}` pair `cap_info` writes to linear memory.
     pub const fn info(&self) -> kalium_abi::layout::CapInfo {
-        kalium_abi::layout::CapInfo {
-            kind: self.kind.as_u32(),
-            rights: self.rights.bits(),
-        }
+        kalium_abi::layout::CapInfo { kind: self.kind.as_u32(), rights: self.rights.bits() }
     }
 }
 
@@ -500,11 +474,7 @@ impl Lineage {
 
     /// An empty tree.
     pub const fn new() -> Lineage {
-        Lineage {
-            nodes: Vec::new(),
-            free: Vec::new(),
-            live: 0,
-        }
+        Lineage { nodes: Vec::new(), free: Vec::new(), live: 0 }
     }
 
     /// Number of live nodes.
@@ -579,14 +549,7 @@ impl Lineage {
     /// no reference yet (see the type docs). [`CapError::NoMem`] if the
     /// index space is exhausted.
     pub fn root(&mut self) -> Result<NodeId, CapError> {
-        self.alloc(Node {
-            parent: None,
-            parent_generation: 0,
-            generation: 0,
-            depth: 0,
-            refs: 0,
-            children: 0,
-        })
+        self.alloc(Node { parent: None, parent_generation: 0, generation: 0, depth: 0, refs: 0, children: 0 })
     }
 
     /// A new child of `parent`: the node of a capability derived from one
@@ -675,10 +638,7 @@ impl Lineage {
     /// nothing and touches no count.
     pub fn can_revoke(&self, node: NodeId) -> Result<(), CapError> {
         let n = self.get(node).ok_or(CapError::BadCap)?;
-        n.generation
-            .checked_add(1)
-            .map(|_| ())
-            .ok_or(CapError::NoMem)
+        n.generation.checked_add(1).map(|_| ()).ok_or(CapError::NoMem)
     }
 
     /// [`revoke`](Lineage::revoke), reporting which of `held` (capabilities
@@ -687,19 +647,10 @@ impl Lineage {
     /// effect on the object (a channel's endpoint counts) ends now rather
     /// than when they are eventually dropped. Capabilities that were already
     /// invalid, or on other objects, are not reported.
-    pub fn revoke_among(
-        &mut self,
-        node: NodeId,
-        held: &[Capability],
-    ) -> Result<Vec<Capability>, CapError> {
+    pub fn revoke_among(&mut self, node: NodeId, held: &[Capability]) -> Result<Vec<Capability>, CapError> {
         let was_valid: Vec<bool> = held.iter().map(|c| self.is_valid(c.node)).collect();
         self.revoke(node)?;
-        Ok(held
-            .iter()
-            .zip(was_valid)
-            .filter(|(c, was)| *was && !self.is_valid(c.node))
-            .map(|(c, _)| *c)
-            .collect())
+        Ok(held.iter().zip(was_valid).filter(|(c, was)| *was && !self.is_valid(c.node)).map(|(c, _)| *c).collect())
     }
 
     /// `true` if `node` is live and no node above it has been revoked since
@@ -761,12 +712,7 @@ impl Lineage {
             if node.depth > MAX_DEPTH {
                 return false;
             }
-            let children = self
-                .nodes
-                .iter()
-                .flatten()
-                .filter(|c| c.parent == Some(NodeId(i as u32)))
-                .count();
+            let children = self.nodes.iter().flatten().filter(|c| c.parent == Some(NodeId(i as u32))).count();
             if children != node.children as usize {
                 return false;
             }
@@ -801,11 +747,7 @@ impl CapIndex {
 
     /// Builds an index; `None` if `raw` does not fit in an `i32`.
     pub const fn new(raw: u32) -> Option<CapIndex> {
-        if raw <= Self::MAX.0 {
-            Some(CapIndex(raw))
-        } else {
-            None
-        }
+        if raw <= Self::MAX.0 { Some(CapIndex(raw)) } else { None }
     }
 
     /// The slot number.
@@ -849,10 +791,7 @@ impl TryFrom<usize> for CapIndex {
 
     /// Rejects values above `i32::MAX` with [`CapError::BadCap`].
     fn try_from(v: usize) -> Result<CapIndex, CapError> {
-        u32::try_from(v)
-            .ok()
-            .and_then(CapIndex::new)
-            .ok_or(CapError::BadCap)
+        u32::try_from(v).ok().and_then(CapIndex::new).ok_or(CapError::BadCap)
     }
 }
 
@@ -919,12 +858,7 @@ impl CapTable {
     /// than the index space is clamped to `CapIndex::MAX + 1`.
     pub fn new(limit: usize) -> CapTable {
         let max = CapIndex::MAX.as_usize() + 1;
-        CapTable {
-            slots: Vec::new(),
-            free: Vec::new(),
-            live: 0,
-            limit: if limit > max { max } else { limit },
-        }
+        CapTable { slots: Vec::new(), free: Vec::new(), live: 0, limit: if limit > max { max } else { limit } }
     }
 
     /// The maximum number of live capabilities.
@@ -992,21 +926,13 @@ impl CapTable {
     /// The capability in `idx`, or [`CapError::BadCap`] if the slot is not
     /// live.
     pub fn get(&self, idx: CapIndex) -> Result<&Capability, CapError> {
-        self.slots
-            .get(idx.as_usize())
-            .and_then(Option::as_ref)
-            .ok_or(CapError::BadCap)
+        self.slots.get(idx.as_usize()).and_then(Option::as_ref).ok_or(CapError::BadCap)
     }
 
     /// Looks up `idx` and verifies it is a `kind` object carrying all of
     /// `rights`: [`CapError::BadCap`] if the slot is not live,
     /// [`CapError::Perm`] if the kind or rights do not match.
-    pub fn check(
-        &self,
-        idx: CapIndex,
-        kind: ObjectKind,
-        rights: Rights,
-    ) -> Result<&Capability, CapError> {
+    pub fn check(&self, idx: CapIndex, kind: ObjectKind, rights: Rights) -> Result<&Capability, CapError> {
         let cap = self.get(idx)?;
         cap.check(kind, rights)?;
         Ok(cap)
@@ -1016,11 +942,7 @@ impl CapTable {
     /// kind. Used where the kind is not fixed (`cap_derive`, transfer).
     pub fn check_rights(&self, idx: CapIndex, rights: Rights) -> Result<&Capability, CapError> {
         let cap = self.get(idx)?;
-        if cap.rights.contains(rights) {
-            Ok(cap)
-        } else {
-            Err(CapError::Perm)
-        }
+        if cap.rights.contains(rights) { Ok(cap) } else { Err(CapError::Perm) }
     }
 
     /// Removes the capability in `idx` and returns it, freeing the slot.
@@ -1045,12 +967,7 @@ impl CapTable {
     /// Errors: [`CapError::BadCap`] if `idx` is not live, [`CapError::Perm`]
     /// if the source lacks `DERIVE`, [`CapError::NoMem`] if the table is
     /// full. The source slot is unchanged in every case.
-    pub fn derive(
-        &mut self,
-        idx: CapIndex,
-        rights: Rights,
-        child: NodeId,
-    ) -> Result<CapIndex, CapError> {
+    pub fn derive(&mut self, idx: CapIndex, rights: Rights, child: NodeId) -> Result<CapIndex, CapError> {
         let derived = self.get(idx)?.derive(rights, child)?;
         self.insert(derived)
     }
@@ -1062,10 +979,7 @@ impl CapTable {
 
     /// Every live capability with its slot, in slot order.
     pub fn iter(&self) -> impl Iterator<Item = (CapIndex, &Capability)> + '_ {
-        self.slots
-            .iter()
-            .enumerate()
-            .filter_map(|(i, slot)| slot.as_ref().map(|cap| (CapIndex(i as u32), cap)))
+        self.slots.iter().enumerate().filter_map(|(i, slot)| slot.as_ref().map(|cap| (CapIndex(i as u32), cap)))
     }
 
     /// `true` if the table holds at least one live capability of `kind`.
@@ -1105,30 +1019,15 @@ mod tests {
     use alloc::vec;
 
     fn console(id: u64) -> Capability {
-        Capability::new(
-            ObjectId(id),
-            ObjectKind::Console,
-            Rights::WRITE | Rights::DERIVE,
-            NodeId(0),
-        )
+        Capability::new(ObjectId(id), ObjectKind::Console, Rights::WRITE | Rights::DERIVE, NodeId(0))
     }
 
     fn channel_recv(id: u64) -> Capability {
-        Capability::new(
-            ObjectId(id),
-            ObjectKind::Channel,
-            Rights::from_bits(rights::CHANNEL_RECV_END).unwrap(),
-            NodeId(0),
-        )
+        Capability::new(ObjectId(id), ObjectKind::Channel, Rights::from_bits(rights::CHANNEL_RECV_END).unwrap(), NodeId(0))
     }
 
     fn memobj(id: u64) -> Capability {
-        Capability::new(
-            ObjectId(id),
-            ObjectKind::MemObj,
-            Rights::from_bits(rights::MEMOBJ_OWNER).unwrap(),
-            NodeId(0),
-        )
+        Capability::new(ObjectId(id), ObjectKind::MemObj, Rights::from_bits(rights::MEMOBJ_OWNER).unwrap(), NodeId(0))
     }
 
     /// A child node for a derivation in tests that do not care about the
@@ -1166,10 +1065,7 @@ mod tests {
         assert_eq!(Rights::try_from(1 << 10), Err(CapError::Invalid));
         assert_eq!(Rights::try_from(rights::SEND), Ok(Rights::SEND));
         assert_eq!(Rights::from_bits_truncate(u64::MAX), Rights::ALL);
-        assert_eq!(
-            Rights::from_bits_truncate(rights::READ | (1 << 40)),
-            Rights::READ
-        );
+        assert_eq!(Rights::from_bits_truncate(rights::READ | (1 << 40)), Rights::READ);
     }
 
     #[test]
@@ -1186,10 +1082,7 @@ mod tests {
 
         assert_eq!(rw.intersection(Rights::READ | Rights::SEND), Rights::READ);
         assert_eq!(rw & Rights::SEND, Rights::NONE);
-        assert_eq!(
-            rw.union(Rights::SEND),
-            Rights::READ | Rights::WRITE | Rights::SEND
-        );
+        assert_eq!(rw.union(Rights::SEND), Rights::READ | Rights::WRITE | Rights::SEND);
         assert_eq!(rw.difference(Rights::READ), Rights::WRITE);
         assert_eq!(rw - Rights::WRITE, Rights::READ);
         assert!(rw.intersects(Rights::READ | Rights::KILL));
@@ -1209,10 +1102,7 @@ mod tests {
         assert_eq!(format!("{:?}", Rights::NONE), "Rights(NONE)");
         assert_eq!(format!("{:?}", Rights::READ), "Rights(READ)");
         assert_eq!(
-            format!(
-                "{:?}",
-                Rights::RECV | Rights::WAIT | Rights::DERIVE | Rights::TRANSFER
-            ),
+            format!("{:?}", Rights::RECV | Rights::WAIT | Rights::DERIVE | Rights::TRANSFER),
             "Rights(RECV|DERIVE|TRANSFER|WAIT)"
         );
     }
@@ -1255,12 +1145,7 @@ mod tests {
         assert_eq!(CapError::Perm.errno(), 2);
         assert_eq!(CapError::NoMem.errno(), 4);
         assert_eq!(CapError::Invalid.errno(), 3);
-        for e in [
-            CapError::BadCap,
-            CapError::Perm,
-            CapError::NoMem,
-            CapError::Invalid,
-        ] {
+        for e in [CapError::BadCap, CapError::Perm, CapError::NoMem, CapError::Invalid] {
             assert_ne!(e.errno(), errno::OK);
             assert!(errno::name(e.errno()).is_some());
         }
@@ -1271,19 +1156,13 @@ mod tests {
     #[test]
     fn index_rejects_negatives() {
         assert_eq!(CapIndex::try_from(-1i32), Err(CapError::BadCap));
-        assert_eq!(
-            CapIndex::try_from(kalium_abi::CAP_NONE),
-            Err(CapError::BadCap)
-        );
+        assert_eq!(CapIndex::try_from(kalium_abi::CAP_NONE), Err(CapError::BadCap));
         assert_eq!(CapIndex::try_from(i32::MIN), Err(CapError::BadCap));
         assert_eq!(CapIndex::try_from(-1000i32), Err(CapError::BadCap));
         assert_eq!(CapIndex::try_from(0i32).map(CapIndex::raw), Ok(0));
         assert_eq!(CapIndex::try_from(7i32).map(CapIndex::raw), Ok(7));
         assert_eq!(CapIndex::try_from(i32::MAX), Ok(CapIndex::MAX));
-        assert_eq!(
-            CapIndex::try_from(-1i32).unwrap_err().errno(),
-            errno::EBADCAP
-        );
+        assert_eq!(CapIndex::try_from(-1i32).unwrap_err().errno(), errno::EBADCAP);
     }
 
     #[test]
@@ -1293,10 +1172,7 @@ mod tests {
         assert_eq!(CapIndex::new(u32::MAX), None);
         assert_eq!(CapIndex::try_from(u32::MAX), Err(CapError::BadCap));
         assert_eq!(CapIndex::try_from(usize::MAX), Err(CapError::BadCap));
-        assert_eq!(
-            CapIndex::try_from(i32::MAX as usize + 1),
-            Err(CapError::BadCap)
-        );
+        assert_eq!(CapIndex::try_from(i32::MAX as usize + 1), Err(CapError::BadCap));
         assert_eq!(CapIndex::try_from(5usize).map(CapIndex::raw), Ok(5));
     }
 
@@ -1321,21 +1197,12 @@ mod tests {
         assert!(!cap.has(Rights::SEND));
         assert_eq!(cap.check(ObjectKind::Channel, Rights::RECV), Ok(()));
         assert_eq!(cap.check(ObjectKind::Channel, Rights::NONE), Ok(()));
-        assert_eq!(
-            cap.check(ObjectKind::Channel, Rights::SEND),
-            Err(CapError::Perm)
-        );
-        assert_eq!(
-            cap.check(ObjectKind::MemObj, Rights::RECV),
-            Err(CapError::Perm)
-        );
+        assert_eq!(cap.check(ObjectKind::Channel, Rights::SEND), Err(CapError::Perm));
+        assert_eq!(cap.check(ObjectKind::MemObj, Rights::RECV), Err(CapError::Perm));
         let info = cap.info();
         assert_eq!(info.kind, kind::CHANNEL);
         assert_eq!(info.rights, rights::CHANNEL_RECV_END);
-        assert_eq!(
-            kalium_abi::layout::CapInfo::from_le_bytes(info.to_le_bytes()),
-            info
-        );
+        assert_eq!(kalium_abi::layout::CapInfo::from_le_bytes(info.to_le_bytes()), info);
     }
 
     // -- CapTable: insert / get / limits -------------------------------------
@@ -1366,10 +1233,7 @@ mod tests {
             assert_eq!(t.insert(*cap).unwrap().raw() as usize, i);
         }
         let seen: Vec<_> = t.iter().map(|(i, c)| (i.raw(), *c)).collect();
-        assert_eq!(
-            seen,
-            vec![(0, console(1)), (1, memobj(2)), (2, channel_recv(3))]
-        );
+        assert_eq!(seen, vec![(0, console(1)), (1, memobj(2)), (2, channel_recv(3))]);
     }
 
     #[test]
@@ -1425,10 +1289,7 @@ mod tests {
         let a = t.insert(console(1)).unwrap();
         for bad in [CapIndex(1), CapIndex(2), CapIndex(1000), CapIndex::MAX] {
             assert_eq!(t.get(bad), Err(CapError::BadCap));
-            assert_eq!(
-                t.check(bad, ObjectKind::Console, Rights::NONE),
-                Err(CapError::BadCap)
-            );
+            assert_eq!(t.check(bad, ObjectKind::Console, Rights::NONE), Err(CapError::BadCap));
             assert_eq!(t.check_rights(bad, Rights::NONE), Err(CapError::BadCap));
             assert_eq!(t.take(bad), Err(CapError::BadCap));
             assert_eq!(t.derive(bad, Rights::NONE, CHILD), Err(CapError::BadCap));
@@ -1487,10 +1348,7 @@ mod tests {
     fn check_wrong_kind_gives_eperm() {
         let mut t = CapTable::new(8);
         let a = t.insert(console(1)).unwrap();
-        assert_eq!(
-            t.check(a, ObjectKind::Console, Rights::WRITE),
-            Ok(&console(1))
-        );
+        assert_eq!(t.check(a, ObjectKind::Console, Rights::WRITE), Ok(&console(1)));
         let err = t.check(a, ObjectKind::Channel, Rights::WRITE).unwrap_err();
         assert_eq!(err, CapError::Perm);
         assert_eq!(err.errno(), errno::EPERM);
@@ -1507,38 +1365,20 @@ mod tests {
         let a = t.insert(console(1)).unwrap(); // WRITE|DERIVE
         assert!(t.check(a, ObjectKind::Console, Rights::NONE).is_ok());
         assert!(t.check(a, ObjectKind::Console, Rights::WRITE).is_ok());
-        assert!(t
-            .check(a, ObjectKind::Console, Rights::WRITE | Rights::DERIVE)
-            .is_ok());
-        assert_eq!(
-            t.check(a, ObjectKind::Console, Rights::READ),
-            Err(CapError::Perm)
-        );
-        assert_eq!(
-            t.check(a, ObjectKind::Console, Rights::WRITE | Rights::TRANSFER),
-            Err(CapError::Perm)
-        );
+        assert!(t.check(a, ObjectKind::Console, Rights::WRITE | Rights::DERIVE).is_ok());
+        assert_eq!(t.check(a, ObjectKind::Console, Rights::READ), Err(CapError::Perm));
+        assert_eq!(t.check(a, ObjectKind::Console, Rights::WRITE | Rights::TRANSFER), Err(CapError::Perm));
         assert_eq!(t.check_rights(a, Rights::WRITE), Ok(&console(1)));
         assert_eq!(t.check_rights(a, Rights::TRANSFER), Err(CapError::Perm));
         // A bad index wins over a rights problem.
-        assert_eq!(
-            t.check(CapIndex(5), ObjectKind::Console, Rights::READ),
-            Err(CapError::BadCap)
-        );
+        assert_eq!(t.check(CapIndex(5), ObjectKind::Console, Rights::READ), Err(CapError::BadCap));
     }
 
     #[test]
     fn holds_kind_reflects_live_caps() {
         let mut t = CapTable::new(8);
         assert!(!t.holds_kind(ObjectKind::Spawn));
-        let s = t
-            .insert(Capability::new(
-                ObjectId(7),
-                ObjectKind::Spawn,
-                Rights::SPAWN | Rights::TRANSFER,
-                NodeId(0),
-            ))
-            .unwrap();
+        let s = t.insert(Capability::new(ObjectId(7), ObjectKind::Spawn, Rights::SPAWN | Rights::TRANSFER, NodeId(0))).unwrap();
         assert!(t.holds_kind(ObjectKind::Spawn));
         assert!(!t.holds_kind(ObjectKind::Console));
         t.take(s).unwrap();
@@ -1618,9 +1458,7 @@ mod tests {
         let a = t.insert(memobj(1)).unwrap(); // READ|WRITE|DERIVE|TRANSFER
         let d = t.derive(a, Rights::ALL, CHILD).unwrap();
         assert_eq!(t.get(d).unwrap().rights, t.get(a).unwrap().rights);
-        let d2 = t
-            .derive(a, Rights::READ | Rights::KILL | Rights::SPAWN, CHILD)
-            .unwrap();
+        let d2 = t.derive(a, Rights::READ | Rights::KILL | Rights::SPAWN, CHILD).unwrap();
         assert_eq!(t.get(d2).unwrap().rights, Rights::READ);
         // Exhaustively: for every requested subset, derived <= source.
         for bits in 0..=rights::MASK {
@@ -1653,10 +1491,7 @@ mod tests {
         assert_eq!(err.errno(), errno::EPERM);
         // Even asking for nothing needs DERIVE.
         assert_eq!(t.derive(a, Rights::NONE, CHILD), Err(CapError::Perm));
-        assert_eq!(
-            t.get(a).unwrap().derived_rights(Rights::NONE),
-            Err(CapError::Perm)
-        );
+        assert_eq!(t.get(a).unwrap().derived_rights(Rights::NONE), Err(CapError::Perm));
         assert_eq!(t.len(), 1);
         assert!(t.check_invariants());
     }
@@ -1670,17 +1505,11 @@ mod tests {
         assert!(!t.get(d).unwrap().has(Rights::DERIVE));
         assert_eq!(t.derive(d, Rights::READ, NodeId(2)), Err(CapError::Perm));
         // Requested: it can, but still only within its own rights.
-        let d2 = t
-            .derive(a, Rights::READ | Rights::DERIVE, NodeId(2))
-            .unwrap();
+        let d2 = t.derive(a, Rights::READ | Rights::DERIVE, NodeId(2)).unwrap();
         assert!(t.get(d2).unwrap().has(Rights::DERIVE));
-        let d3 = t
-            .derive(d2, Rights::READ | Rights::WRITE | Rights::DERIVE, NodeId(3))
-            .unwrap();
+        let d3 = t.derive(d2, Rights::READ | Rights::WRITE | Rights::DERIVE, NodeId(3)).unwrap();
         assert_eq!(t.get(d3).unwrap().rights, Rights::READ | Rights::DERIVE);
-        let d4 = t
-            .derive(d3, Rights::ALL - Rights::DERIVE, NodeId(4))
-            .unwrap();
+        let d4 = t.derive(d3, Rights::ALL - Rights::DERIVE, NodeId(4)).unwrap();
         assert_eq!(t.get(d4).unwrap().rights, Rights::READ);
         assert_eq!(t.derive(d4, Rights::ALL, NodeId(5)), Err(CapError::Perm));
     }
@@ -1691,13 +1520,8 @@ mod tests {
         let mut idx = t.insert(channel_recv(5)).unwrap();
         let mut prev = *t.get(idx).unwrap();
         // Peel off one right per step, keeping DERIVE until the end.
-        for (n, strip) in [Rights::TRANSFER, Rights::WAIT, Rights::RECV, Rights::DERIVE]
-            .into_iter()
-            .enumerate()
-        {
-            idx = t
-                .derive(idx, prev.rights - strip, NodeId(n as u32 + 1))
-                .unwrap();
+        for (n, strip) in [Rights::TRANSFER, Rights::WAIT, Rights::RECV, Rights::DERIVE].into_iter().enumerate() {
+            idx = t.derive(idx, prev.rights - strip, NodeId(n as u32 + 1)).unwrap();
             let cur = *t.get(idx).unwrap();
             assert!(prev.rights.contains(cur.rights));
             assert!(!cur.has(strip));
@@ -1799,11 +1623,7 @@ mod tests {
             }
             assert!(t.check_invariants(), "invariants broken at step {step}");
             let live: Vec<_> = t.iter().map(|(i, c)| (i.raw() as usize, *c)).collect();
-            let expected: Vec<_> = shadow
-                .iter()
-                .enumerate()
-                .filter_map(|(i, c)| c.map(|c| (i, c)))
-                .collect();
+            let expected: Vec<_> = shadow.iter().enumerate().filter_map(|(i, c)| c.map(|c| (i, c))).collect();
             assert_eq!(live, expected);
             assert_eq!(t.len(), expected.len());
         }
@@ -1968,12 +1788,7 @@ mod tests {
         assert!(l.is_valid(after));
         assert_eq!(l.get(a).unwrap().generation, u32::MAX);
 
-        let cap = |node| Capability {
-            object: ObjectId(1),
-            kind: ObjectKind::Channel,
-            rights: Rights::SEND,
-            node,
-        };
+        let cap = |node| Capability { object: ObjectId(1), kind: ObjectKind::Channel, rights: Rights::SEND, node };
         let held = [cap(r), cap(a), cap(before), cap(after)];
         assert_eq!(l.revoke_among(a, &held), Err(CapError::NoMem));
         assert!(l.is_valid(r));

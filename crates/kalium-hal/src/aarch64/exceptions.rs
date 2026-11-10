@@ -180,7 +180,7 @@ __kalium_exception_entry:
 "#
 );
 
-extern "C" {
+unsafe extern "C" {
     static __kalium_vectors: u8;
     static __kalium_vectors_end: u8;
 }
@@ -316,13 +316,7 @@ impl SyncFault {
     /// Read the fault registers for the exception described by `frame`.
     pub fn current(frame: &ExceptionFrame) -> Self {
         let esr = read_sysreg!("esr_el1");
-        SyncFault {
-            esr,
-            far: read_sysreg!("far_el1"),
-            elr: frame.elr,
-            ec: (esr >> 26) & 0x3f,
-            iss: esr & 0x1ff_ffff,
-        }
+        SyncFault { esr, far: read_sysreg!("far_el1"), elr: frame.elr, ec: (esr >> 26) & 0x3f, iss: esr & 0x1ff_ffff }
     }
 
     pub fn is_data_abort(&self) -> bool {
@@ -330,10 +324,7 @@ impl SyncFault {
     }
 
     pub fn is_instruction_abort(&self) -> bool {
-        matches!(
-            self.ec,
-            ec::INSTRUCTION_ABORT_LOWER_EL | ec::INSTRUCTION_ABORT_CURRENT_EL
-        )
+        matches!(self.ec, ec::INSTRUCTION_ABORT_LOWER_EL | ec::INSTRUCTION_ABORT_CURRENT_EL)
     }
 
     /// The fault status code (`DFSC`/`IFSC`) for aborts.
@@ -368,11 +359,7 @@ impl core::fmt::Display for SyncFault {
     /// ELR_EL1 = 0x..`, or the exception class name for anything else.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         if let Some(fsc) = self.fault_status() {
-            let what = if self.is_data_abort() {
-                "data abort"
-            } else {
-                "instruction abort"
-            };
+            let what = if self.is_data_abort() { "data abort" } else { "instruction abort" };
             write!(f, "{} ({}", what, fault_status_name(fsc))?;
             if let Some(level) = self.fault_level() {
                 write!(f, ", level {}", level)?;
@@ -382,24 +369,15 @@ impl core::fmt::Display for SyncFault {
                 Some(false) => write!(f, ", read")?,
                 None => {}
             }
-            write!(
-                f,
-                ") at FAR_EL1 = {:#x}, ELR_EL1 = {:#x}",
-                self.far, self.elr
-            )
+            write!(f, ") at FAR_EL1 = {:#x}, ELR_EL1 = {:#x}", self.far, self.elr)
         } else {
-            write!(
-                f,
-                "{} at ELR_EL1 = {:#x}",
-                exception_class_name(self.ec),
-                self.elr
-            )
+            write!(f, "{} at ELR_EL1 = {:#x}", exception_class_name(self.ec), self.elr)
         }
     }
 }
 
 /// Called from the vector stubs. `index` is the vector number (0..16).
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn kalium_exception(index: u64, frame: &mut ExceptionFrame) {
     let (source, kind) = decode_vector(index);
     match kind {
@@ -430,12 +408,7 @@ extern "C" fn kalium_exception(index: u64, frame: &mut ExceptionFrame) {
     }
 }
 
-fn report_fatal(
-    source: ExceptionSource,
-    kind: ExceptionKind,
-    frame: &ExceptionFrame,
-    fault: &SyncFault,
-) -> ! {
+fn report_fatal(source: ExceptionSource, kind: ExceptionKind, frame: &ExceptionFrame, fault: &SyncFault) -> ! {
     super::console::force_unlock();
     crate::println!("kalium: unhandled {:?} exception ({:?})", kind, source);
     crate::println!("kalium: kernel fault: {}", fault);
@@ -446,12 +419,7 @@ fn report_fatal(
         exception_class_name(fault.ec),
         fault.iss
     );
-    crate::println!(
-        "  ELR_EL1 = {:#018x}  FAR_EL1 = {:#018x}  SPSR_EL1 = {:#010x}",
-        frame.elr,
-        fault.far,
-        frame.spsr
-    );
+    crate::println!("  ELR_EL1 = {:#018x}  FAR_EL1 = {:#018x}  SPSR_EL1 = {:#010x}", frame.elr, fault.far, frame.spsr);
     let sp_el0 = read_sysreg!("sp_el0");
     let frame_addr = frame as *const ExceptionFrame as u64;
     crate::println!(
@@ -466,20 +434,11 @@ fn report_fatal(
     );
     for (i, pair) in frame.regs.chunks(2).enumerate() {
         match pair {
-            [a, b] => crate::println!(
-                "  x{:<2} = {:#018x}  x{:<2} = {:#018x}",
-                2 * i,
-                a,
-                2 * i + 1,
-                b
-            ),
+            [a, b] => crate::println!("  x{:<2} = {:#018x}  x{:<2} = {:#018x}", 2 * i, a, 2 * i + 1, b),
             [a] => crate::println!("  x{:<2} = {:#018x}", 2 * i, a),
             _ => {}
         }
     }
-    crate::println!(
-        "kalium: kernel fault, exiting with code {}",
-        KERNEL_FAULT_EXIT_CODE
-    );
+    crate::println!("kalium: kernel fault, exiting with code {}", KERNEL_FAULT_EXIT_CODE);
     exit::exit(KERNEL_FAULT_EXIT_CODE)
 }

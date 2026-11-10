@@ -1,0 +1,11 @@
+rules:
+  key-duplicates: {}
+  line-length:
+    allow-non-breakable-inline-mappings: true
+    allow-non-breakable-words: true
+    max: 128
+  octal-values:
+    forbid-implicit-octal: true
+  quoted-strings:
+    extra-allowed: ["{|}"]
+    required: only-when-needed

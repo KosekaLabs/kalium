@@ -169,11 +169,7 @@ pub fn clear_irq_handler(irq: u32) {
 pub fn acknowledge() -> Option<u32> {
     let iar = cpu_read(GICC_IAR);
     let id = iar & 0x3ff;
-    if id >= SPURIOUS {
-        None
-    } else {
-        Some(id)
-    }
+    if id >= SPURIOUS { None } else { Some(id) }
 }
 
 /// Signal end of interrupt for `irq`.

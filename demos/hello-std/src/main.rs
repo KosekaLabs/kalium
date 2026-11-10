@@ -15,12 +15,7 @@ fn main() {
     // A Vec and iterator adaptors.
     let v: Vec<u32> = (1..=10).collect();
     let squares: Vec<u32> = v.iter().take(5).map(|x| x * x).collect();
-    println!(
-        "hello_std: vec sum {}, len {}, squares {:?}",
-        v.iter().sum::<u32>(),
-        v.len(),
-        squares
-    );
+    println!("hello_std: vec sum {}, len {}, squares {:?}", v.iter().sum::<u32>(), v.len(), squares);
 
     // String formatting.
     let name = String::from("Kalium");
@@ -45,21 +40,12 @@ fn main() {
         let term = 4.0 / (2 * k + 1) as f64;
         pi += if k % 2 == 0 { term } else { -term };
     }
-    println!(
-        "hello_std: sqrt(2) = {:.6}, leibniz pi ~ {:.4}, 1e3 ln = {:.3}",
-        x.sqrt(),
-        pi,
-        1000f64.ln()
-    );
+    println!("hello_std: sqrt(2) = {:.6}, leibniz pi ~ {:.4}, 1e3 ln = {:.3}", x.sqrt(), pi, 1000f64.ln());
 
     // Arguments and environment: the kernel passes none.
     let args: Vec<String> = std::env::args().collect();
     let env_count = std::env::vars().count();
-    println!(
-        "hello_std: args {:?}, env vars {env_count}, HOME {:?}",
-        args,
-        std::env::var("HOME").ok()
-    );
+    println!("hello_std: args {:?}, env vars {env_count}, HOME {:?}", args, std::env::var("HOME").ok());
 
     // A sleep goes through `poll_oneoff` with a clock subscription.
     let before = Instant::now();
@@ -67,11 +53,7 @@ fn main() {
     let slept = before.elapsed();
     println!(
         "hello_std: slept 10 ms ({})",
-        if slept >= Duration::from_millis(10) {
-            "clock advanced"
-        } else {
-            "clock did not advance"
-        }
+        if slept >= Duration::from_millis(10) { "clock advanced" } else { "clock did not advance" }
     );
 
     println!("hello_std: exiting with 3");

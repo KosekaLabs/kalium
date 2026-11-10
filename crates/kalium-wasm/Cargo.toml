@@ -2,7 +2,9 @@
 name = "kalium-wasm"
 version.workspace = true
 edition.workspace = true
+authors.workspace = true
 license.workspace = true
+publish.workspace = true
 repository.workspace = true
 description = "WebAssembly decoder, validator and interpreter for the Kalium kernel (no_std + alloc)"
 

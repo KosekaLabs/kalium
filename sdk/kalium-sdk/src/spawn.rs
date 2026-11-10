@@ -6,7 +6,7 @@
 //! `Spawn` capability at instantiation; a service without one must not
 //! call these (its instantiation would fail with `ENOENT` to the spawner).
 
-use crate::{abi_len, raw, Cap, Errno};
+use crate::{Cap, Errno, abi_len, raw};
 
 /// The scheduling class of a new instance.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -249,14 +249,8 @@ mod tests {
 
     #[test]
     fn wrappers_report_stub_errors() {
-        assert_eq!(
-            spawn(Cap::slot(1), 1, &[Cap::slot(0)], Class::Fair, 0, 0).err(),
-            Some(Errno::Fault)
-        );
-        assert_eq!(
-            spawn(Cap::slot(1), u32::MAX, &[], Class::RealTime, 1, 1).err(),
-            Some(Errno::NoEnt)
-        );
+        assert_eq!(spawn(Cap::slot(1), 1, &[Cap::slot(0)], Class::Fair, 0, 0).err(), Some(Errno::Fault));
+        assert_eq!(spawn(Cap::slot(1), u32::MAX, &[], Class::RealTime, 1, 1).err(), Some(Errno::NoEnt));
         let i = Instance::from_cap(Cap::slot(5));
         assert_eq!(i.cap(), Cap(5));
         assert_eq!(i.wait(), Err(Errno::Fault));
@@ -265,21 +259,8 @@ mod tests {
         let _ = module_count();
         let s = Snapshot::from_cap(Cap::slot(6));
         assert_eq!(s.cap(), Cap(6));
-        assert_eq!(
-            s.spawn(
-                Cap::slot(1),
-                &[Cap::slot(0)],
-                Class::Fair,
-                0,
-                0,
-                Entry::Resume
-            ),
-            Err(Errno::Fault)
-        );
-        assert_eq!(
-            spawn_snapshot(Cap::slot(1), s, &[], Class::RealTime, 1, 1, Entry::Start),
-            Err(Errno::Fault)
-        );
+        assert_eq!(s.spawn(Cap::slot(1), &[Cap::slot(0)], Class::Fair, 0, 0, Entry::Resume), Err(Errno::Fault));
+        assert_eq!(spawn_snapshot(Cap::slot(1), s, &[], Class::RealTime, 1, 1, Entry::Start), Err(Errno::Fault));
     }
 
     #[test]

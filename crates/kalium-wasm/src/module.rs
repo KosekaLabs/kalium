@@ -138,11 +138,7 @@ impl ProgramCache {
 
 impl fmt::Debug for ProgramCache {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(if self.0.is_some() {
-            "ProgramCache(compiled)"
-        } else {
-            "ProgramCache(empty)"
-        })
+        f.write_str(if self.0.is_some() { "ProgramCache(compiled)" } else { "ProgramCache(empty)" })
     }
 }
 
@@ -210,11 +206,7 @@ impl Module {
         let num_imports = self.num_imported_funcs();
         let arity: Vec<(u32, u32)> = imported
             .chain(self.funcs.iter().copied())
-            .map(|ty| {
-                self.get_type(ty).map_or((0, 0), |ft| {
-                    (ft.params.len() as u32, ft.results.len() as u32)
-                })
-            })
+            .map(|ty| self.get_type(ty).map_or((0, 0), |ft| (ft.params.len() as u32, ft.results.len() as u32)))
             .collect();
         Arc::new(crate::code::compile_module(self, &arity, num_imports))
     }
@@ -261,34 +253,22 @@ impl Module {
     /// Number of imported functions (they occupy the first function
     /// indices).
     pub fn num_imported_funcs(&self) -> usize {
-        self.imports
-            .iter()
-            .filter(|i| matches!(i.desc, ImportDesc::Func(_)))
-            .count()
+        self.imports.iter().filter(|i| matches!(i.desc, ImportDesc::Func(_))).count()
     }
 
     /// Number of imported tables.
     pub fn num_imported_tables(&self) -> usize {
-        self.imports
-            .iter()
-            .filter(|i| matches!(i.desc, ImportDesc::Table(_)))
-            .count()
+        self.imports.iter().filter(|i| matches!(i.desc, ImportDesc::Table(_))).count()
     }
 
     /// Number of imported memories.
     pub fn num_imported_memories(&self) -> usize {
-        self.imports
-            .iter()
-            .filter(|i| matches!(i.desc, ImportDesc::Memory(_)))
-            .count()
+        self.imports.iter().filter(|i| matches!(i.desc, ImportDesc::Memory(_))).count()
     }
 
     /// Number of imported globals.
     pub fn num_imported_globals(&self) -> usize {
-        self.imports
-            .iter()
-            .filter(|i| matches!(i.desc, ImportDesc::Global(_)))
-            .count()
+        self.imports.iter().filter(|i| matches!(i.desc, ImportDesc::Global(_))).count()
     }
 
     /// Total size of the function index space (imports + definitions).

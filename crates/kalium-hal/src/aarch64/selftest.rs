@@ -41,7 +41,7 @@ use super::exceptions::{ExceptionFrame, SyncFault};
 use super::{boot, mmu, timer};
 
 /// Register save area for `__kalium_recover_call`: x19–x30 and sp.
-#[no_mangle]
+#[unsafe(no_mangle)]
 static mut KALIUM_RECOVERY_BUF: [u64; 16] = [0; 16];
 
 global_asm!(
@@ -87,7 +87,7 @@ __kalium_recover_land:
 "#
 );
 
-extern "C" {
+unsafe extern "C" {
     fn __kalium_recover_call(f: extern "C" fn()) -> u64;
     static __kalium_recover_land: u8;
 }
@@ -235,31 +235,20 @@ impl Report {
 
 /// Expect `case` to raise a data abort permission fault on a write to an
 /// address inside `range`.
-fn expect_write_fault(
-    r: &mut Report,
-    name: &str,
-    case: extern "C" fn(),
-    range: core::ops::Range<usize>,
-) {
+fn expect_write_fault(r: &mut Report, name: &str, case: extern "C" fn(), range: core::ops::Range<usize>) {
     match run_case(case) {
         None => r.check(name, false, format_args!("no fault")),
         Some(c) => {
             let f = c.fault;
-            let ok = f.is_data_abort()
-                && f.is_permission_fault()
-                && f.is_write() == Some(true)
-                && range.contains(&(f.far as usize));
+            let ok =
+                f.is_data_abort() && f.is_permission_fault() && f.is_write() == Some(true) && range.contains(&(f.far as usize));
             r.check(
                 name,
                 ok,
                 format_args!(
                     "{}{}",
                     f,
-                    if range.contains(&(f.far as usize)) {
-                        ""
-                    } else {
-                        ", FAR outside the expected range"
-                    }
+                    if range.contains(&(f.far as usize)) { "" } else { ", FAR outside the expected range" }
                 ),
             );
         }
@@ -268,20 +257,12 @@ fn expect_write_fault(
 
 /// Expect `case` to raise an instruction abort permission fault at an
 /// address inside `range`.
-fn expect_exec_fault(
-    r: &mut Report,
-    name: &str,
-    case: extern "C" fn(),
-    range: core::ops::Range<usize>,
-) {
+fn expect_exec_fault(r: &mut Report, name: &str, case: extern "C" fn(), range: core::ops::Range<usize>) {
     match run_case(case) {
         None => r.check(name, false, format_args!("no fault")),
         Some(c) => {
             let f = c.fault;
-            let ok = f.is_instruction_abort()
-                && f.is_permission_fault()
-                && range.contains(&(f.far as usize))
-                && f.elr == f.far;
+            let ok = f.is_instruction_abort() && f.is_permission_fault() && range.contains(&(f.far as usize)) && f.elr == f.far;
             r.check(name, ok, format_args!("{}", f));
         }
     }
@@ -297,14 +278,7 @@ fn attr_name(attr: u8) -> &'static str {
 
 /// Check the attributes of one address with `AT`: readable, writable and
 /// of the given memory type.
-fn expect_mapping(
-    r: &mut Report,
-    name: &str,
-    va: usize,
-    readable: bool,
-    writable: bool,
-    attr: Option<u64>,
-) {
+fn expect_mapping(r: &mut Report, name: &str, va: usize, readable: bool, writable: bool, attr: Option<u64>) {
     let read = mmu::translate(va, false);
     let write = mmu::translate(va, true);
     let read_ok = read.is_ok() == readable;
@@ -355,10 +329,7 @@ pub fn exception_round_trip_centiticks() -> u64 {
 /// Must run with the MMU on and the heap initialized, from thread context
 /// (`SP_EL0`), with IRQs in any state.
 pub fn run() -> bool {
-    let mut r = Report {
-        passed: 0,
-        failed: 0,
-    };
+    let mut r = Report { passed: 0, failed: 0 };
     let text = boot::text_range();
     let rodata = boot::rodata_range();
     let data = boot::data_range();
@@ -372,46 +343,14 @@ pub fn run() -> bool {
     const UART: usize = 0x0900_0000;
 
     crate::println!("kalium: selftest: memory map");
-    crate::println!(
-        "kalium: selftest:   dtb area  {:#x}..{:#x}  RO  XN",
-        dtb_area.start,
-        dtb_area.end
-    );
-    crate::println!(
-        "kalium: selftest:   .text     {:#x}..{:#x}  RO  X",
-        text.start,
-        text.end
-    );
-    crate::println!(
-        "kalium: selftest:   .rodata   {:#x}..{:#x}  RO  XN",
-        rodata.start,
-        rodata.end
-    );
-    crate::println!(
-        "kalium: selftest:   .data/bss {:#x}..{:#x}  RW  XN",
-        data.start,
-        data.end
-    );
-    crate::println!(
-        "kalium: selftest:   guard     {:#x}..{:#x}  unmapped",
-        guard.start,
-        guard.end
-    );
-    crate::println!(
-        "kalium: selftest:   stack     {:#x}..{:#x}  RW  XN  (SP_EL0)",
-        stack.start,
-        stack.end
-    );
-    crate::println!(
-        "kalium: selftest:   guard     {:#x}..{:#x}  unmapped",
-        exc_guard.start,
-        exc_guard.end
-    );
-    crate::println!(
-        "kalium: selftest:   exc stack {:#x}..{:#x}  RW  XN  (SP_EL1)",
-        exc_stack.start,
-        exc_stack.end
-    );
+    crate::println!("kalium: selftest:   dtb area  {:#x}..{:#x}  RO  XN", dtb_area.start, dtb_area.end);
+    crate::println!("kalium: selftest:   .text     {:#x}..{:#x}  RO  X", text.start, text.end);
+    crate::println!("kalium: selftest:   .rodata   {:#x}..{:#x}  RO  XN", rodata.start, rodata.end);
+    crate::println!("kalium: selftest:   .data/bss {:#x}..{:#x}  RW  XN", data.start, data.end);
+    crate::println!("kalium: selftest:   guard     {:#x}..{:#x}  unmapped", guard.start, guard.end);
+    crate::println!("kalium: selftest:   stack     {:#x}..{:#x}  RW  XN  (SP_EL0)", stack.start, stack.end);
+    crate::println!("kalium: selftest:   guard     {:#x}..{:#x}  unmapped", exc_guard.start, exc_guard.end);
+    crate::println!("kalium: selftest:   exc stack {:#x}..{:#x}  RW  XN  (SP_EL1)", exc_stack.start, exc_stack.end);
     crate::println!(
         "kalium: selftest:   heap      {:#x}..{:#x}  RW  XN  (RAM ends at {:#x}, mapped to {:#x})",
         heap.start,
@@ -428,22 +367,8 @@ pub fn run() -> bool {
     expect_mapping(&mut r, "at: .data", data.start, true, true, normal);
     expect_mapping(&mut r, "at: stack", stack.end - 16, true, true, normal);
     expect_mapping(&mut r, "at: stack guard", guard.start, false, false, None);
-    expect_mapping(
-        &mut r,
-        "at: exc stack",
-        exc_stack.end - 16,
-        true,
-        true,
-        normal,
-    );
-    expect_mapping(
-        &mut r,
-        "at: exc stack guard",
-        exc_guard.end - 16,
-        false,
-        false,
-        None,
-    );
+    expect_mapping(&mut r, "at: exc stack", exc_stack.end - 16, true, true, normal);
+    expect_mapping(&mut r, "at: exc stack guard", exc_guard.end - 16, false, false, None);
     expect_mapping(&mut r, "at: heap start", heap.start, true, true, normal);
     expect_mapping(&mut r, "at: heap end", heap.end - 16, true, true, normal);
     // The mapping must end where RAM ends, whatever the alignment of the
@@ -457,22 +382,11 @@ pub fn run() -> bool {
             ram.end,
             mmu::ram_mapped_end(),
             heap.end,
-            if ram.end.is_multiple_of(2 << 20) {
-                ""
-            } else {
-                ", last block partial"
-            }
+            if ram.end.is_multiple_of(2 << 20) { "" } else { ", last block partial" }
         ),
     );
     expect_mapping(&mut r, "at: past RAM", ram.end, false, false, None);
-    expect_mapping(
-        &mut r,
-        "at: uart",
-        UART,
-        true,
-        true,
-        Some(mmu::MAIR_DEVICE_NGNRNE),
-    );
+    expect_mapping(&mut r, "at: uart", UART, true, true, Some(mmu::MAIR_DEVICE_NGNRNE));
 
     // 2. Faults taken for real.
     expect_write_fault(&mut r, "write .rodata", write_rodata, rodata.clone());
@@ -502,10 +416,7 @@ pub fn run() -> bool {
             r.check(
                 "stack overflow",
                 ok,
-                format_args!(
-                    "{}, SP_EL0 = {:#x} in the guard, reported from the exception stack",
-                    f, c.sp
-                ),
+                format_args!("{}, SP_EL0 = {:#x} in the guard, reported from the exception stack", f, c.sp),
             );
         }
     }
@@ -515,11 +426,7 @@ pub fn run() -> bool {
     let sp: u64;
     // SAFETY: reading SP.
     unsafe { core::arch::asm!("mov {0}, sp", out(reg) sp, options(nomem, nostack)) };
-    r.check(
-        "stack restored",
-        stack.contains(&(sp as usize)),
-        format_args!("SP = {:#x}", sp),
-    );
+    r.check("stack restored", stack.contains(&(sp as usize)), format_args!("SP = {:#x}", sp));
 
     // 4. Exception cost.
     let centiticks = exception_round_trip_centiticks();
@@ -538,11 +445,6 @@ pub fn run() -> bool {
     );
 
     let ok = r.failed == 0;
-    crate::println!(
-        "kalium: selftest {}: {} passed, {} failed",
-        if ok { "PASS" } else { "FAIL" },
-        r.passed,
-        r.failed
-    );
+    crate::println!("kalium: selftest {}: {} passed, {} failed", if ok { "PASS" } else { "FAIL" }, r.passed, r.failed);
     ok
 }

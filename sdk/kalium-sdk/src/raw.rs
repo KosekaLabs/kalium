@@ -58,7 +58,7 @@ macro_rules! namespace {
     ) => {
         #[cfg(target_arch = "wasm32")]
         #[link(wasm_import_module = $module)]
-        extern "C" {
+        unsafe extern "C" {
             $( $(#[$meta])* pub fn $name ( $( $arg : $ty ),* ) $( -> $ret )? ; )*
         }
 

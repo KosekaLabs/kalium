@@ -117,10 +117,7 @@ impl Class {
     pub const fn is_valid(&self) -> bool {
         match *self {
             Class::Fair { .. } => true,
-            Class::RealTime {
-                period_ns,
-                budget_ns,
-            } => period_ns > 0 && budget_ns > 0 && budget_ns <= period_ns,
+            Class::RealTime { period_ns, budget_ns } => period_ns > 0 && budget_ns > 0 && budget_ns <= period_ns,
         }
     }
 
@@ -222,10 +219,7 @@ impl FuelRate {
     /// `fuel` units per `ns` nanoseconds. A zero in either place is treated
     /// as one so the rate is always usable.
     pub const fn new(fuel: u64, ns: u64) -> FuelRate {
-        FuelRate {
-            fuel: if fuel == 0 { 1 } else { fuel },
-            ns: if ns == 0 { 1 } else { ns },
-        }
+        FuelRate { fuel: if fuel == 0 { 1 } else { fuel }, ns: if ns == 0 { 1 } else { ns } }
     }
 
     /// Fuel units measured in the calibration.
@@ -255,11 +249,7 @@ impl FuelRate {
     pub const fn ns_for_fuel(&self, fuel: u64) -> u64 {
         let num = fuel as u128 * self.ns as u128;
         let ns = num.div_ceil(self.fuel as u128);
-        if ns > u64::MAX as u128 {
-            u64::MAX
-        } else {
-            ns as u64
-        }
+        if ns > u64::MAX as u128 { u64::MAX } else { ns as u64 }
     }
 }
 
@@ -337,9 +327,7 @@ impl RtState {
         self.stats.periods += skipped;
         self.stats.missed += skipped;
         self.period_index = k;
-        self.release_ns = self
-            .phase_ns
-            .saturating_add(k.saturating_mul(self.period_ns));
+        self.release_ns = self.phase_ns.saturating_add(k.saturating_mul(self.period_ns));
         self.deadline_ns = self.release_ns.saturating_add(self.period_ns);
         self.budget_left_ns = self.budget_ns;
         self.demoted = false;
@@ -439,28 +427,13 @@ impl Scheduler {
         }
         let (class, rt) = match class {
             Class::Fair { weight } => (Class::Fair { weight }, None),
-            Class::RealTime {
-                period_ns,
-                budget_ns,
-            } => {
+            Class::RealTime { period_ns, budget_ns } => {
                 let period_ns = period_ns.max(1);
                 let budget_ns = budget_ns.clamp(1, period_ns);
-                (
-                    Class::RealTime {
-                        period_ns,
-                        budget_ns,
-                    },
-                    Some(RtState::new(period_ns, budget_ns, now_ns)),
-                )
+                (Class::RealTime { period_ns, budget_ns }, Some(RtState::new(period_ns, budget_ns, now_ns)))
             }
         };
-        let mut thread = Thread {
-            class,
-            state: State::Ready,
-            slice_left_ns: 0,
-            in_fair_queue: false,
-            rt,
-        };
+        let mut thread = Thread { class, state: State::Ready, slice_left_ns: 0, in_fair_queue: false, rt };
         thread.slice_left_ns = thread.full_slice_ns();
         self.threads.insert(id, thread);
         self.enqueue_if_fair(id);
@@ -530,11 +503,7 @@ impl Scheduler {
 
     /// The budget an RT thread still has in its current period.
     pub fn rt_budget_left_ns(&self, id: ThreadId) -> Option<u64> {
-        self.threads
-            .get(&id)?
-            .rt
-            .as_ref()
-            .map(|rt| rt.budget_left_ns)
+        self.threads.get(&id)?.rt.as_ref().map(|rt| rt.budget_left_ns)
     }
 
     /// `true` if an RT thread is currently demoted to the fair queue.
@@ -552,17 +521,17 @@ impl Scheduler {
             if thread.state == State::Exited {
                 continue;
             }
-            if let Some(rt) = thread.rt.as_mut() {
-                if now_ns >= rt.deadline_ns {
-                    rt.release(now_ns);
-                }
+            if let Some(rt) = thread.rt.as_mut()
+                && now_ns >= rt.deadline_ns
+            {
+                rt.release(now_ns);
             }
-            if let State::Sleeping { until_ns } = thread.state {
-                if now_ns >= until_ns {
-                    thread.state = State::Ready;
-                    thread.slice_left_ns = thread.full_slice_ns();
-                    to_enqueue.push(id);
-                }
+            if let State::Sleeping { until_ns } = thread.state
+                && now_ns >= until_ns
+            {
+                thread.state = State::Ready;
+                thread.slice_left_ns = thread.full_slice_ns();
+                to_enqueue.push(id);
             }
         }
         for id in to_enqueue {
@@ -641,13 +610,12 @@ impl Scheduler {
     /// treated as preempted with no time used.
     pub fn pick_next(&mut self, now_ns: u64) -> Option<(ThreadId, u64)> {
         self.advance(now_ns);
-        if let Some(current) = self.current.take() {
-            if let Some(t) = self.threads.get_mut(&current.id) {
-                if t.state == State::Running {
-                    t.state = State::Ready;
-                    self.requeue_front(current.id);
-                }
-            }
+        if let Some(current) = self.current.take()
+            && let Some(t) = self.threads.get_mut(&current.id)
+            && t.state == State::Running
+        {
+            t.state = State::Ready;
+            self.requeue_front(current.id);
         }
 
         let (id, slice) = match self.pick_rt(now_ns) {
@@ -658,10 +626,7 @@ impl Scheduler {
         if let Some(t) = self.threads.get_mut(&id) {
             t.state = State::Running;
         }
-        self.current = Some(Current {
-            id,
-            slice_end_ns: now_ns.saturating_add(slice),
-        });
+        self.current = Some(Current { id, slice_end_ns: now_ns.saturating_add(slice) });
         Some((id, slice))
     }
 
@@ -672,12 +637,12 @@ impl Scheduler {
             if t.state != State::Ready {
                 continue;
             }
-            if let Some(rt) = &t.rt {
-                if rt.has_budget() {
-                    let key = (rt.deadline_ns, id);
-                    if best.is_none_or(|b| key < b) {
-                        best = Some(key);
-                    }
+            if let Some(rt) = &t.rt
+                && rt.has_budget()
+            {
+                let key = (rt.deadline_ns, id);
+                if best.is_none_or(|b| key < b) {
+                    best = Some(key);
                 }
             }
         }
@@ -728,22 +693,20 @@ impl Scheduler {
 
     /// The earliest next release among all RT threads.
     fn next_rt_release_ns(&self) -> Option<u64> {
-        self.threads
-            .values()
-            .filter(|t| t.state != State::Exited)
-            .filter_map(|t| t.rt.as_ref().map(|rt| rt.deadline_ns))
-            .min()
+        self.threads.values().filter(|t| t.state != State::Exited).filter_map(|t| t.rt.as_ref().map(|rt| rt.deadline_ns)).min()
     }
 
     // -- queue maintenance ----------------------------------------------------
 
     /// Appends a ready fair or demoted thread to the fair queue.
     fn enqueue_if_fair(&mut self, id: ThreadId) {
-        if let Some(t) = self.threads.get_mut(&id) {
-            if t.state == State::Ready && t.is_fair_candidate() && !t.in_fair_queue {
-                t.in_fair_queue = true;
-                self.fair_queue.push_back(id);
-            }
+        if let Some(t) = self.threads.get_mut(&id)
+            && t.state == State::Ready
+            && t.is_fair_candidate()
+            && !t.in_fair_queue
+        {
+            t.in_fair_queue = true;
+            self.fair_queue.push_back(id);
         }
     }
 
@@ -815,14 +778,9 @@ impl Scheduler {
         let Some(t) = self.threads.get_mut(&id) else {
             return;
         };
-        let finished = matches!(
-            outcome,
-            RunOutcome::Yielded | RunOutcome::Blocked | RunOutcome::Slept
-        );
-        if finished {
-            if let Some(rt) = t.rt.as_mut() {
-                rt.finished = true;
-            }
+        let finished = matches!(outcome, RunOutcome::Yielded | RunOutcome::Blocked | RunOutcome::Slept);
+        if finished && let Some(rt) = t.rt.as_mut() {
+            rt.finished = true;
         }
         match outcome {
             RunOutcome::Preempted => {
@@ -860,20 +818,20 @@ impl Scheduler {
 
     /// Marks a thread as blocked. It is picked again only after `wake`.
     pub fn block(&mut self, id: ThreadId) {
-        if let Some(t) = self.threads.get_mut(&id) {
-            if t.state != State::Exited {
-                t.state = State::Blocked;
-            }
+        if let Some(t) = self.threads.get_mut(&id)
+            && t.state != State::Exited
+        {
+            t.state = State::Blocked;
         }
     }
 
     /// Puts a thread to sleep until `until_ns`. It becomes ready on the first
     /// `tick` (or other time-carrying call) at or after that, or on `wake`.
     pub fn sleep(&mut self, id: ThreadId, until_ns: u64) {
-        if let Some(t) = self.threads.get_mut(&id) {
-            if t.state != State::Exited {
-                t.state = State::Sleeping { until_ns };
-            }
+        if let Some(t) = self.threads.get_mut(&id)
+            && t.state != State::Exited
+        {
+            t.state = State::Sleeping { until_ns };
         }
     }
 
@@ -881,12 +839,12 @@ impl Scheduler {
     /// running or exited is left alone.
     pub fn wake(&mut self, id: ThreadId, now_ns: u64) {
         self.advance(now_ns);
-        if let Some(t) = self.threads.get_mut(&id) {
-            if matches!(t.state, State::Blocked | State::Sleeping { .. }) {
-                t.state = State::Ready;
-                t.slice_left_ns = t.full_slice_ns();
-                self.enqueue_if_fair(id);
-            }
+        if let Some(t) = self.threads.get_mut(&id)
+            && matches!(t.state, State::Blocked | State::Sleeping { .. })
+        {
+            t.state = State::Ready;
+            t.slice_left_ns = t.full_slice_ns();
+            self.enqueue_if_fair(id);
         }
     }
 }
@@ -911,10 +869,7 @@ mod tests {
     }
 
     fn rt(period_ns: u64, budget_ns: u64) -> Class {
-        Class::RealTime {
-            period_ns,
-            budget_ns,
-        }
+        Class::RealTime { period_ns, budget_ns }
     }
 
     /// What a simulated thread does when given the CPU.
@@ -946,12 +901,7 @@ mod tests {
 
     impl Sim {
         fn new() -> Sim {
-            Sim {
-                sched: Scheduler::new(),
-                now: 0,
-                threads: Map::new(),
-                picks: Vec::new(),
-            }
+            Sim { sched: Scheduler::new(), now: 0, threads: Map::new(), picks: Vec::new() }
         }
 
         fn add(&mut self, id: u32, class: Class, behavior: Behavior) -> ThreadId {
@@ -961,14 +911,7 @@ mod tests {
                 Behavior::Busy => u64::MAX,
                 Behavior::Periodic { work_ns } => work_ns,
             };
-            self.threads.insert(
-                id,
-                SimThread {
-                    behavior,
-                    work_left,
-                    ran_total: 0,
-                },
-            );
+            self.threads.insert(id, SimThread { behavior, work_left, ran_total: 0 });
             id
         }
 
@@ -1032,11 +975,7 @@ mod tests {
     #[test]
     fn rt_thread_meets_every_period_under_fair_load() {
         let mut sim = Sim::new();
-        let rt_id = sim.add(
-            1,
-            rt(2 * MS, 500 * US),
-            Behavior::Periodic { work_ns: 300 * US },
-        );
+        let rt_id = sim.add(1, rt(2 * MS, 500 * US), Behavior::Periodic { work_ns: 300 * US });
         let f1 = sim.add(2, fair(1), Behavior::Busy);
         let f2 = sim.add(3, fair(1), Behavior::Busy);
         sim.run_until(1_000 * MS);
@@ -1102,12 +1041,8 @@ mod tests {
         sim.add(3, fair(1), Behavior::Busy);
         sim.run_until(30 * MS);
 
-        let rt_picks: Vec<(u64, ThreadId)> = sim
-            .picks
-            .iter()
-            .filter(|(_, id, _)| *id == a || *id == b)
-            .map(|&(at, id, _)| (at, id))
-            .collect();
+        let rt_picks: Vec<(u64, ThreadId)> =
+            sim.picks.iter().filter(|(_, id, _)| *id == a || *id == b).map(|&(at, id, _)| (at, id)).collect();
         // Releases: b at 0,4,8,12,16,20,24,28; a at 0,7,14,21,28.
         // t=0: b (dl 4) before a (dl 7). t=28: a (dl 35) vs b (dl 32): b.
         let expected = vec![
@@ -1224,15 +1159,7 @@ mod tests {
         assert_eq!(s.rt_budget_left_ns(ThreadId(1)), Some(500 * US));
         assert_eq!(s.pick_next(2 * MS), Some((ThreadId(1), 500 * US)));
         let st = s.rt_stats(ThreadId(1)).unwrap();
-        assert_eq!(
-            st,
-            RtStats {
-                periods: 1,
-                met: 0,
-                missed: 0,
-                budget_exhausted: 1
-            }
-        );
+        assert_eq!(st, RtStats { periods: 1, met: 0, missed: 0, budget_exhausted: 1 });
     }
 
     #[test]
@@ -1247,10 +1174,7 @@ mod tests {
         s.account(ThreadId(1), 100 * US, 600 * US, RunOutcome::Blocked);
         s.tick(2 * MS);
         let st = s.rt_stats(ThreadId(1)).unwrap();
-        assert_eq!(
-            (st.periods, st.met, st.missed, st.budget_exhausted),
-            (1, 1, 0, 0)
-        );
+        assert_eq!((st.periods, st.met, st.missed, st.budget_exhausted), (1, 1, 0, 0));
     }
 
     // -- (4) fair weights ----------------------------------------------------
@@ -1268,21 +1192,14 @@ mod tests {
             let expected = total * weight / 6;
             let got = sim.ran(id);
             let diff = got.abs_diff(expected);
-            assert!(
-                diff * 10 <= expected,
-                "{id:?}: got {got}, expected {expected} (10%)"
-            );
+            assert!(diff * 10 <= expected, "{id:?}: got {got}, expected {expected} (10%)");
         }
     }
 
     #[test]
     fn fair_weights_proportional_under_rt_load() {
         let mut sim = Sim::new();
-        sim.add(
-            9,
-            rt(2 * MS, 500 * US),
-            Behavior::Periodic { work_ns: 400 * US },
-        );
+        sim.add(9, rt(2 * MS, 500 * US), Behavior::Periodic { work_ns: 400 * US });
         let a = sim.add(1, fair(1), Behavior::Busy);
         let b = sim.add(2, fair(3), Behavior::Busy);
         sim.run_until(1_000 * MS);
@@ -1290,16 +1207,8 @@ mod tests {
         assert_eq!(total, 800 * MS);
         let ea = total / 4;
         let eb = total * 3 / 4;
-        assert!(
-            sim.ran(a).abs_diff(ea) * 10 <= ea,
-            "a {} vs {ea}",
-            sim.ran(a)
-        );
-        assert!(
-            sim.ran(b).abs_diff(eb) * 10 <= eb,
-            "b {} vs {eb}",
-            sim.ran(b)
-        );
+        assert!(sim.ran(a).abs_diff(ea) * 10 <= ea, "a {} vs {ea}", sim.ran(a));
+        assert!(sim.ran(b).abs_diff(eb) * 10 <= eb, "b {} vs {eb}", sim.ran(b));
     }
 
     #[test]
@@ -1349,18 +1258,12 @@ mod tests {
         assert_eq!(s.pick_next(0), Some((ThreadId(1), MS)));
         s.sleep(ThreadId(1), 5 * MS);
         s.account(ThreadId(1), 100 * US, 100 * US, RunOutcome::Slept);
-        assert_eq!(
-            s.state(ThreadId(1)),
-            Some(State::Sleeping { until_ns: 5 * MS })
-        );
+        assert_eq!(s.state(ThreadId(1)), Some(State::Sleeping { until_ns: 5 * MS }));
         assert_eq!(s.next_deadline_ns(), Some(5 * MS));
         // Not due yet.
         s.tick(4_999 * US);
         assert_eq!(s.pick_next(4_999 * US), None);
-        assert_eq!(
-            s.state(ThreadId(1)),
-            Some(State::Sleeping { until_ns: 5 * MS })
-        );
+        assert_eq!(s.state(ThreadId(1)), Some(State::Sleeping { until_ns: 5 * MS }));
         // Due: woken by the tick and picked.
         s.tick(5 * MS);
         assert_eq!(s.state(ThreadId(1)), Some(State::Ready));
@@ -1559,10 +1462,7 @@ mod tests {
         s.sleep(ThreadId(1), 4 * MS);
         s.account(ThreadId(1), 400 * US, 2_100 * US, RunOutcome::Slept);
         let st = s.rt_stats(ThreadId(1)).unwrap();
-        assert_eq!(
-            (st.periods, st.met, st.missed, st.budget_exhausted),
-            (1, 0, 1, 0)
-        );
+        assert_eq!((st.periods, st.met, st.missed, st.budget_exhausted), (1, 0, 1, 0));
         assert_eq!(s.rt_budget_left_ns(ThreadId(1)), Some(400 * US));
         assert_eq!(s.rt_deadline_ns(ThreadId(1)), Some(4 * MS));
     }
@@ -1679,10 +1579,7 @@ mod tests {
         assert!(s.remove(ThreadId(1)));
         assert!(!s.fair_queue.contains(&ThreadId(1)));
         s.add(ThreadId(1), fair(1), MS);
-        assert_eq!(
-            s.fair_queue.iter().filter(|&&t| t == ThreadId(1)).count(),
-            1
-        );
+        assert_eq!(s.fair_queue.iter().filter(|&&t| t == ThreadId(1)).count(), 1);
         // Round robin: 2, the new 1, 2 again, 1 again.
         for (i, expect) in [2u32, 1, 2, 1].into_iter().enumerate() {
             let now = (i as u64 + 1) * MS;
@@ -1703,21 +1600,9 @@ mod tests {
 
         let mut s = Scheduler::new();
         s.add(ThreadId(1), rt(0, 0), 0);
-        assert_eq!(
-            s.class(ThreadId(1)),
-            Some(Class::RealTime {
-                period_ns: 1,
-                budget_ns: 1
-            })
-        );
+        assert_eq!(s.class(ThreadId(1)), Some(Class::RealTime { period_ns: 1, budget_ns: 1 }));
         s.add(ThreadId(1), rt(10, 50), 0);
-        assert_eq!(
-            s.class(ThreadId(1)),
-            Some(Class::RealTime {
-                period_ns: 10,
-                budget_ns: 10
-            })
-        );
+        assert_eq!(s.class(ThreadId(1)), Some(Class::RealTime { period_ns: 10, budget_ns: 10 }));
         assert_eq!(s.len(), 1);
         s.add(ThreadId(1), fair(2), 0);
         assert_eq!(s.class(ThreadId(1)), Some(fair(2)));
@@ -1753,15 +1638,7 @@ mod tests {
         s.account(ThreadId(1), 50 * US, 6_050 * US, RunOutcome::Blocked);
         s.tick(8 * MS);
         let st = s.rt_stats(ThreadId(1)).unwrap();
-        assert_eq!(
-            st,
-            RtStats {
-                periods: 4,
-                met: 2,
-                missed: 1,
-                budget_exhausted: 1
-            }
-        );
+        assert_eq!(st, RtStats { periods: 4, met: 2, missed: 1, budget_exhausted: 1 });
         assert_eq!(st.met_ppm(), 500_000);
         assert_eq!(RtStats::default().met_ppm(), 1_000_000);
     }

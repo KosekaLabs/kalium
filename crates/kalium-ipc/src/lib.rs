@@ -118,10 +118,7 @@ pub struct Message {
 impl Message {
     /// A message with a payload and no capabilities.
     pub fn new(bytes: Vec<u8>) -> Message {
-        Message {
-            bytes,
-            caps: Vec::new(),
-        }
+        Message { bytes, caps: Vec::new() }
     }
 
     /// A message with a payload and capabilities.
@@ -150,9 +147,7 @@ impl Message {
     /// messages carrying four capabilities each parks megabytes of
     /// uncharged heap kernel-wide. Saturating.
     pub const fn cost_of(len: usize, ncaps: usize) -> usize {
-        core::mem::size_of::<Message>()
-            .saturating_add(len)
-            .saturating_add(ncaps.saturating_mul(CAP_IN_FLIGHT_BYTES))
+        core::mem::size_of::<Message>().saturating_add(len).saturating_add(ncaps.saturating_mul(CAP_IN_FLIGHT_BYTES))
     }
 
     /// [`cost_of`](Message::cost_of) for this message's payload length and
@@ -165,8 +160,7 @@ impl Message {
 /// Heap one capability in flight takes beyond the message that carries it:
 /// its [`Capability`] in the message's list and the lineage node it keeps
 /// alive ([`kalium_cap::Lineage::NODE_BYTES`]).
-pub const CAP_IN_FLIGHT_BYTES: usize =
-    core::mem::size_of::<Capability>() + kalium_cap::Lineage::NODE_BYTES;
+pub const CAP_IN_FLIGHT_BYTES: usize = core::mem::size_of::<Capability>() + kalium_cap::Lineage::NODE_BYTES;
 
 // ---------------------------------------------------------------------------
 // Channel
@@ -200,25 +194,14 @@ impl Channel {
     /// Creates an empty channel holding at most `depth` messages of at most
     /// `max_len` bytes and `max_caps` capabilities each, with no endpoints.
     pub fn new(depth: usize, max_len: usize, max_caps: usize) -> Channel {
-        Channel {
-            queue: VecDeque::new(),
-            depth,
-            max_len,
-            max_caps,
-            senders: 0,
-            receivers: 0,
-        }
+        Channel { queue: VecDeque::new(), depth, max_len, max_caps, senders: 0, receivers: 0 }
     }
 
     /// Creates a channel with the ABI's M1 limits: depth
     /// [`limits::CHANNEL_QUEUE_DEPTH`], payload [`limits::MAX_MESSAGE_LEN`],
     /// capabilities [`limits::MAX_MESSAGE_CAPS`].
     pub fn with_abi_limits() -> Channel {
-        Channel::new(
-            limits::CHANNEL_QUEUE_DEPTH,
-            limits::MAX_MESSAGE_LEN,
-            limits::MAX_MESSAGE_CAPS,
-        )
+        Channel::new(limits::CHANNEL_QUEUE_DEPTH, limits::MAX_MESSAGE_LEN, limits::MAX_MESSAGE_CAPS)
     }
 
     /// Checks whether a message of `len` bytes carrying `ncaps` capabilities
@@ -399,9 +382,7 @@ pub struct WaitQueue<T = u32> {
 
 impl<T> Default for WaitQueue<T> {
     fn default() -> Self {
-        WaitQueue {
-            waiters: VecDeque::new(),
-        }
+        WaitQueue { waiters: VecDeque::new() }
     }
 }
 
@@ -478,12 +459,7 @@ mod tests {
     use kalium_cap::{NodeId, ObjectId, ObjectKind, Rights};
 
     fn cap(id: u64) -> Capability {
-        Capability::new(
-            ObjectId(id),
-            ObjectKind::MemObj,
-            Rights::READ | Rights::TRANSFER,
-            NodeId(0),
-        )
+        Capability::new(ObjectId(id), ObjectKind::MemObj, Rights::READ | Rights::TRANSFER, NodeId(0))
     }
 
     /// A channel with one sender and one receiver, as `channel_create`
@@ -509,10 +485,7 @@ mod tests {
         assert_eq!(IpcError::NoMem.errno_name(), "ENOMEM");
         assert_eq!(IpcError::Full.errno_name(), "EAGAIN");
         assert_eq!(IpcError::Closed.errno_name(), "ECLOSED");
-        assert_eq!(
-            std::format!("{}", IpcError::TooBig),
-            "message too big (ETOOBIG)"
-        );
+        assert_eq!(std::format!("{}", IpcError::TooBig), "message too big (ETOOBIG)");
     }
 
     /// A zero-byte message carrying capabilities is not free: its cost is
@@ -574,8 +547,7 @@ mod tests {
     #[test]
     fn send_recv_roundtrip_preserves_order_and_caps() {
         let mut ch = open(4, 16, 2);
-        ch.send(Message::with_caps(vec![1, 2, 3], vec![cap(7), cap(8)]))
-            .unwrap();
+        ch.send(Message::with_caps(vec![1, 2, 3], vec![cap(7), cap(8)])).unwrap();
         ch.send(msg(2)).unwrap();
         assert_eq!(ch.len(), 2);
         assert!(ch.is_readable());
@@ -629,18 +601,12 @@ mod tests {
     fn too_many_caps_is_etoobig() {
         let mut ch = open(4, 16, 1);
         ch.send(Message::with_caps(vec![], vec![cap(1)])).unwrap();
-        let (err, back) = ch
-            .send_or_return(Message::with_caps(vec![], vec![cap(1), cap(2)]))
-            .unwrap_err();
+        let (err, back) = ch.send_or_return(Message::with_caps(vec![], vec![cap(1), cap(2)])).unwrap_err();
         assert_eq!(err, IpcError::TooBig);
         assert_eq!(back.caps.len(), 2);
         // A channel that allows no caps rejects a single one.
         let mut none = open(4, 16, 0);
-        assert_eq!(
-            none.send(Message::with_caps(vec![], vec![cap(1)]))
-                .unwrap_err(),
-            IpcError::TooBig
-        );
+        assert_eq!(none.send(Message::with_caps(vec![], vec![cap(1)])).unwrap_err(), IpcError::TooBig);
         none.send(Message::new(vec![])).unwrap();
     }
 
@@ -649,17 +615,11 @@ mod tests {
         // Closed channel, oversized message: TooBig wins (bad argument).
         let mut ch = Channel::new(1, 2, 0);
         ch.sender_added();
-        assert_eq!(
-            ch.send(Message::new(vec![0; 3])).unwrap_err(),
-            IpcError::TooBig
-        );
+        assert_eq!(ch.send(Message::new(vec![0; 3])).unwrap_err(), IpcError::TooBig);
         // Full channel, oversized message: TooBig wins.
         let mut ch = open(1, 2, 0);
         ch.send(msg(1)).unwrap();
-        assert_eq!(
-            ch.send(Message::new(vec![0; 3])).unwrap_err(),
-            IpcError::TooBig
-        );
+        assert_eq!(ch.send(Message::new(vec![0; 3])).unwrap_err(), IpcError::TooBig);
         // Full and closed: Closed wins over Full.
         ch.receiver_dropped();
         assert_eq!(ch.send(msg(2)).unwrap_err(), IpcError::Closed);
@@ -769,20 +729,12 @@ mod tests {
         ch.sender_added();
         ch.receiver_added();
         for i in 0..limits::CHANNEL_QUEUE_DEPTH {
-            ch.send(Message::new(vec![0; limits::MAX_MESSAGE_LEN]))
-                .unwrap_or_else(|_| panic!("send {i}"));
+            ch.send(Message::new(vec![0; limits::MAX_MESSAGE_LEN])).unwrap_or_else(|_| panic!("send {i}"));
         }
         assert_eq!(ch.send(msg(0)).unwrap_err(), IpcError::Full);
-        assert_eq!(
-            ch.send(Message::new(vec![0; limits::MAX_MESSAGE_LEN + 1]))
-                .unwrap_err(),
-            IpcError::TooBig
-        );
+        assert_eq!(ch.send(Message::new(vec![0; limits::MAX_MESSAGE_LEN + 1])).unwrap_err(), IpcError::TooBig);
         let caps: Vec<_> = (0..limits::MAX_MESSAGE_CAPS as u64 + 1).map(cap).collect();
-        assert_eq!(
-            ch.send(Message::with_caps(vec![], caps)).unwrap_err(),
-            IpcError::TooBig
-        );
+        assert_eq!(ch.send(Message::with_caps(vec![], caps)).unwrap_err(), IpcError::TooBig);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Memory objects: kernel-held byte arrays accessed by copying.
 
-use crate::{abi_len, raw, Cap, Errno};
+use crate::{Cap, Errno, abi_len, raw};
 
 /// Largest memory object the kernel creates.
 pub const MAX_SIZE: u64 = kalium_abi::limits::MAX_MEMOBJ_SIZE;
@@ -52,8 +52,7 @@ impl MemObj {
         let offset = i64::try_from(offset).map_err(|_| Errno::Inval)?;
         // SAFETY: `buf` is a live, writable slice of `len` bytes; the kernel
         // writes at most `len` bytes at its offset.
-        let r =
-            unsafe { raw::memobj_read(self.0.raw(), offset, raw::addr_mut(buf.as_mut_ptr()), len) };
+        let r = unsafe { raw::memobj_read(self.0.raw(), offset, raw::addr_mut(buf.as_mut_ptr()), len) };
         Errno::check(r)
     }
 

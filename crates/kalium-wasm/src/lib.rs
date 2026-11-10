@@ -86,12 +86,8 @@ pub use instance::{Extern, ExternType, Host, HostCtx, HostFuncId, HostOutcome, I
 pub use instr::{BlockType, BrTable, ConstExpr, FuncBody, Instr, MemArg};
 pub use memory::{Memory, MemoryRef};
 pub use module::{
-    Data, DataMode, ElemItems, ElemMode, Element, Export, ExportDesc, Global, Import, ImportDesc,
-    Module, ProgramCache,
+    Data, DataMode, ElemItems, ElemMode, Element, Export, ExportDesc, Global, Import, ImportDesc, Module, ProgramCache,
 };
 pub use snapshot::Snapshot;
-pub use table::{Table, TableRef, MAX_TABLE_ELEMENTS};
-pub use types::{
-    FuncType, GlobalType, MemType, RefType, ResizableLimits, TableType, ValType, MAX_PAGES,
-    PAGE_SIZE,
-};
+pub use table::{MAX_TABLE_ELEMENTS, Table, TableRef};
+pub use types::{FuncType, GlobalType, MAX_PAGES, MemType, PAGE_SIZE, RefType, ResizableLimits, TableType, ValType};

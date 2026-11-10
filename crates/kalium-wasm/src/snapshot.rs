@@ -96,10 +96,7 @@ impl fmt::Debug for Snapshot {
         f.debug_struct("Snapshot")
             .field("memory_pages", &self.memory_pages())
             .field("globals", &self.globals)
-            .field(
-                "tables",
-                &self.tables.iter().map(Vec::len).collect::<Vec<_>>(),
-            )
+            .field("tables", &self.tables.iter().map(Vec::len).collect::<Vec<_>>())
             .field("data_dropped", &self.data_dropped)
             .field("elem_dropped", &self.elem_dropped)
             .finish()
@@ -200,13 +197,7 @@ impl Snapshot {
         if r.remaining() != 0 {
             return Err(malformed("trailing bytes after the snapshot"));
         }
-        Ok(Snapshot {
-            memory,
-            globals,
-            tables,
-            data_dropped,
-            elem_dropped,
-        })
+        Ok(Snapshot { memory, globals, tables, data_dropped, elem_dropped })
     }
 }
 
@@ -224,14 +215,8 @@ fn encode_value(out: &mut Vec<u8>, v: Value) {
 }
 
 fn decode_value(bytes: &[u8]) -> Result<Value, Error> {
-    let (&tag, payload) = bytes
-        .split_first()
-        .ok_or_else(|| malformed("value truncated"))?;
-    let payload = u64::from_le_bytes(
-        payload
-            .try_into()
-            .map_err(|_| malformed("value truncated"))?,
-    );
+    let (&tag, payload) = bytes.split_first().ok_or_else(|| malformed("value truncated"))?;
+    let payload = u64::from_le_bytes(payload.try_into().map_err(|_| malformed("value truncated"))?);
     let narrow = || u32::try_from(payload).map_err(|_| malformed("value payload out of range"));
     let reference = || match payload {
         NULL => Ok(None),
@@ -260,24 +245,15 @@ impl<'a> Reader<'a> {
     }
 
     fn take(&mut self, n: usize) -> Result<&'a [u8], Error> {
-        let end = self
-            .pos
-            .checked_add(n)
-            .filter(|&e| e <= self.bytes.len())
-            .ok_or_else(|| malformed("snapshot truncated"))?;
-        let s = self
-            .bytes
-            .get(self.pos..end)
-            .ok_or_else(|| malformed("snapshot truncated"))?;
+        let end = self.pos.checked_add(n).filter(|&e| e <= self.bytes.len()).ok_or_else(|| malformed("snapshot truncated"))?;
+        let s = self.bytes.get(self.pos..end).ok_or_else(|| malformed("snapshot truncated"))?;
         self.pos = end;
         Ok(s)
     }
 
     fn u32(&mut self) -> Result<u32, Error> {
         let b = self.take(4)?;
-        Ok(u32::from_le_bytes(
-            b.try_into().map_err(|_| malformed("snapshot truncated"))?,
-        ))
+        Ok(u32::from_le_bytes(b.try_into().map_err(|_| malformed("snapshot truncated"))?))
     }
 
     /// A count of items of `item_len` bytes each, which must all fit in
@@ -333,11 +309,7 @@ mod tests {
                 Value::FuncRef(None),
                 Value::ExternRef(Some(42)),
             ],
-            tables: vec![
-                vec![Value::FuncRef(Some(3)), Value::FuncRef(None)],
-                vec![],
-                vec![Value::ExternRef(None)],
-            ],
+            tables: vec![vec![Value::FuncRef(Some(3)), Value::FuncRef(None)], vec![], vec![Value::ExternRef(None)]],
             data_dropped: vec![true, false],
             elem_dropped: vec![false, true, true],
         }
@@ -369,13 +341,7 @@ mod tests {
         assert_eq!(back.num_globals(), 6);
         assert_eq!(back.num_tables(), 3);
 
-        let empty = Snapshot {
-            memory: vec![],
-            globals: vec![],
-            tables: vec![],
-            data_dropped: vec![],
-            elem_dropped: vec![],
-        };
+        let empty = Snapshot { memory: vec![], globals: vec![], tables: vec![], data_dropped: vec![], elem_dropped: vec![] };
         assert_eq!(Snapshot::from_bytes(&empty.to_bytes()).unwrap(), empty);
     }
 
@@ -385,67 +351,37 @@ mod tests {
         let bytes = s.to_bytes();
         // Every truncation is an error, never a panic.
         for n in 0..bytes.len() {
-            assert!(
-                matches!(
-                    Snapshot::from_bytes(&bytes[..n]),
-                    Err(Error::Snapshot { .. })
-                ),
-                "truncated to {n}"
-            );
+            assert!(matches!(Snapshot::from_bytes(&bytes[..n]), Err(Error::Snapshot { .. })), "truncated to {n}");
         }
         let mut extra = bytes.clone();
         extra.push(0);
-        assert_eq!(
-            Snapshot::from_bytes(&extra),
-            Err(malformed("trailing bytes after the snapshot"))
-        );
+        assert_eq!(Snapshot::from_bytes(&extra), Err(malformed("trailing bytes after the snapshot")));
         let mut magic = bytes.clone();
         magic[0] = b'X';
-        assert_eq!(
-            Snapshot::from_bytes(&magic),
-            Err(malformed("not a snapshot (bad magic)"))
-        );
+        assert_eq!(Snapshot::from_bytes(&magic), Err(malformed("not a snapshot (bad magic)")));
         let mut version = bytes.clone();
         version[4] = 2;
-        assert_eq!(
-            Snapshot::from_bytes(&version),
-            Err(malformed("unsupported snapshot version"))
-        );
+        assert_eq!(Snapshot::from_bytes(&version), Err(malformed("unsupported snapshot version")));
         // A page count far beyond the bytes present is refused before
         // anything is allocated.
         let mut pages = bytes.clone();
         pages[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
-        assert_eq!(
-            Snapshot::from_bytes(&pages),
-            Err(malformed("memory contents truncated"))
-        );
+        assert_eq!(Snapshot::from_bytes(&pages), Err(malformed("memory contents truncated")));
         // Likewise a global count.
         let mut globals = bytes.clone();
         let at = 12 + PAGE_SIZE;
         globals[at..at + 4].copy_from_slice(&0x7FFF_FFFFu32.to_le_bytes());
-        assert_eq!(
-            Snapshot::from_bytes(&globals),
-            Err(malformed("item count exceeds the snapshot's size"))
-        );
+        assert_eq!(Snapshot::from_bytes(&globals), Err(malformed("item count exceeds the snapshot's size")));
         // A bad value tag, an out-of-range i32 payload, a bad flag.
         let mut tag = bytes.clone();
         tag[at + 4] = 0x7B;
-        assert_eq!(
-            Snapshot::from_bytes(&tag),
-            Err(malformed("unknown value type tag"))
-        );
+        assert_eq!(Snapshot::from_bytes(&tag), Err(malformed("unknown value type tag")));
         let mut payload = bytes.clone();
         payload[at + 4 + 8] = 1;
-        assert_eq!(
-            Snapshot::from_bytes(&payload),
-            Err(malformed("value payload out of range"))
-        );
+        assert_eq!(Snapshot::from_bytes(&payload), Err(malformed("value payload out of range")));
         let mut flag = bytes.clone();
         let n = flag.len();
         flag[n - 1] = 2;
-        assert_eq!(
-            Snapshot::from_bytes(&flag),
-            Err(malformed("segment flag is neither 0 nor 1"))
-        );
+        assert_eq!(Snapshot::from_bytes(&flag), Err(malformed("segment flag is neither 0 nor 1")));
     }
 }

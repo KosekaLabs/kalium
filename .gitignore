@@ -1,3 +1,52 @@
-/target
-**/*.rs.bk
-Cargo.lock.orig
+# Build
+*.egg-info
+*.py[oc]
+bin
+build
+dist
+dist-js
+dist-ssr
+lib
+lib-types
+wheels
+
+# Cache
+.cache
+.mf
+.rollup.cache
+__pycache__
+tsconfig.tsbuildinfo
+
+# Development
+*.local
+.env
+.venv
+node_modules
+target
+tmp
+
+# Editors
+*.njsproj
+*.ntvs*
+*.sln
+*.sublime*
+*.suo
+*.sw?
+.DS_Store
+.idea
+.vs
+.vscode
+.zed
+
+# Logs
+*.log
+logs
+lerna-debug.log*
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Yarn
+.yarn/*
+!.yarn/releases

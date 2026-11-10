@@ -13,7 +13,7 @@ const RUN_NS: i64 = 1_000_000_000;
 /// loop.
 const BURST: u32 = 256;
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn _start() {
     let end = time_now().saturating_add(RUN_NS);
     let mut acc: u32 = black_box(0);

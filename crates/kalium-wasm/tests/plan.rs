@@ -19,9 +19,7 @@ fn plan() -> String {
 
 /// The kalium-wasm section of the plan: from its heading to the next crate's.
 fn kalium_wasm_block(plan: &str) -> &str {
-    let start = plan
-        .find("### kalium-wasm")
-        .expect("the plan has a `### kalium-wasm` section");
+    let start = plan.find("### kalium-wasm").expect("the plan has a `### kalium-wasm` section");
     let rest = &plan[start..];
     let end = rest[4..].find("\n### ").map_or(rest.len(), |i| i + 4);
     &rest[..end]
@@ -71,22 +69,11 @@ fn plan_declares_the_current_api() {
         "Snapshot { msg }",
         "`Rc::strong_count == 1`",
     ];
-    let missing: Vec<&str> = required
-        .iter()
-        .copied()
-        .filter(|s| !block.contains(s))
-        .collect();
-    assert!(
-        missing.is_empty(),
-        "docs/prototype-plan.md's kalium-wasm block does not declare:\n  {}",
-        missing.join("\n  ")
-    );
+    let missing: Vec<&str> = required.iter().copied().filter(|s| !block.contains(s)).collect();
+    assert!(missing.is_empty(), "docs/prototype-plan.md's kalium-wasm block does not declare:\n  {}", missing.join("\n  "));
     // The pre-shared-objects API must be gone, not merely joined by the new one.
     for stale in ["pub memory: &'a mut Memory", "FuncRef(Option<u32>) }"] {
-        assert!(
-            !block.contains(stale),
-            "docs/prototype-plan.md still describes the old API: `{stale}`"
-        );
+        assert!(!block.contains(stale), "docs/prototype-plan.md still describes the old API: `{stale}`");
     }
 }
 
@@ -95,17 +82,13 @@ fn plan_items_exist_in_the_crate() {
     // What the plan spells out must compile against the crate: a type-level
     // check of the signatures the strings above name. Nothing is run.
     use kalium_wasm::{
-        Error, Extern, ExternType, GlobalRef, Host, HostCtx, HostFuncId, HostOutcome, Instance,
-        Limits, MemoryRef, Module, ProgramCache, Snapshot, TableRef, Trap, Value,
+        Error, Extern, ExternType, GlobalRef, Host, HostCtx, HostFuncId, HostOutcome, Instance, Limits, MemoryRef, Module,
+        ProgramCache, Snapshot, TableRef, Trap, Value,
     };
     use std::sync::Arc;
     /// The signature the plan gives `Instance::instantiate` and `Instance::allocate`.
-    type Instantiate = fn(
-        Arc<Module>,
-        &mut dyn FnMut(&str, &str, &ExternType<'_>) -> Option<Extern>,
-        &Limits,
-        u32,
-    ) -> Result<Instance, Error>;
+    type Instantiate =
+        fn(Arc<Module>, &mut dyn FnMut(&str, &str, &ExternType<'_>) -> Option<Extern>, &Limits, u32) -> Result<Instance, Error>;
     let _: Instantiate = Instance::instantiate;
     let _: Instantiate = Instance::allocate;
     let _: fn(&mut Instance) -> Result<(), Trap> = Instance::init_segments;
@@ -146,10 +129,6 @@ fn plan_items_exist_in_the_crate() {
         ctx.memory
     }
     let _ = Error::IncompatibleImport { import: 0 };
-    let _ = Extern::Func {
-        id: HostFuncId(0),
-        ty: kalium_wasm::FuncType::default(),
-        addr: None,
-    };
+    let _ = Extern::Func { id: HostFuncId(0), ty: kalium_wasm::FuncType::default(), addr: None };
     let _ = Value::FuncRef(None);
 }

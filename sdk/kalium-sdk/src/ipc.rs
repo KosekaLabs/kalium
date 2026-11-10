@@ -1,8 +1,8 @@
 //! Channels: bounded message queues with capability transfer.
 
-use kalium_abi::layout::{RecvHeader, CAP_INDEX_SIZE, RECV_HEADER_SIZE};
+use kalium_abi::layout::{CAP_INDEX_SIZE, RECV_HEADER_SIZE, RecvHeader};
 
-use crate::{abi_len, raw, Cap, Errno};
+use crate::{Cap, Errno, abi_len, raw};
 
 /// Queue depth of a channel; `send` reports [`Errno::Again`] when full.
 pub const QUEUE_DEPTH: usize = kalium_abi::limits::CHANNEL_QUEUE_DEPTH;
@@ -25,9 +25,7 @@ impl Channel {
         let mut out_recv: i32 = Cap::NONE.raw();
         // SAFETY: both out-parameters are live, writable `i32`s for the
         // duration of the call; the kernel writes 4 bytes at each.
-        let r = unsafe {
-            raw::channel_create(raw::addr_mut(&mut out_send), raw::addr_mut(&mut out_recv))
-        };
+        let r = unsafe { raw::channel_create(raw::addr_mut(&mut out_send), raw::addr_mut(&mut out_recv)) };
         Errno::check(r)?;
         if out_send < 0 || out_recv < 0 {
             return Err(Errno::Other(r));
@@ -65,15 +63,7 @@ impl Sender {
         // from; `caps` is a live slice of `ncaps` `i32`s (`Cap` is
         // `repr(transparent)` over `i32`) the kernel reads; nothing is
         // written.
-        let r = unsafe {
-            raw::send(
-                self.0.raw(),
-                raw::addr(bytes.as_ptr()),
-                len,
-                raw::addr(caps.as_ptr()),
-                ncaps,
-            )
-        };
+        let r = unsafe { raw::send(self.0.raw(), raw::addr(bytes.as_ptr()), len, raw::addr(caps.as_ptr()), ncaps) };
         Errno::check(r)
     }
 }
@@ -122,29 +112,17 @@ impl Receiver {
     }
 
     /// [`try_recv`](Receiver::try_recv) returning the kernel's header.
-    pub fn try_recv_header(
-        self,
-        buf: &mut [u8],
-        caps_out: &mut [Cap],
-    ) -> Result<RecvHeader, Errno> {
+    pub fn try_recv_header(self, buf: &mut [u8], caps_out: &mut [Cap]) -> Result<RecvHeader, Errno> {
         self.recv_raw(buf, caps_out, true)
     }
 
-    fn recv_raw(
-        self,
-        buf: &mut [u8],
-        caps_out: &mut [Cap],
-        nonblocking: bool,
-    ) -> Result<RecvHeader, Errno> {
+    fn recv_raw(self, buf: &mut [u8], caps_out: &mut [Cap], nonblocking: bool) -> Result<RecvHeader, Errno> {
         let buf_len = abi_len(buf.len())?;
         let ncaps_max = abi_len(caps_out.len())?;
         let mut hdr = [0u8; RECV_HEADER_SIZE];
         let cap = self.0.raw();
-        let (bufp, capsp, hdrp) = (
-            raw::addr_mut(buf.as_mut_ptr()),
-            raw::addr_mut(caps_out.as_mut_ptr()),
-            raw::addr_mut(hdr.as_mut_ptr()),
-        );
+        let (bufp, capsp, hdrp) =
+            (raw::addr_mut(buf.as_mut_ptr()), raw::addr_mut(caps_out.as_mut_ptr()), raw::addr_mut(hdr.as_mut_ptr()));
         // SAFETY: `buf` is a live, writable slice of `buf_len` bytes;
         // `caps_out` a live, writable slice of `ncaps_max` `i32`s (`Cap` is
         // `repr(transparent)` over `i32`, and any `i32` is a valid `Cap`);
@@ -165,9 +143,7 @@ impl Receiver {
 /// How much of a message landed in the caller's buffers.
 fn clamp(hdr: RecvHeader, buf_len: usize, caps_len: usize) -> (usize, usize) {
     let len = usize::try_from(hdr.len).unwrap_or(usize::MAX).min(buf_len);
-    let ncaps = usize::try_from(hdr.ncaps)
-        .unwrap_or(usize::MAX)
-        .min(caps_len);
+    let ncaps = usize::try_from(hdr.ncaps).unwrap_or(usize::MAX).min(caps_len);
     (len, ncaps)
 }
 
@@ -204,10 +180,7 @@ mod tests {
         assert_eq!(clamp(hdr, 64, 4), (10, 2));
         assert_eq!(clamp(hdr, 4, 1), (4, 1));
         assert_eq!(clamp(hdr, 0, 0), (0, 0));
-        let hdr = RecvHeader {
-            len: u32::MAX,
-            ncaps: u32::MAX,
-        };
+        let hdr = RecvHeader { len: u32::MAX, ncaps: u32::MAX };
         assert_eq!(clamp(hdr, 8, 4), (8, 4));
     }
 

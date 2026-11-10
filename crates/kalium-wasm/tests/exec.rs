@@ -4,16 +4,9 @@
 //! and execution, which must end in an error or a trap, never a panic.
 
 use kalium_wasm::instr::{BlockType, ConstExpr, FuncBody, Instr, MemArg};
-use kalium_wasm::module::{
-    Data, DataMode, ElemItems, ElemMode, Element, Export, ExportDesc, Global,
-};
-use kalium_wasm::types::{
-    FuncType, GlobalType, MemType, RefType, ResizableLimits, TableType, ValType,
-};
-use kalium_wasm::{
-    ExecResult, Execution, Host, HostCtx, HostFuncId, HostOutcome, Instance, Limits, Module, Trap,
-    Value,
-};
+use kalium_wasm::module::{Data, DataMode, ElemItems, ElemMode, Element, Export, ExportDesc, Global};
+use kalium_wasm::types::{FuncType, GlobalType, MemType, RefType, ResizableLimits, TableType, ValType};
+use kalium_wasm::{ExecResult, Execution, Host, HostCtx, HostFuncId, HostOutcome, Instance, Limits, Module, Trap, Value};
 use std::sync::Arc;
 
 const FIXTURE: &[u8] = include_bytes!("fixtures/rust_fixture.wasm");
@@ -37,10 +30,7 @@ impl Host for LogHost {
         let ptr = args[0].as_i32().ok_or(Trap::Host)? as u32;
         let len = args[1].as_i32().ok_or(Trap::Host)? as u32;
         let mut buf = vec![0u8; len as usize];
-        ctx.memory
-            .try_borrow()
-            .map_err(|_| Trap::Host)?
-            .read(ptr, &mut buf)?;
+        ctx.memory.try_borrow().map_err(|_| Trap::Host)?.read(ptr, &mut buf)?;
         self.log.push(buf);
         Ok(HostOutcome::Continue)
     }
@@ -62,9 +52,7 @@ fn fixture() -> Instance {
 }
 
 fn call(inst: &mut Instance, host: &mut LogHost, name: &str, args: &[Value]) -> Vec<Value> {
-    let f = inst
-        .export_func(name)
-        .unwrap_or_else(|| panic!("export {name}"));
+    let f = inst.export_func(name).unwrap_or_else(|| panic!("export {name}"));
     let mut e = Execution::new(inst, f, args).unwrap();
     match e.run(inst, host, u64::MAX) {
         ExecResult::Done(v) => v,
@@ -83,20 +71,12 @@ fn rust_fixture_runs() {
     assert_eq!(host.log, vec![b"hello from fixture".to_vec()]);
     let h = &mut host;
 
-    assert_eq!(
-        call(i, h, "fib", &[Value::I32(50)]),
-        vec![Value::I64(12586269025)]
-    );
+    assert_eq!(call(i, h, "fib", &[Value::I32(50)]), vec![Value::I64(12586269025)]);
     assert_eq!(call(i, h, "fib", &[Value::I32(0)]), vec![Value::I64(0)]);
 
     // call_indirect through the function table.
     let d = |i: &mut Instance, h: &mut LogHost, w: i32, x: i32, y: i32| {
-        call(
-            i,
-            h,
-            "dispatch",
-            &[Value::I32(w), Value::I32(x), Value::I32(y)],
-        )[0]
+        call(i, h, "dispatch", &[Value::I32(w), Value::I32(x), Value::I32(y)])[0]
     };
     assert_eq!(d(i, h, 0, 20, 22), Value::I32(42));
     assert_eq!(d(i, h, 1, 6, 7), Value::I32(42));
@@ -108,9 +88,7 @@ fn rust_fixture_runs() {
     assert_eq!(call(i, h, "bump", &[]), vec![Value::I32(2)]);
 
     // memory.fill / memory.copy, observed by the host.
-    let ptr = call(i, h, "fill_scratch", &[Value::I32(0xab), Value::I32(16)])[0]
-        .as_i32()
-        .unwrap() as u32;
+    let ptr = call(i, h, "fill_scratch", &[Value::I32(0xab), Value::I32(16)])[0].as_i32().unwrap() as u32;
     let mut buf = [0u8; 17];
     inst.memory().read(ptr, &mut buf).unwrap();
     assert_eq!(&buf[..16], &[0xab; 16]);
@@ -119,48 +97,20 @@ fn rust_fixture_runs() {
     let i = &mut inst;
 
     // Saturating conversions, sign extension, floats, 64-bit arithmetic.
-    assert_eq!(
-        call(i, h, "to_int", &[Value::F64(1e300)]),
-        vec![Value::I32(i32::MAX)]
-    );
-    assert_eq!(
-        call(i, h, "to_int", &[Value::F64(f64::NAN)]),
-        vec![Value::I32(0)]
-    );
-    assert_eq!(
-        call(i, h, "to_int", &[Value::F64(-2.9)]),
-        vec![Value::I32(-2)]
-    );
-    assert_eq!(
-        call(i, h, "to_uint", &[Value::F32(-1.0)]),
-        vec![Value::I32(0)]
-    );
-    assert_eq!(
-        call(i, h, "to_uint", &[Value::F32(4.0e9)]),
-        vec![Value::I32(4_000_000_000u32 as i32)]
-    );
-    assert_eq!(
-        call(i, h, "extend8", &[Value::I32(0x1ff)]),
-        vec![Value::I32(-1)]
-    );
-    assert_eq!(
-        call(i, h, "extend16", &[Value::I64(0x18000)]),
-        vec![Value::I64(-32768)]
-    );
-    let r = call(i, h, "hypot", &[Value::F64(3.0), Value::F64(4.0)])[0]
-        .as_f64()
-        .unwrap();
+    assert_eq!(call(i, h, "to_int", &[Value::F64(1e300)]), vec![Value::I32(i32::MAX)]);
+    assert_eq!(call(i, h, "to_int", &[Value::F64(f64::NAN)]), vec![Value::I32(0)]);
+    assert_eq!(call(i, h, "to_int", &[Value::F64(-2.9)]), vec![Value::I32(-2)]);
+    assert_eq!(call(i, h, "to_uint", &[Value::F32(-1.0)]), vec![Value::I32(0)]);
+    assert_eq!(call(i, h, "to_uint", &[Value::F32(4.0e9)]), vec![Value::I32(4_000_000_000u32 as i32)]);
+    assert_eq!(call(i, h, "extend8", &[Value::I32(0x1ff)]), vec![Value::I32(-1)]);
+    assert_eq!(call(i, h, "extend16", &[Value::I64(0x18000)]), vec![Value::I64(-32768)]);
+    let r = call(i, h, "hypot", &[Value::F64(3.0), Value::F64(4.0)])[0].as_f64().unwrap();
     assert!((r - 5.0).abs() < 1e-12, "{r}");
     let a = 0x0123_4567_89ab_cdefi64;
     let b = 0x7eadbeefi32;
-    let expected = a.rotate_left(13)
-        ^ (b as i64).wrapping_mul(0x9E37_79B9_7F4A_7C15u64 as i64)
-        ^ (a >> 7)
-        ^ (a.count_ones() as i64);
-    assert_eq!(
-        call(i, h, "mix", &[Value::I64(a), Value::I32(b)]),
-        vec![Value::I64(expected)]
-    );
+    let expected =
+        a.rotate_left(13) ^ (b as i64).wrapping_mul(0x9E37_79B9_7F4A_7C15u64 as i64) ^ (a >> 7) ^ (a.count_ones() as i64);
+    assert_eq!(call(i, h, "mix", &[Value::I64(a), Value::I32(b)]), vec![Value::I64(expected)]);
 
     // Fuel-sliced execution gives the same answer as one run, and every
     // slice stops promptly.
@@ -175,10 +125,7 @@ fn rust_fixture_runs() {
             }
         };
         assert_eq!(result, ExecResult::Done(vec![Value::I64(1548008755920)]));
-        assert!(
-            slices > 60 / chunk as usize,
-            "chunk {chunk}: {slices} slices"
-        );
+        assert!(slices > 60 / chunk as usize, "chunk {chunk}: {slices} slices");
     }
 }
 
@@ -198,11 +145,7 @@ fn rust_fixture_snapshot_restores_its_state() {
     assert_eq!(host.log, [b"hello from fixture".to_vec()]);
 
     let snapshot = original.snapshot().expect("fixture objects are unshared");
-    assert_eq!(
-        snapshot.memory_pages(),
-        original.memory().size_pages(),
-        "the whole memory is captured"
-    );
+    assert_eq!(snapshot.memory_pages(), original.memory().size_pages(), "the whole memory is captured");
     let bytes = snapshot.to_bytes();
     assert_eq!(bytes.len(), snapshot.encoded_len());
     let decoded = kalium_wasm::Snapshot::from_bytes(&bytes).unwrap();
@@ -213,11 +156,7 @@ fn rust_fixture_snapshot_restores_its_state() {
         &decoded,
         &mut |m, n, ty| match ty {
             kalium_wasm::ExternType::Func(ft) if (m, n) == ("env", "host_log") => {
-                Some(kalium_wasm::Extern::Func {
-                    id: HostFuncId(7),
-                    ty: (*ft).clone(),
-                    addr: None,
-                })
+                Some(kalium_wasm::Extern::Func { id: HostFuncId(7), ty: (*ft).clone(), addr: None })
             }
             _ => None,
         },
@@ -230,23 +169,12 @@ fn rust_fixture_snapshot_restores_its_state() {
     let (h, i) = (&mut host2, &mut restored);
     assert_eq!(call(i, h, "bump", &[]), vec![Value::I32(3)]);
     let mut buf = [0u8; 33];
-    restored
-        .memory()
-        .read(ptr.as_i32().unwrap() as u32, &mut buf)
-        .unwrap();
+    restored.memory().read(ptr.as_i32().unwrap() as u32, &mut buf).unwrap();
     assert_eq!(&buf[..32], &[0x5a; 32]);
     assert_eq!(buf[32], 0);
     let (h, i) = (&mut host2, &mut restored);
     // The function table's references were relocated to the new range.
-    assert_eq!(
-        call(
-            i,
-            h,
-            "dispatch",
-            &[Value::I32(1), Value::I32(6), Value::I32(7)]
-        ),
-        vec![Value::I32(42)]
-    );
+    assert_eq!(call(i, h, "dispatch", &[Value::I32(1), Value::I32(6), Value::I32(7)]), vec![Value::I32(42)]);
     assert_eq!(call(i, h, "greet", &[]), vec![]);
     assert_eq!(host2.log, [b"hello from fixture".to_vec()]);
     // The original went the same way.
@@ -311,9 +239,7 @@ fn const_of(rng: &mut XorShift, ty: ValType) -> ConstExpr {
             ValType::ExternRef => Instr::RefNull(RefType::ExternRef),
         }
     };
-    ConstExpr {
-        instrs: vec![instr],
-    }
+    ConstExpr { instrs: vec![instr] }
 }
 
 /// Random instructions with random immediates, many of them out of range
@@ -329,24 +255,13 @@ fn random_instr(rng: &mut XorShift, len: u32) -> Instr {
         1 => BlockType::Val(random_valtype(rng)),
         _ => BlockType::Type(idx),
     };
-    let ma = MemArg {
-        align: rng.below(4) as u32,
-        offset: if rng.below(2) == 0 {
-            big
-        } else {
-            rng.below(64) as u32
-        },
-    };
+    let ma = MemArg { align: rng.below(4) as u32, offset: if rng.below(2) == 0 { big } else { rng.below(64) as u32 } };
     match rng.below(80) {
         0 => Unreachable,
         1 => Nop,
         2 => Block { ty: bt, end: pos },
         3 => Loop { ty: bt, end: pos },
-        4 => If {
-            ty: bt,
-            else_: pos,
-            end: pos,
-        },
+        4 => If { ty: bt, else_: pos, end: pos },
         5 => Else { end: pos },
         6..=8 => End,
         9 => Br(idx),
@@ -354,10 +269,7 @@ fn random_instr(rng: &mut XorShift, len: u32) -> Instr {
         11 => BrTable(idx),
         12 => Return,
         13 => Call(idx),
-        14 => CallIndirect {
-            ty: idx,
-            table: idx,
-        },
+        14 => CallIndirect { ty: idx, table: idx },
         15 => Drop,
         16 => Select,
         17 => SelectT(random_valtype(rng)),
@@ -371,10 +283,7 @@ fn random_instr(rng: &mut XorShift, len: u32) -> Instr {
         27 => RefFunc(idx),
         28 => TableGet(idx),
         29 => TableSet(idx),
-        30 => TableInit {
-            elem: idx,
-            table: idx,
-        },
+        30 => TableInit { elem: idx, table: idx },
         31 => ElemDrop(idx),
         32 => TableCopy { dst: idx, src: idx },
         33 => TableGrow(idx),
@@ -413,10 +322,7 @@ fn random_instr(rng: &mut XorShift, len: u32) -> Instr {
         70 => I64ExtendI32U,
         71 => I32LtU,
         72 => F64ConvertI64S,
-        73 => I32Load(MemArg {
-            align: u32::MAX,
-            offset: u32::MAX,
-        }),
+        73 => I32Load(MemArg { align: u32::MAX, offset: u32::MAX }),
         74 => Br(big),
         75 => Call(big),
         76 => I32Const(0),
@@ -460,54 +366,26 @@ fn random_module(rng: &mut XorShift) -> Module {
         funcs,
         tables: (0..rng.below(3))
             .map(|_| TableType {
-                elem: if rng.below(2) == 0 {
-                    RefType::FuncRef
-                } else {
-                    RefType::ExternRef
-                },
+                elem: if rng.below(2) == 0 { RefType::FuncRef } else { RefType::ExternRef },
                 limits: ResizableLimits {
                     min: rng.below(5) as u32,
-                    max: if rng.below(2) == 0 {
-                        None
-                    } else {
-                        Some(rng.below(8) as u32)
-                    },
+                    max: if rng.below(2) == 0 { None } else { Some(rng.below(8) as u32) },
                 },
             })
             .collect(),
         memories: if rng.below(3) == 0 {
             vec![]
         } else {
-            vec![MemType {
-                limits: ResizableLimits {
-                    min: rng.below(2) as u32,
-                    max: None,
-                },
-            }]
+            vec![MemType { limits: ResizableLimits { min: rng.below(2) as u32, max: None } }]
         },
         globals: (0..rng.below(3))
             .map(|_| {
                 let ty = random_valtype(rng);
-                Global {
-                    ty: GlobalType {
-                        ty,
-                        mutable: rng.below(2) == 0,
-                    },
-                    init: const_of(rng, ty),
-                }
+                Global { ty: GlobalType { ty, mutable: rng.below(2) == 0 }, init: const_of(rng, ty) }
             })
             .collect(),
-        exports: (0..nfuncs)
-            .map(|i| Export {
-                name: format!("f{i}"),
-                desc: ExportDesc::Func(i as u32),
-            })
-            .collect(),
-        start: if rng.below(4) == 0 {
-            Some(rng.below(5) as u32)
-        } else {
-            None
-        },
+        exports: (0..nfuncs).map(|i| Export { name: format!("f{i}"), desc: ExportDesc::Func(i as u32) }).collect(),
+        start: if rng.below(4) == 0 { Some(rng.below(5) as u32) } else { None },
         elements: (0..rng.below(3))
             .map(|_| Element {
                 ty: RefType::FuncRef,
@@ -515,10 +393,7 @@ fn random_module(rng: &mut XorShift) -> Module {
                 mode: match rng.below(3) {
                     0 => ElemMode::Passive,
                     1 => ElemMode::Declarative,
-                    _ => ElemMode::Active {
-                        table: rng.below(3) as u32,
-                        offset: const_of(rng, ValType::I32),
-                    },
+                    _ => ElemMode::Active { table: rng.below(3) as u32, offset: const_of(rng, ValType::I32) },
                 },
             })
             .collect(),
@@ -527,10 +402,7 @@ fn random_module(rng: &mut XorShift) -> Module {
                 mode: if rng.below(2) == 0 {
                     DataMode::Passive
                 } else {
-                    DataMode::Active {
-                        memory: rng.below(4) as u32 / 3,
-                        offset: const_of(rng, ValType::I32),
-                    }
+                    DataMode::Active { memory: rng.below(4) as u32 / 3, offset: const_of(rng, ValType::I32) }
                 },
                 bytes: (0..rng.below(70)).map(|_| rng.next() as u8).collect(),
             })
@@ -544,13 +416,7 @@ fn random_module(rng: &mut XorShift) -> Module {
 struct RefusingHost;
 
 impl Host for RefusingHost {
-    fn call(
-        &mut self,
-        _: &mut HostCtx<'_>,
-        _: HostFuncId,
-        _: &[Value],
-        _: &mut [Value],
-    ) -> Result<HostOutcome, Trap> {
+    fn call(&mut self, _: &mut HostCtx<'_>, _: HostFuncId, _: &[Value], _: &mut [Value]) -> Result<HostOutcome, Trap> {
         Err(Trap::Host)
     }
 }
@@ -558,12 +424,7 @@ impl Host for RefusingHost {
 #[test]
 fn fuzz_unvalidated_modules_never_panic() {
     let mut rng = XorShift(0xD1B5_4A32_D192_ED03);
-    let limits = Limits {
-        max_memory_pages: 4,
-        max_stack_values: 512,
-        max_call_depth: 16,
-        max_table_elements: 64,
-    };
+    let limits = Limits { max_memory_pages: 4, max_stack_values: 512, max_call_depth: 16, max_table_elements: 64 };
     let mut instantiated = 0;
     let mut ran = 0;
     let mut invalid_traps = 0;
@@ -603,13 +464,7 @@ fn fuzz_unvalidated_modules_never_panic() {
             ran += 1;
         }
     }
-    assert!(
-        instantiated > 500,
-        "only {instantiated} modules instantiated"
-    );
+    assert!(instantiated > 500, "only {instantiated} modules instantiated");
     assert!(ran > 1000, "only {ran} executions");
-    assert!(
-        invalid_traps > 100,
-        "only {invalid_traps} invalid-state traps"
-    );
+    assert!(invalid_traps > 100, "only {invalid_traps} invalid-state traps");
 }

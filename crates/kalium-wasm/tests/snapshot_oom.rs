@@ -14,8 +14,8 @@
 //! least a threshold, as the kernel's heap does when it has nothing left.
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use kalium_wasm::{Error, Instance, Limits, Module, Value};
 
@@ -74,11 +74,7 @@ fn snapshot_of_a_full_table_on_a_short_heap_is_out_of_memory_not_an_abort() {
     let module = Arc::new(Module::new(&wat::parse_str(wat).unwrap()).unwrap());
     let inst = Instance::new(module, &mut |_, _, _| Err(()), &limits).unwrap();
     // The table grown to the element limit, as a hostile instance would.
-    let grown = inst
-        .table_ref(0)
-        .unwrap()
-        .borrow_mut()
-        .grow(elements - 1, Value::FuncRef(None));
+    let grown = inst.table_ref(0).unwrap().borrow_mut().grow(elements - 1, Value::FuncRef(None));
     assert_eq!(grown, Some(1));
     assert_eq!(inst.table_elements(), elements);
     let entries_bytes = elements as usize * core::mem::size_of::<Value>();
@@ -86,21 +82,12 @@ fn snapshot_of_a_full_table_on_a_short_heap_is_out_of_memory_not_an_abort() {
 
     // Heap short of the table copy (the memory copy, 64 KiB, still fits):
     // ENOMEM, not an abort.
-    assert!(matches!(
-        snapshot_refusing(&inst, entries_bytes),
-        Err(Error::OutOfMemory)
-    ));
+    assert!(matches!(snapshot_refusing(&inst, entries_bytes), Err(Error::OutOfMemory)));
     // Short of the memory copy as well.
-    assert!(matches!(
-        snapshot_refusing(&inst, 64 * 1024),
-        Err(Error::OutOfMemory)
-    ));
+    assert!(matches!(snapshot_refusing(&inst, 64 * 1024), Err(Error::OutOfMemory)));
     // Short of everything but the smallest allocations: the globals, the
     // tables list and the segment flags refuse too.
-    assert!(matches!(
-        snapshot_refusing(&inst, 1),
-        Err(Error::OutOfMemory)
-    ));
+    assert!(matches!(snapshot_refusing(&inst, 1), Err(Error::OutOfMemory)));
 
     // With the heap back, the snapshot is complete and restores.
     let snapshot = snapshot_refusing(&inst, 0).expect("snapshot with a heap");
@@ -108,14 +95,7 @@ fn snapshot_of_a_full_table_on_a_short_heap_is_out_of_memory_not_an_abort() {
     let bytes = snapshot.to_bytes();
     assert_eq!(bytes.len(), snapshot.encoded_len());
     assert!(bytes.len() > entries_bytes / 8, "the full table is encoded");
-    let restored = Instance::from_snapshot(
-        inst.module().clone(),
-        &snapshot,
-        &mut |_, _, _| None,
-        &limits,
-        0,
-    )
-    .expect("restore");
+    let restored = Instance::from_snapshot(inst.module().clone(), &snapshot, &mut |_, _, _| None, &limits, 0).expect("restore");
     assert_eq!(restored.table_elements(), elements);
     assert_eq!(restored.snapshot().unwrap(), snapshot);
 }

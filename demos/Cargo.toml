@@ -9,8 +9,8 @@ resolver = "2"
 members = ["hello-std"]
 
 [workspace.package]
-version = "0.1.0"
-edition = "2021"
+version = "0.0.0"
+edition = "2024"
 license = "Apache-2.0"
 
 # Small code for the boot image: size optimization, LTO, abort on panic,

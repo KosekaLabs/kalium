@@ -134,16 +134,7 @@ impl Heap {
     /// An empty heap with no region. Every allocation fails until
     /// [`Heap::init`] is called.
     pub const fn new() -> Self {
-        Heap {
-            head: ptr::null_mut(),
-            start: 0,
-            end: 0,
-            free_bytes: 0,
-            free_blocks: 0,
-            allocations: 0,
-            frees: 0,
-            failures: 0,
-        }
+        Heap { head: ptr::null_mut(), start: 0, end: 0, free_bytes: 0, free_blocks: 0, allocations: 0, frees: 0, failures: 0 }
     }
 
     /// Whether `init` has succeeded.
@@ -165,9 +156,7 @@ impl Heap {
             return Err(HeapError::AlreadyInitialized);
         }
         let raw_start = start as usize;
-        let raw_end = raw_start
-            .checked_add(size)
-            .ok_or(HeapError::RegionTooSmall)?;
+        let raw_end = raw_start.checked_add(size).ok_or(HeapError::RegionTooSmall)?;
         let begin = round_up(raw_start, MIN_BLOCK).ok_or(HeapError::RegionTooSmall)?;
         let end = round_down(raw_end, MIN_BLOCK);
         if end <= begin || end - begin < MIN_BLOCK {
@@ -177,10 +166,7 @@ impl Heap {
         // SAFETY: `begin..end` lies inside the caller-provided region, is
         // `MIN_BLOCK`-aligned and at least `MIN_BLOCK` bytes, so a node fits.
         unsafe {
-            block.write(FreeBlock {
-                size: end - begin,
-                next: ptr::null_mut(),
-            });
+            block.write(FreeBlock { size: end - begin, next: ptr::null_mut() });
         }
         self.head = block;
         self.start = begin;
@@ -357,10 +343,7 @@ impl Heap {
                 (*prev).next = merged_next;
             } else {
                 let b = addr as *mut FreeBlock;
-                b.write(FreeBlock {
-                    size: merged_size,
-                    next: merged_next,
-                });
+                b.write(FreeBlock { size: merged_size, next: merged_next });
                 *link = b;
                 self.free_blocks += 1;
             }
@@ -462,9 +445,7 @@ impl Default for KernelHeap {
 impl KernelHeap {
     /// An uninitialised heap; usable in a `static`.
     pub const fn new() -> Self {
-        KernelHeap {
-            inner: SpinLock::new(Heap::new()),
-        }
+        KernelHeap { inner: SpinLock::new(Heap::new()) }
     }
 
     /// Hands the region `[start, start + size)` to the heap. Call exactly
@@ -707,16 +688,10 @@ mod tests {
             assert_eq!(h.dealloc(p.as_ptr().add(1), l), Err(HeapError::InvalidFree));
             // Outside the region.
             assert_eq!(h.dealloc(arena.ptr.sub(16), l), Err(HeapError::InvalidFree));
-            assert_eq!(
-                h.dealloc(arena.ptr.add(4096 - 16), l),
-                Err(HeapError::InvalidFree)
-            );
+            assert_eq!(h.dealloc(arena.ptr.add(4096 - 16), l), Err(HeapError::InvalidFree));
             // A block overlapping free space (q with a size reaching into the
             // free tail).
-            assert_eq!(
-                h.dealloc(q.as_ptr(), layout(128, 16)),
-                Err(HeapError::InvalidFree)
-            );
+            assert_eq!(h.dealloc(q.as_ptr(), layout(128, 16)), Err(HeapError::InvalidFree));
         }
         assert_eq!(h.stats(), before);
         h.check_invariants().unwrap();
@@ -760,27 +735,15 @@ mod tests {
     fn verify(l: &Live) {
         // SAFETY: as in `fill`.
         let bytes = unsafe { core::slice::from_raw_parts(l.ptr, l.layout.size()) };
-        assert!(
-            bytes.iter().all(|&b| b == l.tag),
-            "allocation at {:p} ({:?}) was overwritten",
-            l.ptr,
-            l.layout
-        );
+        assert!(bytes.iter().all(|&b| b == l.tag), "allocation at {:p} ({:?}) was overwritten", l.ptr, l.layout);
     }
 
     fn assert_disjoint(live: &[Live], arena: &Arena) {
-        let mut ranges: Vec<(usize, usize)> = live
-            .iter()
-            .map(|l| (l.ptr as usize, l.ptr as usize + l.layout.size().max(1)))
-            .collect();
+        let mut ranges: Vec<(usize, usize)> =
+            live.iter().map(|l| (l.ptr as usize, l.ptr as usize + l.layout.size().max(1))).collect();
         ranges.sort_unstable();
         for w in ranges.windows(2) {
-            assert!(
-                w[0].1 <= w[1].0,
-                "overlap between {:?} and {:?}",
-                w[0],
-                w[1]
-            );
+            assert!(w[0].1 <= w[1].0, "overlap between {:?} and {:?}", w[0], w[1]);
         }
         for &(s, e) in &ranges {
             assert!(s >= arena.start() && e <= arena.start() + arena.layout.size());
@@ -808,11 +771,7 @@ mod tests {
                     Some(p) => {
                         assert_eq!(p.as_ptr() as usize % align, 0);
                         tag = tag.wrapping_add(1);
-                        let entry = Live {
-                            ptr: p.as_ptr(),
-                            layout: l,
-                            tag,
-                        };
+                        let entry = Live { ptr: p.as_ptr(), layout: l, tag };
                         fill(&entry);
                         live.push(entry);
                         successes += 1;
@@ -831,10 +790,7 @@ mod tests {
                 assert_disjoint(&live, &arena);
             }
         }
-        assert!(
-            successes > ops / 4,
-            "too few successful allocations ({successes})"
-        );
+        assert!(successes > ops / 4, "too few successful allocations ({successes})");
         // Allocation failures are expected when the arena is full; the test
         // only cares that they do not corrupt anything.
         let _ = failures;
@@ -894,10 +850,7 @@ mod tests {
         unsafe { heap.init(arena.start(), 64 * 1024) }.unwrap();
         assert!(heap.is_initialized());
         // SAFETY: arena memory.
-        assert_eq!(
-            unsafe { heap.init(arena.start(), 64 * 1024) },
-            Err(HeapError::AlreadyInitialized)
-        );
+        assert_eq!(unsafe { heap.init(arena.start(), 64 * 1024) }, Err(HeapError::AlreadyInitialized));
 
         let mut ptrs = Vec::new();
         for i in 0..100usize {
@@ -913,18 +866,14 @@ mod tests {
         let z = unsafe { heap.alloc_zeroed(lz) };
         assert!(!z.is_null());
         // SAFETY: 300 bytes were allocated.
-        assert!(unsafe { core::slice::from_raw_parts(z, 300) }
-            .iter()
-            .all(|&b| b == 0));
+        assert!(unsafe { core::slice::from_raw_parts(z, 300) }.iter().all(|&b| b == 0));
         // Realloc through the default method keeps the contents.
         // SAFETY: valid pointer/layout pair.
         unsafe {
             ptr::write_bytes(z, 0xAB, 300);
             let r = heap.realloc(z, lz, 5000);
             assert!(!r.is_null());
-            assert!(core::slice::from_raw_parts(r, 300)
-                .iter()
-                .all(|&b| b == 0xAB));
+            assert!(core::slice::from_raw_parts(r, 300).iter().all(|&b| b == 0xAB));
             heap.dealloc(r, layout(5000, 16));
         }
         heap.check_invariants().unwrap();

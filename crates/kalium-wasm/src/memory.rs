@@ -12,7 +12,7 @@
 
 use crate::budget::BudgetRef;
 use crate::error::Trap;
-use crate::types::{MemType, ResizableLimits, MAX_PAGES, PAGE_SIZE};
+use crate::types::{MAX_PAGES, MemType, PAGE_SIZE, ResizableLimits};
 use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::cell::RefCell;
@@ -96,15 +96,7 @@ impl Memory {
     /// `min_pages > max_pages` or the allocation would be larger than
     /// 4 GiB.
     pub fn new(min_pages: u32, max_pages: u32) -> Option<Memory> {
-        Memory::with_type(
-            MemType {
-                limits: ResizableLimits {
-                    min: min_pages,
-                    max: Some(max_pages),
-                },
-            },
-            max_pages,
-        )
+        Memory::with_type(MemType { limits: ResizableLimits { min: min_pages, max: Some(max_pages) } }, max_pages)
     }
 
     /// Create a memory of type `ty` that may grow to the smaller of the
@@ -120,13 +112,7 @@ impl Memory {
         let mut bytes = Vec::new();
         bytes.try_reserve_exact(len).ok()?;
         bytes.resize(len, 0);
-        Some(Memory {
-            bytes,
-            max_pages,
-            declared_max: ty.limits.max,
-            budget: None,
-            charged: 0,
-        })
+        Some(Memory { bytes, max_pages, declared_max: ty.limits.max, budget: None, charged: 0 })
     }
 
     /// Create a memory of type `ty` (capped like [`Memory::with_type`])
@@ -142,13 +128,7 @@ impl Memory {
         if pages < ty.limits.min || pages > max_pages {
             return None;
         }
-        Some(Memory {
-            bytes,
-            max_pages,
-            declared_max: ty.limits.max,
-            budget: None,
-            charged: 0,
-        })
+        Some(Memory { bytes, max_pages, declared_max: ty.limits.max, budget: None, charged: 0 })
     }
 
     /// Wrap the memory in a shared handle.
@@ -161,12 +141,7 @@ impl Memory {
     /// against (`import.min <= size`, and `import.max`, if given, requires
     /// a declared maximum that is no larger).
     pub fn ty(&self) -> MemType {
-        MemType {
-            limits: ResizableLimits {
-                min: self.size_pages(),
-                max: self.declared_max,
-            },
-        }
+        MemType { limits: ResizableLimits { min: self.size_pages(), max: self.declared_max } }
     }
 
     /// Whether this memory can be imported as `import` (import matching
@@ -242,10 +217,7 @@ impl Memory {
             return Err(Trap::OutOfBounds);
         }
         // `end <= len <= usize::MAX`, so the casts are lossless.
-        let src = self
-            .bytes
-            .get(start as usize..end as usize)
-            .ok_or(Trap::OutOfBounds)?;
+        let src = self.bytes.get(start as usize..end as usize).ok_or(Trap::OutOfBounds)?;
         let mut out = [0u8; N];
         out.copy_from_slice(src);
         Ok(out)
@@ -260,10 +232,7 @@ impl Memory {
         if end > self.bytes.len() as u64 {
             return Err(Trap::OutOfBounds);
         }
-        let dst = self
-            .bytes
-            .get_mut(start as usize..end as usize)
-            .ok_or(Trap::OutOfBounds)?;
+        let dst = self.bytes.get_mut(start as usize..end as usize).ok_or(Trap::OutOfBounds)?;
         dst.copy_from_slice(data);
         Ok(())
     }
@@ -339,55 +308,21 @@ mod tests {
         assert_eq!(m.ty().limits, lim(1, Some(3)));
         // Declared without a maximum: the runtime cap does not show up in
         // the type, so an import that wants a maximum does not match.
-        let mut m = Memory::with_type(
-            MemType {
-                limits: lim(2, None),
-            },
-            4,
-        )
-        .unwrap();
+        let mut m = Memory::with_type(MemType { limits: lim(2, None) }, 4).unwrap();
         assert_eq!(m.max_pages(), 4);
         assert_eq!(m.ty().limits, lim(2, None));
-        assert!(m.matches(&MemType {
-            limits: lim(0, None)
-        }));
-        assert!(m.matches(&MemType {
-            limits: lim(2, None)
-        }));
-        assert!(!m.matches(&MemType {
-            limits: lim(3, None)
-        }));
-        assert!(!m.matches(&MemType {
-            limits: lim(0, Some(4))
-        }));
+        assert!(m.matches(&MemType { limits: lim(0, None) }));
+        assert!(m.matches(&MemType { limits: lim(2, None) }));
+        assert!(!m.matches(&MemType { limits: lim(3, None) }));
+        assert!(!m.matches(&MemType { limits: lim(0, Some(4)) }));
         // Growth is reflected in the type's minimum.
         assert_eq!(m.grow(1), Some(2));
-        assert!(m.matches(&MemType {
-            limits: lim(3, None)
-        }));
-        let m = Memory::with_type(
-            MemType {
-                limits: lim(1, Some(2)),
-            },
-            65536,
-        )
-        .unwrap();
-        assert!(m.matches(&MemType {
-            limits: lim(1, Some(2))
-        }));
-        assert!(m.matches(&MemType {
-            limits: lim(1, Some(3))
-        }));
-        assert!(!m.matches(&MemType {
-            limits: lim(1, Some(1))
-        }));
-        assert!(Memory::with_type(
-            MemType {
-                limits: lim(3, Some(2))
-            },
-            65536
-        )
-        .is_none());
+        assert!(m.matches(&MemType { limits: lim(3, None) }));
+        let m = Memory::with_type(MemType { limits: lim(1, Some(2)) }, 65536).unwrap();
+        assert!(m.matches(&MemType { limits: lim(1, Some(2)) }));
+        assert!(m.matches(&MemType { limits: lim(1, Some(3)) }));
+        assert!(!m.matches(&MemType { limits: lim(1, Some(1)) }));
+        assert!(Memory::with_type(MemType { limits: lim(3, Some(2)) }, 65536).is_none());
         // Shared handles see each other's growth.
         let a = Memory::new(1, 3).unwrap().into_shared();
         let b = a.clone();
@@ -417,10 +352,7 @@ mod tests {
         let mut buf = [0u8; 4];
         m.read(0, &mut buf).unwrap();
         assert_eq!(buf, [1, 2, 3, 4]);
-        assert_eq!(
-            m.write(PAGE_SIZE as u32 - 3, &[0; 4]),
-            Err(Trap::OutOfBounds)
-        );
+        assert_eq!(m.write(PAGE_SIZE as u32 - 3, &[0; 4]), Err(Trap::OutOfBounds));
         m.write(PAGE_SIZE as u32 - 4, &[9; 4]).unwrap();
         assert_eq!(m.read(u32::MAX, &mut buf), Err(Trap::OutOfBounds));
         assert_eq!(m.read(u32::MAX, &mut []), Err(Trap::OutOfBounds));
@@ -430,18 +362,9 @@ mod tests {
         assert_eq!(m.fill(PAGE_SIZE as u32, 0, 1), Err(Trap::OutOfBounds));
         m.copy_within(12, 10, 4).unwrap();
         m.copy_within(0, 10, 8).unwrap();
-        assert_eq!(
-            m.slice(0, 8).unwrap(),
-            &[0xAB, 0xAB, 0xAB, 0xAB, 0xAB, 0xAB, 0, 0]
-        );
-        assert_eq!(
-            m.copy_within(PAGE_SIZE as u32 - 2, 0, 4),
-            Err(Trap::OutOfBounds)
-        );
-        assert_eq!(
-            m.copy_within(0, PAGE_SIZE as u32 - 2, 4),
-            Err(Trap::OutOfBounds)
-        );
+        assert_eq!(m.slice(0, 8).unwrap(), &[0xAB, 0xAB, 0xAB, 0xAB, 0xAB, 0xAB, 0, 0]);
+        assert_eq!(m.copy_within(PAGE_SIZE as u32 - 2, 0, 4), Err(Trap::OutOfBounds));
+        assert_eq!(m.copy_within(0, PAGE_SIZE as u32 - 2, 4), Err(Trap::OutOfBounds));
     }
 
     #[test]
@@ -457,10 +380,7 @@ mod tests {
         assert_eq!(m.load::<4>(u32::MAX, 1), Err(Trap::OutOfBounds));
         assert_eq!(m.load::<4>(1, u32::MAX), Err(Trap::OutOfBounds));
         assert_eq!(m.store(u32::MAX, u32::MAX, &[0]), Err(Trap::OutOfBounds));
-        assert_eq!(
-            m.store(PAGE_SIZE as u32 - 1, 0, &[7, 8]),
-            Err(Trap::OutOfBounds)
-        );
+        assert_eq!(m.store(PAGE_SIZE as u32 - 1, 0, &[7, 8]), Err(Trap::OutOfBounds));
         m.store(PAGE_SIZE as u32 - 1, 0, &[7]).unwrap();
         assert_eq!(m.load::<1>(PAGE_SIZE as u32 - 1, 0), Ok([7]));
         // Zero-length accesses at the end are fine, one past it is not.

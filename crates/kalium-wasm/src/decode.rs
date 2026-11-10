@@ -13,10 +13,7 @@
 
 use crate::error::Error;
 use crate::instr::{BlockType, BrTable, ConstExpr, FuncBody, Instr, MemArg};
-use crate::module::{
-    Data, DataMode, ElemItems, ElemMode, Element, Export, ExportDesc, Global, Import, ImportDesc,
-    Module,
-};
+use crate::module::{Data, DataMode, ElemItems, ElemMode, Element, Export, ExportDesc, Global, Import, ImportDesc, Module};
 use crate::types::{FuncType, GlobalType, MemType, RefType, ResizableLimits, TableType, ValType};
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -39,10 +36,7 @@ pub const MAX_LOCALS_PER_BYTE: u32 = 64;
 
 /// The number of locals a module of `len` bytes may declare in total.
 fn locals_budget(len: usize) -> u32 {
-    u32::try_from(len)
-        .unwrap_or(u32::MAX)
-        .saturating_mul(MAX_LOCALS_PER_BYTE)
-        .min(MAX_LOCALS)
+    u32::try_from(len).unwrap_or(u32::MAX).saturating_mul(MAX_LOCALS_PER_BYTE).min(MAX_LOCALS)
 }
 
 /// Decode a module without validating it. [`Module::new`] decodes *and*
@@ -92,9 +86,7 @@ pub fn decode(bytes: &[u8]) -> Result<Module, Error> {
                 seen_code = true;
                 let count = s.u32()? as usize;
                 if count != m.funcs.len() {
-                    return Err(
-                        s.err_at(start, "function and code section have inconsistent lengths")
-                    );
+                    return Err(s.err_at(start, "function and code section have inconsistent lengths"));
                 }
                 let mut code = Vec::with_capacity(count.min(s.remaining()));
                 let mut locals_budget = locals_budget(bytes.len());
@@ -118,10 +110,7 @@ pub fn decode(bytes: &[u8]) -> Result<Module, Error> {
     }
     if let Some(n) = m.data_count {
         if n as usize != m.data.len() {
-            return Err(r.err_at(
-                r.pos,
-                "data count and data section have inconsistent lengths",
-            ));
+            return Err(r.err_at(r.pos, "data count and data section have inconsistent lengths"));
         }
     } else if uses_data_count {
         return Err(r.err_at(r.pos, "data count section required"));
@@ -163,22 +152,12 @@ struct Reader<'a> {
 
 impl<'a> Reader<'a> {
     fn new(bytes: &'a [u8]) -> Reader<'a> {
-        Reader {
-            bytes,
-            pos: 0,
-            limit: bytes.len(),
-            nested: false,
-        }
+        Reader { bytes, pos: 0, limit: bytes.len(), nested: false }
     }
 
     /// A reader over the next `len` bytes (caller checked `len <= remaining`).
     fn sub(&self, len: usize) -> Reader<'a> {
-        Reader {
-            bytes: self.bytes,
-            pos: self.pos,
-            limit: self.pos + len,
-            nested: true,
-        }
+        Reader { bytes: self.bytes, pos: self.pos, limit: self.pos + len, nested: true }
     }
 
     fn eof(&self) -> bool {
@@ -202,11 +181,7 @@ impl<'a> Reader<'a> {
     }
 
     fn eof_err(&self) -> Error {
-        if self.nested {
-            self.err("unexpected end of section or function")
-        } else {
-            self.err("unexpected end")
-        }
+        if self.nested { self.err("unexpected end of section or function") } else { self.err("unexpected end") }
     }
 
     fn byte(&mut self) -> Result<u8, Error> {
@@ -315,9 +290,7 @@ impl<'a> Reader<'a> {
 
     fn f64_bits(&mut self) -> Result<u64, Error> {
         let b = self.take(8)?;
-        Ok(u64::from_le_bytes([
-            b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
-        ]))
+        Ok(u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]))
     }
 
     /// The memory index byte of MVP memory instructions.
@@ -334,10 +307,7 @@ impl<'a> Reader<'a> {
     /// A vector: a count followed by that many `f` items. The capacity hint
     /// is bounded by the remaining input so a lying count cannot force a
     /// huge allocation.
-    fn vec<T>(
-        &mut self,
-        mut f: impl FnMut(&mut Reader<'a>) -> Result<T, Error>,
-    ) -> Result<Vec<T>, Error> {
+    fn vec<T>(&mut self, mut f: impl FnMut(&mut Reader<'a>) -> Result<T, Error>) -> Result<Vec<T>, Error> {
         let count = self.u32()? as usize;
         let mut v = Vec::with_capacity(count.min(self.remaining()));
         for _ in 0..count {
@@ -389,17 +359,11 @@ impl<'a> Reader<'a> {
     fn limits(&mut self) -> Result<ResizableLimits, Error> {
         let off = self.pos;
         match self.byte()? {
-            0x00 => Ok(ResizableLimits {
-                min: self.u32()?,
-                max: None,
-            }),
+            0x00 => Ok(ResizableLimits { min: self.u32()?, max: None }),
             0x01 => {
                 let min = self.u32()?;
                 let max = self.u32()?;
-                Ok(ResizableLimits {
-                    min,
-                    max: Some(max),
-                })
+                Ok(ResizableLimits { min, max: Some(max) })
             }
             0x02 | 0x03 => Err(self.unsupported(off, "shared memory (threads) is not supported")),
             _ => Err(self.err_at(off, "malformed limits flags")),
@@ -413,9 +377,7 @@ impl<'a> Reader<'a> {
     }
 
     fn mem_type(&mut self) -> Result<MemType, Error> {
-        Ok(MemType {
-            limits: self.limits()?,
-        })
+        Ok(MemType { limits: self.limits()? })
     }
 
     fn global_type(&mut self) -> Result<GlobalType, Error> {
@@ -438,13 +400,9 @@ impl<'a> Reader<'a> {
             }
             Some(&b) if self.pos < self.limit && val_type_from_byte(b).is_some() => {
                 self.pos += 1;
-                Ok(BlockType::Val(
-                    val_type_from_byte(b).unwrap_or(ValType::I32),
-                ))
+                Ok(BlockType::Val(val_type_from_byte(b).unwrap_or(ValType::I32)))
             }
-            Some(0x7B) if self.pos < self.limit => {
-                Err(self.unsupported(off, "SIMD (v128) is not supported"))
-            }
+            Some(0x7B) if self.pos < self.limit => Err(self.unsupported(off, "SIMD (v128) is not supported")),
             _ => {
                 let idx = self.s33()?;
                 if idx < 0 {
@@ -507,78 +465,46 @@ impl<'a> Reader<'a> {
             0 => {
                 let offset = self.const_expr()?;
                 let items = ElemItems::Funcs(self.vec(|s| s.u32())?);
-                Element {
-                    ty: RefType::FuncRef,
-                    items,
-                    mode: ElemMode::Active { table: 0, offset },
-                }
+                Element { ty: RefType::FuncRef, items, mode: ElemMode::Active { table: 0, offset } }
             }
             1 => {
                 let ty = self.elem_kind()?;
                 let items = ElemItems::Funcs(self.vec(|s| s.u32())?);
-                Element {
-                    ty,
-                    items,
-                    mode: ElemMode::Passive,
-                }
+                Element { ty, items, mode: ElemMode::Passive }
             }
             2 => {
                 let table = self.u32()?;
                 let offset = self.const_expr()?;
                 let ty = self.elem_kind()?;
                 let items = ElemItems::Funcs(self.vec(|s| s.u32())?);
-                Element {
-                    ty,
-                    items,
-                    mode: ElemMode::Active { table, offset },
-                }
+                Element { ty, items, mode: ElemMode::Active { table, offset } }
             }
             3 => {
                 let ty = self.elem_kind()?;
                 let items = ElemItems::Funcs(self.vec(|s| s.u32())?);
-                Element {
-                    ty,
-                    items,
-                    mode: ElemMode::Declarative,
-                }
+                Element { ty, items, mode: ElemMode::Declarative }
             }
             4 => {
                 let offset = self.const_expr()?;
                 let items = ElemItems::Exprs(self.vec(|s| s.const_expr())?);
-                Element {
-                    ty: RefType::FuncRef,
-                    items,
-                    mode: ElemMode::Active { table: 0, offset },
-                }
+                Element { ty: RefType::FuncRef, items, mode: ElemMode::Active { table: 0, offset } }
             }
             5 => {
                 let ty = self.ref_type()?;
                 let items = ElemItems::Exprs(self.vec(|s| s.const_expr())?);
-                Element {
-                    ty,
-                    items,
-                    mode: ElemMode::Passive,
-                }
+                Element { ty, items, mode: ElemMode::Passive }
             }
             6 => {
                 let table = self.u32()?;
                 let offset = self.const_expr()?;
                 let ty = self.ref_type()?;
                 let items = ElemItems::Exprs(self.vec(|s| s.const_expr())?);
-                Element {
-                    ty,
-                    items,
-                    mode: ElemMode::Active { table, offset },
-                }
+                Element { ty, items, mode: ElemMode::Active { table, offset } }
             }
             7 => {
                 let ty = self.ref_type()?;
                 let items = ElemItems::Exprs(self.vec(|s| s.const_expr())?);
-                Element {
-                    ty,
-                    items,
-                    mode: ElemMode::Declarative,
-                }
+                Element { ty, items, mode: ElemMode::Declarative }
             }
             _ => return Err(self.err_at(off, "malformed elements segment kind")),
         })
@@ -588,10 +514,7 @@ impl<'a> Reader<'a> {
         let off = self.pos;
         let flags = self.u32()?;
         let mode = match flags {
-            0 => DataMode::Active {
-                memory: 0,
-                offset: self.const_expr()?,
-            },
+            0 => DataMode::Active { memory: 0, offset: self.const_expr()? },
             1 => DataMode::Passive,
             2 => {
                 let memory = self.u32()?;
@@ -611,11 +534,7 @@ impl<'a> Reader<'a> {
     /// (see [`MAX_LOCALS_PER_BYTE`]); every run is charged to it before it is
     /// expanded, so a module cannot make the decoder allocate more than the
     /// budget however it spreads its locals over functions.
-    fn func_body(
-        &mut self,
-        uses_data_count: &mut bool,
-        locals_budget: &mut u32,
-    ) -> Result<FuncBody, Error> {
+    fn func_body(&mut self, uses_data_count: &mut bool, locals_budget: &mut u32) -> Result<FuncBody, Error> {
         let size = self.u32()? as usize;
         let start = self.pos;
         if size > self.remaining() {
@@ -635,9 +554,7 @@ impl<'a> Reader<'a> {
                 Some(t) if t <= MAX_LOCALS => t,
                 _ => return Err(b.err_at(off, "too many locals")),
             };
-            *locals_budget = locals_budget.checked_sub(n).ok_or(Error::Limit {
-                msg: "too many locals in module",
-            })?;
+            *locals_budget = locals_budget.checked_sub(n).ok_or(Error::Limit { msg: "too many locals in module" })?;
             locals.extend(core::iter::repeat_n(ty, n as usize));
         }
 
@@ -651,11 +568,7 @@ impl<'a> Reader<'a> {
             return Err(b.err("operators remaining after end of function"));
         }
         self.pos = b.limit;
-        Ok(FuncBody {
-            locals,
-            instrs,
-            br_tables,
-        })
+        Ok(FuncBody { locals, instrs, br_tables })
     }
 
     /// A constant expression: instructions up to and excluding the
@@ -666,12 +579,7 @@ impl<'a> Reader<'a> {
         let mut br_tables = Vec::new();
         let mut instrs = InstrDecoder::new(self).decode(&mut br_tables)?;
         if !br_tables.is_empty() {
-            return Err(Error::Invalid {
-                msg: "constant expression required",
-                func: None,
-                instr: None,
-            }
-            .with_offset(off));
+            return Err(Error::Invalid { msg: "constant expression required", func: None, instr: None }.with_offset(off));
         }
         instrs.pop(); // the trailing `end`
         Ok(ConstExpr { instrs })
@@ -728,60 +636,35 @@ struct InstrDecoder<'r, 'a> {
 
 impl<'r, 'a> InstrDecoder<'r, 'a> {
     fn new(r: &'r mut Reader<'a>) -> Self {
-        InstrDecoder {
-            r,
-            uses_data_count: false,
-        }
+        InstrDecoder { r, uses_data_count: false }
     }
 
     fn decode(&mut self, br_tables: &mut Vec<BrTable>) -> Result<Vec<Instr>, Error> {
         let mut instrs: Vec<Instr> = Vec::new();
         let mut frames: Vec<Frame> = Vec::new();
-        frames.push(Frame {
-            opener: 0,
-            else_: None,
-            kind: FrameKind::Func,
-        });
+        frames.push(Frame { opener: 0, else_: None, kind: FrameKind::Func });
 
         loop {
             let off = self.r.pos;
-            let idx = u32::try_from(instrs.len()).map_err(|_| Error::Limit {
-                msg: "function body too large",
-            })?;
+            let idx = u32::try_from(instrs.len()).map_err(|_| Error::Limit { msg: "function body too large" })?;
             let op = self.r.byte()?;
             let instr = match op {
                 0x00 => Instr::Unreachable,
                 0x01 => Instr::Nop,
                 0x02 => {
                     let ty = self.r.block_type()?;
-                    frames.push(Frame {
-                        opener: idx,
-                        else_: None,
-                        kind: FrameKind::Block,
-                    });
+                    frames.push(Frame { opener: idx, else_: None, kind: FrameKind::Block });
                     Instr::Block { ty, end: 0 }
                 }
                 0x03 => {
                     let ty = self.r.block_type()?;
-                    frames.push(Frame {
-                        opener: idx,
-                        else_: None,
-                        kind: FrameKind::Loop,
-                    });
+                    frames.push(Frame { opener: idx, else_: None, kind: FrameKind::Loop });
                     Instr::Loop { ty, end: 0 }
                 }
                 0x04 => {
                     let ty = self.r.block_type()?;
-                    frames.push(Frame {
-                        opener: idx,
-                        else_: None,
-                        kind: FrameKind::If,
-                    });
-                    Instr::If {
-                        ty,
-                        else_: 0,
-                        end: 0,
-                    }
+                    frames.push(Frame { opener: idx, else_: None, kind: FrameKind::If });
+                    Instr::If { ty, else_: 0, end: 0 }
                 }
                 0x05 => {
                     let frame = match frames.last_mut() {
@@ -810,9 +693,8 @@ impl<'r, 'a> InstrDecoder<'r, 'a> {
                 0x0E => {
                     let targets = self.r.vec(|s| s.u32())?;
                     let default = self.r.u32()?;
-                    let table = u32::try_from(br_tables.len()).map_err(|_| Error::Limit {
-                        msg: "too many br_table instructions",
-                    })?;
+                    let table =
+                        u32::try_from(br_tables.len()).map_err(|_| Error::Limit { msg: "too many br_table instructions" })?;
                     br_tables.push(BrTable { targets, default });
                     Instr::BrTable(table)
                 }
@@ -824,16 +706,8 @@ impl<'r, 'a> InstrDecoder<'r, 'a> {
                     Instr::CallIndirect { ty, table }
                 }
                 0x12 | 0x13 => return Err(self.r.unsupported(off, "tail calls are not supported")),
-                0x06..=0x0A | 0x18 | 0x19 => {
-                    return Err(self
-                        .r
-                        .unsupported(off, "exception handling is not supported"))
-                }
-                0x14 | 0x15 => {
-                    return Err(self
-                        .r
-                        .unsupported(off, "typed function references are not supported"))
-                }
+                0x06..=0x0A | 0x18 | 0x19 => return Err(self.r.unsupported(off, "exception handling is not supported")),
+                0x14 | 0x15 => return Err(self.r.unsupported(off, "typed function references are not supported")),
 
                 0x1A => Instr::Drop,
                 0x1B => Instr::Select,
@@ -1034,11 +908,7 @@ impl<'r, 'a> InstrDecoder<'r, 'a> {
 
                 0xFC => self.prefixed_fc(off)?,
                 0xFD => return Err(self.r.unsupported(off, "SIMD is not supported")),
-                0xFE => {
-                    return Err(self
-                        .r
-                        .unsupported(off, "threads (atomics) are not supported"))
-                }
+                0xFE => return Err(self.r.unsupported(off, "threads (atomics) are not supported")),
                 _ => return Err(self.r.err_at(off, "illegal opcode")),
             };
             instrs.push(instr);
@@ -1119,10 +989,10 @@ fn patch_end(instrs: &mut [Instr], frame: &Frame, end_idx: u32) {
             _ => {}
         }
     }
-    if let Some(else_idx) = frame.else_ {
-        if let Some(Instr::Else { end }) = instrs.get_mut(else_idx as usize) {
-            *end = end_idx;
-        }
+    if let Some(else_idx) = frame.else_
+        && let Some(Instr::Else { end }) = instrs.get_mut(else_idx as usize)
+    {
+        *end = end_idx;
     }
 }
 
@@ -1151,27 +1021,12 @@ mod tests {
         assert_eq!(leb_u32(&[0xFF, 0xFF, 0xFF, 0xFF, 0x0F]).unwrap(), u32::MAX);
         // Redundant but valid encodings.
         assert_eq!(leb_u32(&[0x80, 0x80, 0x80, 0x80, 0x00]).unwrap(), 0);
-        assert_eq!(
-            leb_u32(&[0xFF, 0xFF, 0xFF, 0xFF, 0x1F]),
-            Err(Error::Malformed {
-                offset: 4,
-                msg: "integer too large"
-            })
-        );
+        assert_eq!(leb_u32(&[0xFF, 0xFF, 0xFF, 0xFF, 0x1F]), Err(Error::Malformed { offset: 4, msg: "integer too large" }));
         assert_eq!(
             leb_u32(&[0x80, 0x80, 0x80, 0x80, 0x80, 0x00]),
-            Err(Error::Malformed {
-                offset: 0,
-                msg: "integer representation too long"
-            })
+            Err(Error::Malformed { offset: 0, msg: "integer representation too long" })
         );
-        assert_eq!(
-            leb_u32(&[0x80]),
-            Err(Error::Malformed {
-                offset: 1,
-                msg: "unexpected end"
-            })
-        );
+        assert_eq!(leb_u32(&[0x80]), Err(Error::Malformed { offset: 1, msg: "unexpected end" }));
     }
 
     #[test]
@@ -1191,18 +1046,10 @@ mod tests {
         assert!(leb_i32(&[0x80, 0x80, 0x80, 0x80, 0x80, 0x00]).is_err());
 
         assert_eq!(leb_i64(&[0x7F]).unwrap(), -1);
-        assert_eq!(
-            leb_i64(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00]).unwrap(),
-            i64::MAX
-        );
-        assert_eq!(
-            leb_i64(&[0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x7F]).unwrap(),
-            i64::MIN
-        );
+        assert_eq!(leb_i64(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00]).unwrap(), i64::MAX);
+        assert_eq!(leb_i64(&[0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x7F]).unwrap(), i64::MIN);
         assert!(leb_i64(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01]).is_err());
-        assert!(
-            leb_i64(&[0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00]).is_err()
-        );
+        assert!(leb_i64(&[0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00]).is_err());
     }
 
     #[test]
@@ -1223,26 +1070,8 @@ mod tests {
     #[test]
     fn header() {
         assert_eq!(decode(b"\0asm\x01\0\0\0").unwrap(), Module::default());
-        assert_eq!(
-            decode(b"\0wasm").unwrap_err(),
-            Error::Malformed {
-                offset: 0,
-                msg: "magic header not detected"
-            }
-        );
-        assert_eq!(
-            decode(b"\0asm\x02\0\0\0").unwrap_err(),
-            Error::Malformed {
-                offset: 4,
-                msg: "unknown binary version"
-            }
-        );
-        assert_eq!(
-            decode(b"").unwrap_err(),
-            Error::Malformed {
-                offset: 0,
-                msg: "magic header not detected"
-            }
-        );
+        assert_eq!(decode(b"\0wasm").unwrap_err(), Error::Malformed { offset: 0, msg: "magic header not detected" });
+        assert_eq!(decode(b"\0asm\x02\0\0\0").unwrap_err(), Error::Malformed { offset: 4, msg: "unknown binary version" });
+        assert_eq!(decode(b"").unwrap_err(), Error::Malformed { offset: 0, msg: "magic header not detected" });
     }
 }

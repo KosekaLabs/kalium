@@ -29,7 +29,7 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use kalium_sdk::{exit, Cap, Console, Errno, Receiver, Sender};
+use kalium_sdk::{Cap, Console, Errno, Receiver, Sender, exit};
 
 /// The state: 65536 words, 256 KiB of linear memory.
 const WORDS: usize = 65536;
@@ -74,7 +74,7 @@ fn checksum() -> u32 {
     h
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn _start() {
     let console = Console::from_cap(Cap::slot(0));
     console.set_global();
@@ -102,7 +102,7 @@ pub extern "C" fn _start() {
 
 /// The entry point of an instance restored from the snapshot (`entry 1`
 /// of `spawn_snapshot`).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn resume() {
     let console = Console::from_cap(Cap::slot(0));
     if READY.load(Ordering::Relaxed) != 1 {

@@ -241,10 +241,7 @@ fn memory_ops() {
             ("i64.load16_s", I64Load16S(ma(1, 0))),
             ("i64.load16_u", I64Load16U(ma(1, 0))),
             ("i64.load32_s", I64Load32S(ma(2, 0))),
-            (
-                "i64.load32_u offset=4294967295",
-                I64Load32U(ma(2, u32::MAX)),
-            ),
+            ("i64.load32_u offset=4294967295", I64Load32U(ma(2, u32::MAX))),
             ("i32.store", I32Store(ma(2, 0))),
             ("i64.store", I64Store(ma(3, 0))),
             ("f32.store", F32Store(ma(2, 0))),
@@ -321,36 +318,21 @@ fn block_types_and_end_indices() {
     assert_eq!(
         got,
         vec![
-            Block {
-                ty: BlockType::Empty,
-                end: 1
-            },
+            Block { ty: BlockType::Empty, end: 1 },
             End,
-            Block {
-                ty: BlockType::Val(ValType::I32),
-                end: 4
-            },
+            Block { ty: BlockType::Val(ValType::I32), end: 4 },
             I32Const(1),
             End,
-            Loop {
-                ty: BlockType::Val(ValType::F64),
-                end: 7
-            },
+            Loop { ty: BlockType::Val(ValType::F64), end: 7 },
             F64Const(0),
             End,
-            Block {
-                ty: BlockType::Type(0),
-                end: 11
-            },
+            Block { ty: BlockType::Type(0), end: 11 },
             Drop,
             I64Const(2),
             End,
             // `(param i32)` with no result gets its own type index (1 is the
             // implicit type of the function itself).
-            Loop {
-                ty: BlockType::Type(2),
-                end: 14
-            },
+            Loop { ty: BlockType::Type(2), end: 14 },
             Drop,
             End,
         ]
@@ -384,11 +366,7 @@ fn if_else_resolution() {
         got,
         vec![
             LocalGet(0),
-            If {
-                ty: BlockType::Val(ValType::I32),
-                else_: 3,
-                end: 5
-            },
+            If { ty: BlockType::Val(ValType::I32), else_: 3, end: 5 },
             I32Const(1),
             Else { end: 5 },
             I32Const(2),
@@ -396,34 +374,19 @@ fn if_else_resolution() {
             Drop,
             LocalGet(0),
             // No else arm: `else_ == end`.
-            If {
-                ty: BlockType::Empty,
-                else_: 10,
-                end: 10
-            },
+            If { ty: BlockType::Empty, else_: 10, end: 10 },
             Nop,
             End,
             LocalGet(0),
-            If {
-                ty: BlockType::Empty,
-                else_: 19,
-                end: 23
-            },
+            If { ty: BlockType::Empty, else_: 19, end: 23 },
             LocalGet(0),
-            If {
-                ty: BlockType::Empty,
-                else_: 16,
-                end: 18
-            },
+            If { ty: BlockType::Empty, else_: 16, end: 18 },
             Nop,
             Else { end: 18 },
             Nop,
             End,
             Else { end: 23 },
-            Block {
-                ty: BlockType::Empty,
-                end: 22
-            },
+            Block { ty: BlockType::Empty, end: 22 },
             Br(0),
             End,
             End,
@@ -461,23 +424,9 @@ fn branches_and_br_table() {
 
 #[test]
 fn locals_are_expanded() {
-    let m = module(
-        "(module (func (param i32 f32) (local i64 i64 i64) (local f64) (local) (local funcref)))",
-    );
-    assert_eq!(
-        m.code[0].locals,
-        vec![
-            ValType::I64,
-            ValType::I64,
-            ValType::I64,
-            ValType::F64,
-            ValType::FuncRef
-        ]
-    );
-    assert_eq!(
-        m.func_type_of(0).unwrap().params,
-        vec![ValType::I32, ValType::F32]
-    );
+    let m = module("(module (func (param i32 f32) (local i64 i64 i64) (local f64) (local) (local funcref)))");
+    assert_eq!(m.code[0].locals, vec![ValType::I64, ValType::I64, ValType::I64, ValType::F64, ValType::FuncRef]);
+    assert_eq!(m.func_type_of(0).unwrap().params, vec![ValType::I32, ValType::F32]);
 }
 
 // ---------------------------------------------------------------------------
@@ -523,10 +472,7 @@ fn all_sections() {
     );
 
     assert_eq!(m.types.len(), 4); // $t, $u and the implicit types of $log and $start
-    assert_eq!(
-        m.types[0],
-        FuncType::new(vec![ValType::I32, ValType::I32], vec![ValType::I32])
-    );
+    assert_eq!(m.types[0], FuncType::new(vec![ValType::I32, ValType::I32], vec![ValType::I32]));
 
     assert_eq!(m.imports().len(), 4);
     assert_eq!(m.imports()[0].module, "env");
@@ -534,30 +480,13 @@ fn all_sections() {
     assert!(matches!(m.imports()[0].desc, ImportDesc::Func(_)));
     assert_eq!(
         m.imports()[1].desc,
-        ImportDesc::Memory(kalium_wasm::MemType {
-            limits: ResizableLimits {
-                min: 1,
-                max: Some(4)
-            }
-        })
+        ImportDesc::Memory(kalium_wasm::MemType { limits: ResizableLimits { min: 1, max: Some(4) } })
     );
     assert_eq!(
         m.imports()[2].desc,
-        ImportDesc::Table(kalium_wasm::TableType {
-            elem: RefType::FuncRef,
-            limits: ResizableLimits {
-                min: 2,
-                max: Some(10)
-            }
-        })
+        ImportDesc::Table(kalium_wasm::TableType { elem: RefType::FuncRef, limits: ResizableLimits { min: 2, max: Some(10) } })
     );
-    assert_eq!(
-        m.imports()[3].desc,
-        ImportDesc::Global(GlobalType {
-            ty: ValType::I32,
-            mutable: true
-        })
-    );
+    assert_eq!(m.imports()[3].desc, ImportDesc::Global(GlobalType { ty: ValType::I32, mutable: true }));
 
     assert_eq!(m.num_imported_funcs(), 1);
     assert_eq!(m.num_funcs(), 4);
@@ -565,30 +494,18 @@ fn all_sections() {
     assert_eq!(m.num_memories(), 2);
     assert_eq!(m.num_globals(), 4);
     assert_eq!(m.func_type_of(1), Some(&m.types[0]));
-    assert_eq!(
-        m.func_type(m.func_type_index(3).unwrap()).results,
-        vec![ValType::I32, ValType::I64]
-    );
+    assert_eq!(m.func_type(m.func_type_index(3).unwrap()).results, vec![ValType::I32, ValType::I64]);
     assert!(m.func_body(0).is_none());
     assert_eq!(m.func_body(1).unwrap().instrs.len(), 4);
     assert!(m.func_body(4).is_none());
     assert_eq!(m.table_type(1).unwrap().elem, RefType::ExternRef);
-    assert_eq!(
-        m.memory_type(1).unwrap().limits,
-        ResizableLimits { min: 0, max: None }
-    );
+    assert_eq!(m.memory_type(1).unwrap().limits, ResizableLimits { min: 0, max: None });
     assert!(m.global_type(0).unwrap().mutable);
     assert_eq!(m.global_type(1).unwrap().ty, ValType::F64);
     assert!(m.global_type(4).is_none());
 
-    assert_eq!(
-        m.globals[0].init.single(),
-        Some(Instr::F64Const(1.5f64.to_bits()))
-    );
-    assert_eq!(
-        m.globals[1].init.single(),
-        Some(Instr::RefNull(RefType::FuncRef))
-    );
+    assert_eq!(m.globals[0].init.single(), Some(Instr::F64Const(1.5f64.to_bits())));
+    assert_eq!(m.globals[1].init.single(), Some(Instr::RefNull(RefType::FuncRef)));
     assert_eq!(m.globals[2].init.single(), Some(Instr::GlobalGet(0)));
 
     assert_eq!(m.exports().len(), 4);
@@ -602,44 +519,20 @@ fn all_sections() {
     // Element segments: all eight encodings.
     assert_eq!(m.elements.len(), 8);
     let e = &m.elements;
-    assert_eq!(
-        e[0].mode,
-        ElemMode::Active {
-            table: 0,
-            offset: const_i32(0)
-        }
-    );
+    assert_eq!(e[0].mode, ElemMode::Active { table: 0, offset: const_i32(0) });
     assert_eq!(e[0].items, ElemItems::Funcs(vec![1, 2]));
     assert_eq!(e[1].mode, ElemMode::Passive);
     assert_eq!(e[1].items, ElemItems::Funcs(vec![3]));
     assert_eq!(e[2].mode, ElemMode::Declarative);
-    assert_eq!(
-        e[3].mode,
-        ElemMode::Active {
-            table: 1,
-            offset: const_i32(0)
-        }
-    );
+    assert_eq!(e[3].mode, ElemMode::Active { table: 1, offset: const_i32(0) });
     assert_eq!(e[3].ty, RefType::ExternRef);
     assert_eq!(e[3].len(), 1);
     assert_eq!(e[4].mode, ElemMode::Passive);
     assert_eq!(e[4].ty, RefType::ExternRef);
     assert_eq!(e[4].len(), 2);
-    assert_eq!(
-        e[5].mode,
-        ElemMode::Active {
-            table: 0,
-            offset: const_i32(1)
-        }
-    );
+    assert_eq!(e[5].mode, ElemMode::Active { table: 0, offset: const_i32(1) });
     assert_eq!(e[5].items, ElemItems::Funcs(vec![1]));
-    assert_eq!(
-        e[6].mode,
-        ElemMode::Active {
-            table: 0,
-            offset: const_i32(1)
-        }
-    );
+    assert_eq!(e[6].mode, ElemMode::Active { table: 0, offset: const_i32(1) });
     match &e[6].items {
         ElemItems::Exprs(x) => {
             assert_eq!(x[0].single(), Some(Instr::RefFunc(1)));
@@ -651,30 +544,16 @@ fn all_sections() {
     assert!(matches!(e[7].items, ElemItems::Exprs(_)));
 
     assert_eq!(m.data.len(), 3);
-    assert_eq!(
-        m.data[0].mode,
-        DataMode::Active {
-            memory: 0,
-            offset: const_i32(8)
-        }
-    );
+    assert_eq!(m.data[0].mode, DataMode::Active { memory: 0, offset: const_i32(8) });
     assert_eq!(m.data[0].bytes, b"hello");
     assert_eq!(m.data[1].mode, DataMode::Passive);
     assert_eq!(m.data[1].bytes, b"passive");
-    assert_eq!(
-        m.data[2].mode,
-        DataMode::Active {
-            memory: 1,
-            offset: const_i32(0)
-        }
-    );
+    assert_eq!(m.data[2].mode, DataMode::Active { memory: 1, offset: const_i32(0) });
     assert_eq!(m.data_count, None);
 }
 
 fn const_i32(v: i32) -> kalium_wasm::ConstExpr {
-    kalium_wasm::ConstExpr {
-        instrs: vec![Instr::I32Const(v)],
-    }
+    kalium_wasm::ConstExpr { instrs: vec![Instr::I32Const(v)] }
 }
 
 #[test]
@@ -706,77 +585,34 @@ fn rust_fixture_decodes() {
     assert!(log_ty.results.is_empty());
 
     // The exports named in rust-src/src/lib.rs.
-    for name in [
-        "greet",
-        "fib",
-        "dispatch",
-        "bump",
-        "fill_scratch",
-        "to_int",
-        "to_uint",
-        "extend8",
-        "extend16",
-        "hypot",
-        "mix",
-    ] {
-        let idx = m
-            .export_func(name)
-            .unwrap_or_else(|| panic!("export {name}"));
-        assert!(
-            m.func_body(idx).is_some(),
-            "{name} is defined, not imported"
-        );
+    for name in ["greet", "fib", "dispatch", "bump", "fill_scratch", "to_int", "to_uint", "extend8", "extend16", "hypot", "mix"]
+    {
+        let idx = m.export_func(name).unwrap_or_else(|| panic!("export {name}"));
+        assert!(m.func_body(idx).is_some(), "{name} is defined, not imported");
     }
-    assert_eq!(
-        m.func_type_of(m.export_func("fib").unwrap())
-            .unwrap()
-            .results,
-        vec![ValType::I64]
-    );
+    assert_eq!(m.func_type_of(m.export_func("fib").unwrap()).unwrap().results, vec![ValType::I64]);
     assert_eq!(
         m.func_type_of(m.export_func("hypot").unwrap()).unwrap(),
         &FuncType::new(vec![ValType::F64, ValType::F64], vec![ValType::F64])
     );
-    assert!(matches!(
-        m.export("memory").unwrap().desc,
-        ExportDesc::Memory(0)
-    ));
+    assert!(matches!(m.export("memory").unwrap().desc, ExportDesc::Memory(0)));
     assert_eq!(m.num_memories(), 1);
 
     // A function table fed by an active element segment, used by dispatch.
     assert!(m.num_tables() >= 1);
-    assert!(m
-        .elements
-        .iter()
-        .any(|e| matches!(e.mode, ElemMode::Active { .. }) && !e.is_empty()));
+    assert!(m.elements.iter().any(|e| matches!(e.mode, ElemMode::Active { .. }) && !e.is_empty()));
 
     // The greeting lives in a data segment.
-    assert!(m
-        .data
-        .iter()
-        .any(|d| d.bytes.windows(18).any(|w| w == b"hello from fixture")));
+    assert!(m.data.iter().any(|d| d.bytes.windows(18).any(|w| w == b"hello from fixture")));
 
     // Feature coverage in the emitted code.
-    let all: Vec<Instr> = m
-        .code
-        .iter()
-        .flat_map(|b| b.instrs.iter().copied())
-        .collect();
+    let all: Vec<Instr> = m.code.iter().flat_map(|b| b.instrs.iter().copied()).collect();
     let has = |p: fn(&Instr) -> bool| all.iter().any(p);
-    assert!(
-        has(|i| matches!(i, Instr::CallIndirect { .. })),
-        "call_indirect"
-    );
+    assert!(has(|i| matches!(i, Instr::CallIndirect { .. })), "call_indirect");
     assert!(has(|i| matches!(i, Instr::MemoryFill)), "memory.fill");
     assert!(has(|i| matches!(i, Instr::MemoryCopy)), "memory.copy");
-    assert!(
-        has(|i| matches!(i, Instr::I32TruncSatF64S)),
-        "i32.trunc_sat_f64_s"
-    );
-    assert!(
-        has(|i| matches!(i, Instr::I32TruncSatF32U)),
-        "i32.trunc_sat_f32_u"
-    );
+    assert!(has(|i| matches!(i, Instr::I32TruncSatF64S)), "i32.trunc_sat_f64_s");
+    assert!(has(|i| matches!(i, Instr::I32TruncSatF32U)), "i32.trunc_sat_f32_u");
     assert!(has(|i| matches!(i, Instr::I32Extend8S)), "i32.extend8_s");
     assert!(has(|i| matches!(i, Instr::I64Extend16S)), "i64.extend16_s");
     assert!(has(|i| matches!(i, Instr::I64Rotl)), "i64.rotl");
@@ -798,9 +634,7 @@ fn rust_fixture_decodes() {
                     assert!(end as usize > pc);
                     assert_eq!(b.instrs[end as usize], Instr::End);
                     if else_ != end {
-                        assert!(
-                            matches!(b.instrs[else_ as usize], Instr::Else { end: e } if e == end)
-                        );
+                        assert!(matches!(b.instrs[else_ as usize], Instr::Else { end: e } if e == end));
                     }
                 }
                 Instr::Else { end } => assert_eq!(b.instrs[end as usize], Instr::End),
@@ -855,70 +689,31 @@ fn header_errors() {
     assert_eq!(malformed(b"\0asm"), (4, "unknown binary version"));
     assert_eq!(malformed(b"\0asm\x01\0\0"), (4, "unknown binary version"));
     assert_eq!(malformed(b"\0asm\x02\0\0\0"), (4, "unknown binary version"));
-    assert_eq!(
-        malformed(b"\x01asm\x01\0\0\0"),
-        (0, "magic header not detected")
-    );
+    assert_eq!(malformed(b"\x01asm\x01\0\0\0"), (0, "magic header not detected"));
 }
 
 #[test]
 fn section_errors() {
     // Unknown id.
-    assert_eq!(
-        malformed(&raw(&[section(13, &[])])),
-        (8, "malformed section id")
-    );
+    assert_eq!(malformed(&raw(&[section(13, &[])])), (8, "malformed section id"));
     // Size runs past the end.
-    assert_eq!(
-        malformed(&raw(&[vec![1, 5, 0]])),
-        (10, "length out of bounds")
-    );
+    assert_eq!(malformed(&raw(&[vec![1, 5, 0]])), (10, "length out of bounds"));
     // Content shorter than declared size.
-    assert_eq!(
-        malformed(&raw(&[section(1, &[0, 0])])),
-        (11, "section size mismatch")
-    );
+    assert_eq!(malformed(&raw(&[section(1, &[0, 0])])), (11, "section size mismatch"));
     // Out of order: import (2) after function (3).
     let bytes = raw(&[section(3, &[0]), section(2, &[0])]);
-    assert_eq!(
-        malformed(&bytes),
-        (11, "unexpected content after last section")
-    );
+    assert_eq!(malformed(&bytes), (11, "unexpected content after last section"));
     // Repeated section.
     let bytes = raw(&[section(1, &[0]), section(1, &[0])]);
-    assert_eq!(
-        malformed(&bytes),
-        (11, "unexpected content after last section")
-    );
+    assert_eq!(malformed(&bytes), (11, "unexpected content after last section"));
     // Data count (12) must come before code (10), but after element (9).
-    assert!(decode(&raw(&[
-        section(9, &[0]),
-        section(12, &[0]),
-        section(10, &[0]),
-        section(11, &[0])
-    ]))
-    .is_ok());
-    assert_eq!(
-        malformed(&raw(&[section(10, &[0]), section(12, &[0])])),
-        (11, "unexpected content after last section")
-    );
+    assert!(decode(&raw(&[section(9, &[0]), section(12, &[0]), section(10, &[0]), section(11, &[0])])).is_ok());
+    assert_eq!(malformed(&raw(&[section(10, &[0]), section(12, &[0])])), (11, "unexpected content after last section"));
     // Custom sections go anywhere, but their names must be UTF-8.
-    assert!(decode(&raw(&[
-        section(0, b"\x01a"),
-        section(1, &[0]),
-        section(0, b"\x00xyz"),
-        section(3, &[0])
-    ]))
-    .is_ok());
-    assert_eq!(
-        malformed(&raw(&[section(0, b"\x01\xff")])),
-        (11, "malformed UTF-8 encoding")
-    );
+    assert!(decode(&raw(&[section(0, b"\x01a"), section(1, &[0]), section(0, b"\x00xyz"), section(3, &[0])])).is_ok());
+    assert_eq!(malformed(&raw(&[section(0, b"\x01\xff")])), (11, "malformed UTF-8 encoding"));
     // Truncated inside a section.
-    assert_eq!(
-        malformed(&raw(&[section(1, &[1])])),
-        (11, "unexpected end of section or function")
-    );
+    assert_eq!(malformed(&raw(&[section(1, &[1])])), (11, "unexpected end of section or function"));
     // Truncated at top level.
     assert_eq!(malformed(&raw(&[vec![1]])), (9, "unexpected end"));
 }
@@ -927,51 +722,24 @@ fn section_errors() {
 fn function_code_consistency() {
     // Function section with one entry, no code section.
     let bytes = raw(&[section(1, &[1, 0x60, 0, 0]), section(3, &[1, 0])]);
-    assert_eq!(
-        malformed(&bytes).1,
-        "function and code section have inconsistent lengths"
-    );
+    assert_eq!(malformed(&bytes).1, "function and code section have inconsistent lengths");
     // Code section with a different count.
-    let bytes = raw(&[
-        section(1, &[1, 0x60, 0, 0]),
-        section(3, &[1, 0]),
-        section(10, &[2, 2, 0, 0x0B, 2, 0, 0x0B]),
-    ]);
-    assert_eq!(
-        malformed(&bytes).1,
-        "function and code section have inconsistent lengths"
-    );
+    let bytes = raw(&[section(1, &[1, 0x60, 0, 0]), section(3, &[1, 0]), section(10, &[2, 2, 0, 0x0B, 2, 0, 0x0B])]);
+    assert_eq!(malformed(&bytes).1, "function and code section have inconsistent lengths");
     // Code section without function section.
     let bytes = raw(&[section(10, &[1, 2, 0, 0x0B])]);
-    assert_eq!(
-        malformed(&bytes).1,
-        "function and code section have inconsistent lengths"
-    );
+    assert_eq!(malformed(&bytes).1, "function and code section have inconsistent lengths");
     // Consistent.
-    let bytes = raw(&[
-        section(1, &[1, 0x60, 0, 0]),
-        section(3, &[1, 0]),
-        section(10, &[1, 2, 0, 0x0B]),
-    ]);
+    let bytes = raw(&[section(1, &[1, 0x60, 0, 0]), section(3, &[1, 0]), section(10, &[1, 2, 0, 0x0B])]);
     assert!(decode(&bytes).is_ok());
 }
 
 #[test]
 fn data_count_consistency() {
-    let bytes = raw(&[
-        section(5, &[1, 0, 1]),
-        section(12, &[2]),
-        section(11, &[1, 1, 0]),
-    ]);
-    assert_eq!(
-        malformed(&bytes).1,
-        "data count and data section have inconsistent lengths"
-    );
+    let bytes = raw(&[section(5, &[1, 0, 1]), section(12, &[2]), section(11, &[1, 1, 0])]);
+    assert_eq!(malformed(&bytes).1, "data count and data section have inconsistent lengths");
     let bytes = raw(&[section(5, &[1, 0, 1]), section(12, &[1])]);
-    assert_eq!(
-        malformed(&bytes).1,
-        "data count and data section have inconsistent lengths"
-    );
+    assert_eq!(malformed(&bytes).1, "data count and data section have inconsistent lengths");
     // memory.init without a data count section.
     let bytes = raw(&[
         section(1, &[1, 0x60, 0, 0]),
@@ -996,168 +764,67 @@ fn body_errors() {
         let mut code = vec![1];
         leb(&mut code, body.len() as u32);
         code.extend_from_slice(body);
-        raw(&[
-            section(1, &[1, 0x60, 0, 0]),
-            section(3, &[1, 0]),
-            section(10, &code),
-        ])
+        raw(&[section(1, &[1, 0x60, 0, 0]), section(3, &[1, 0]), section(10, &code)])
     }
     // Missing end.
-    assert_eq!(
-        malformed(&with_body(&[0, 0x01])).1,
-        "unexpected end of section or function"
-    );
+    assert_eq!(malformed(&with_body(&[0, 0x01])).1, "unexpected end of section or function");
     // Bytes after the final end.
-    assert_eq!(
-        malformed(&with_body(&[0, 0x0B, 0x01])).1,
-        "operators remaining after end of function"
-    );
+    assert_eq!(malformed(&with_body(&[0, 0x0B, 0x01])).1, "operators remaining after end of function");
     // Stray else.
     assert_eq!(malformed(&with_body(&[0, 0x05, 0x0B])).1, "unexpected else");
     // Two elses.
-    assert_eq!(
-        malformed(&with_body(&[0, 0x04, 0x40, 0x05, 0x05, 0x0B, 0x0B])).1,
-        "unexpected else"
-    );
+    assert_eq!(malformed(&with_body(&[0, 0x04, 0x40, 0x05, 0x05, 0x0B, 0x0B])).1, "unexpected else");
     // Else in a block.
-    assert_eq!(
-        malformed(&with_body(&[0, 0x02, 0x40, 0x05, 0x0B, 0x0B])).1,
-        "unexpected else"
-    );
+    assert_eq!(malformed(&with_body(&[0, 0x02, 0x40, 0x05, 0x0B, 0x0B])).1, "unexpected else");
     // Illegal opcode.
     assert_eq!(malformed(&with_body(&[0, 0x27, 0x0B])).1, "illegal opcode");
-    assert_eq!(
-        malformed(&with_body(&[0, 0xFC, 18, 0x0B])).1,
-        "illegal opcode"
-    );
+    assert_eq!(malformed(&with_body(&[0, 0xFC, 18, 0x0B])).1, "illegal opcode");
     // memory.size needs its zero byte.
-    assert_eq!(
-        malformed(&with_body(&[0, 0x3F, 0x01, 0x0B])).1,
-        "zero byte expected"
-    );
-    assert_eq!(
-        malformed(&with_body(&[0, 0xFC, 10, 0x00, 0x01, 0x0B])).1,
-        "zero byte expected"
-    );
+    assert_eq!(malformed(&with_body(&[0, 0x3F, 0x01, 0x0B])).1, "zero byte expected");
+    assert_eq!(malformed(&with_body(&[0, 0xFC, 10, 0x00, 0x01, 0x0B])).1, "zero byte expected");
     // Typed select needs exactly one type.
-    assert_eq!(
-        malformed(&with_body(&[0, 0x1C, 0x00, 0x0B])).1,
-        "invalid result arity"
-    );
-    assert_eq!(
-        malformed(&with_body(&[0, 0x1C, 0x02, 0x7F, 0x7F, 0x0B])).1,
-        "invalid result arity"
-    );
+    assert_eq!(malformed(&with_body(&[0, 0x1C, 0x00, 0x0B])).1, "invalid result arity");
+    assert_eq!(malformed(&with_body(&[0, 0x1C, 0x02, 0x7F, 0x7F, 0x0B])).1, "invalid result arity");
     // Bad block type.
-    assert_eq!(
-        malformed(&with_body(&[0, 0x02, 0x7B - 1, 0x0B, 0x0B])).1,
-        "malformed block type"
-    );
+    assert_eq!(malformed(&with_body(&[0, 0x02, 0x7B - 1, 0x0B, 0x0B])).1, "malformed block type");
     // Bad value type in locals.
-    assert_eq!(
-        malformed(&with_body(&[1, 1, 0x7A, 0x0B])).1,
-        "malformed value type"
-    );
+    assert_eq!(malformed(&with_body(&[1, 1, 0x7A, 0x0B])).1, "malformed value type");
     // Too many locals (sum overflows u32).
-    assert_eq!(
-        malformed(&with_body(&[
-            2, 0xFF, 0xFF, 0xFF, 0xFF, 0x0F, 0x7F, 0x01, 0x7F, 0x0B
-        ]))
-        .1,
-        "too many locals"
-    );
+    assert_eq!(malformed(&with_body(&[2, 0xFF, 0xFF, 0xFF, 0xFF, 0x0F, 0x7F, 0x01, 0x7F, 0x0B])).1, "too many locals");
     // Too many locals (over the implementation limit).
-    assert_eq!(
-        malformed(&with_body(&[1, 0x80, 0x80, 0x80, 0x01, 0x7F, 0x0B])).1,
-        "too many locals"
-    );
+    assert_eq!(malformed(&with_body(&[1, 0x80, 0x80, 0x80, 0x01, 0x7F, 0x0B])).1, "too many locals");
     // Body size larger than the section.
-    assert_eq!(
-        malformed(&with_body(&[])).1,
-        "unexpected end of section or function"
-    );
-    let mut big = raw(&[
-        section(1, &[1, 0x60, 0, 0]),
-        section(3, &[1, 0]),
-        section(10, &[1, 50, 0, 0x0B]),
-    ]);
+    assert_eq!(malformed(&with_body(&[])).1, "unexpected end of section or function");
+    let mut big = raw(&[section(1, &[1, 0x60, 0, 0]), section(3, &[1, 0]), section(10, &[1, 50, 0, 0x0B])]);
     assert_eq!(malformed(&big).1, "length out of bounds");
     big.truncate(big.len() - 1);
     assert_eq!(malformed(&big).1, "length out of bounds");
     // Bad LEB in an immediate.
+    assert_eq!(malformed(&with_body(&[0, 0x41, 0xFF, 0xFF, 0xFF, 0xFF, 0x0F, 0x0B])).1, "integer too large");
     assert_eq!(
-        malformed(&with_body(&[0, 0x41, 0xFF, 0xFF, 0xFF, 0xFF, 0x0F, 0x0B])).1,
-        "integer too large"
-    );
-    assert_eq!(
-        malformed(&with_body(&[
-            0, 0x20, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00, 0x0B
-        ]))
-        .1,
+        malformed(&with_body(&[0, 0x20, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00, 0x0B])).1,
         "integer representation too long"
     );
     // A truncated f64.const.
-    assert_eq!(
-        malformed(&with_body(&[0, 0x44, 1, 2, 3, 0x0B])).1,
-        "unexpected end of section or function"
-    );
+    assert_eq!(malformed(&with_body(&[0, 0x44, 1, 2, 3, 0x0B])).1, "unexpected end of section or function");
 }
 
 #[test]
 fn type_section_errors() {
-    assert_eq!(
-        malformed(&raw(&[section(1, &[1, 0x5F, 0, 0])])).1,
-        "malformed function type"
-    );
-    assert_eq!(
-        malformed(&raw(&[section(1, &[1, 0x60, 1, 0x7A, 0])])).1,
-        "malformed value type"
-    );
-    assert_eq!(
-        malformed(&raw(&[section(2, &[1, 1, b'a', 1, b'b', 4])])).1,
-        "malformed import kind"
-    );
-    assert_eq!(
-        malformed(&raw(&[section(2, &[1, 1, b'a', 1, b'b', 3, 0x7F, 2])])).1,
-        "malformed mutability"
-    );
-    assert_eq!(
-        malformed(&raw(&[section(2, &[1, 1, b'a', 1, b'b', 1, 0x7F, 0, 0])])).1,
-        "malformed reference type"
-    );
-    assert_eq!(
-        malformed(&raw(&[section(4, &[1, 0x70, 4, 0])])).1,
-        "malformed limits flags"
-    );
-    assert_eq!(
-        malformed(&raw(&[section(7, &[1, 1, b'a', 4, 0])])).1,
-        "malformed export kind"
-    );
-    assert_eq!(
-        malformed(&raw(&[section(7, &[1, 1, 0xC3, 0, 0])])).1,
-        "malformed UTF-8 encoding"
-    );
-    assert_eq!(
-        malformed(&raw(&[section(9, &[1, 8])])).1,
-        "malformed elements segment kind"
-    );
-    assert_eq!(
-        malformed(&raw(&[section(9, &[1, 1, 1, 0])])).1,
-        "malformed element kind"
-    );
-    assert_eq!(
-        malformed(&raw(&[section(11, &[1, 3])])).1,
-        "malformed data segment kind"
-    );
-    assert_eq!(
-        malformed(&raw(&[section(11, &[1, 1, 5, b'a'])])).1,
-        "unexpected end of section or function"
-    );
+    assert_eq!(malformed(&raw(&[section(1, &[1, 0x5F, 0, 0])])).1, "malformed function type");
+    assert_eq!(malformed(&raw(&[section(1, &[1, 0x60, 1, 0x7A, 0])])).1, "malformed value type");
+    assert_eq!(malformed(&raw(&[section(2, &[1, 1, b'a', 1, b'b', 4])])).1, "malformed import kind");
+    assert_eq!(malformed(&raw(&[section(2, &[1, 1, b'a', 1, b'b', 3, 0x7F, 2])])).1, "malformed mutability");
+    assert_eq!(malformed(&raw(&[section(2, &[1, 1, b'a', 1, b'b', 1, 0x7F, 0, 0])])).1, "malformed reference type");
+    assert_eq!(malformed(&raw(&[section(4, &[1, 0x70, 4, 0])])).1, "malformed limits flags");
+    assert_eq!(malformed(&raw(&[section(7, &[1, 1, b'a', 4, 0])])).1, "malformed export kind");
+    assert_eq!(malformed(&raw(&[section(7, &[1, 1, 0xC3, 0, 0])])).1, "malformed UTF-8 encoding");
+    assert_eq!(malformed(&raw(&[section(9, &[1, 8])])).1, "malformed elements segment kind");
+    assert_eq!(malformed(&raw(&[section(9, &[1, 1, 1, 0])])).1, "malformed element kind");
+    assert_eq!(malformed(&raw(&[section(11, &[1, 3])])).1, "malformed data segment kind");
+    assert_eq!(malformed(&raw(&[section(11, &[1, 1, 5, b'a'])])).1, "unexpected end of section or function");
     // A br_table cannot appear in a constant expression.
-    assert_eq!(
-        malformed(&raw(&[section(6, &[1, 0x7F, 0, 0x0E, 0, 0, 0x0B])])).1,
-        "constant expression required"
-    );
+    assert_eq!(malformed(&raw(&[section(6, &[1, 0x7F, 0, 0x0E, 0, 0, 0x0B])])).1, "constant expression required");
 }
 
 #[test]
@@ -1172,12 +839,7 @@ fn unsupported_features() {
         let mut code = vec![1];
         leb(&mut code, body.len() as u32);
         code.extend_from_slice(body);
-        raw(&[
-            section(1, &[1, 0x60, 0, 0]),
-            section(3, &[1, 0]),
-            section(5, &[1, 0, 1]),
-            section(10, &code),
-        ])
+        raw(&[section(1, &[1, 0x60, 0, 0]), section(3, &[1, 0]), section(5, &[1, 0, 1]), section(10, &code)])
     }
     // SIMD: v128.load, i8x16.splat.
     assert!(unsupported(&with_body(&[0, 0xFD, 0, 0, 0, 0x0B])).contains("SIMD"));
@@ -1197,31 +859,18 @@ fn unsupported_features() {
     // The wat crate agrees these are SIMD/atomics.
     let simd = wasm("(module (func (result v128) v128.const i32x4 1 2 3 4))");
     assert!(matches!(Module::new(&simd), Err(Error::Unsupported { .. })));
-    let atomics =
-        wasm("(module (memory 1 1 shared) (func (result i32) i32.const 0 i32.atomic.load))");
-    assert!(matches!(
-        Module::new(&atomics),
-        Err(Error::Unsupported { .. })
-    ));
+    let atomics = wasm("(module (memory 1 1 shared) (func (result i32) i32.const 0 i32.atomic.load))");
+    assert!(matches!(Module::new(&atomics), Err(Error::Unsupported { .. })));
     let atomics = wasm("(module (memory 1) (func (result i32) i32.const 0 i32.atomic.load))");
-    assert!(matches!(
-        Module::new(&atomics),
-        Err(Error::Unsupported { .. })
-    ));
+    assert!(matches!(Module::new(&atomics), Err(Error::Unsupported { .. })));
 }
 
 #[test]
 fn error_display() {
     let e = Module::new(b"junk").unwrap_err();
-    assert_eq!(
-        e.to_string(),
-        "malformed module at offset 0x0: magic header not detected"
-    );
+    assert_eq!(e.to_string(), "malformed module at offset 0x0: magic header not detected");
     assert_eq!(e.message(), "magic header not detected");
-    assert_eq!(
-        kalium_wasm::Trap::OutOfBounds.to_string(),
-        "out of bounds memory access"
-    );
+    assert_eq!(kalium_wasm::Trap::OutOfBounds.to_string(), "out of bounds memory access");
 }
 
 // ---------------------------------------------------------------------------
@@ -1293,8 +942,7 @@ fn fuzz_bit_flips_never_panic() {
         for _ in 0..200 {
             let mut x = m.clone();
             let pos = (rng.next() as usize) % x.len();
-            let val = [0x00, 0xFF, 0x7F, 0x80, 0x0B, 0xFC, 0xFD, 0xFE, 0x02, 0x04]
-                [(rng.next() % 10) as usize];
+            let val = [0x00, 0xFF, 0x7F, 0x80, 0x0B, 0xFC, 0xFD, 0xFE, 0x02, 0x04][(rng.next() % 10) as usize];
             let run = 1 + (rng.next() % 6) as usize;
             for i in pos..(pos + run).min(x.len()) {
                 x[i] = val;
@@ -1352,15 +1000,9 @@ fn locals_are_bounded_by_module_size() {
         let mut func_sec = Vec::new();
         leb(&mut func_sec, funcs);
         func_sec.extend(std::iter::repeat_n(0u8, funcs as usize));
-        raw(&[
-            section(1, &[1, 0x60, 0, 0]),
-            section(3, &func_sec),
-            section(10, &code),
-        ])
+        raw(&[section(1, &[1, 0x60, 0, 0]), section(3, &func_sec), section(10, &code)])
     }
-    let over = Err(Error::Limit {
-        msg: "too many locals in module",
-    });
+    let over = Err(Error::Limit { msg: "too many locals in module" });
 
     // One function at the per-function limit: 8 bytes of locals in a module
     // of a few dozen bytes would expand to 1 MiB.

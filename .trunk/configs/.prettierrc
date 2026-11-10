@@ -1,0 +1,17 @@
+arrowParens: "always"
+bracketSpacing: false
+embeddedLanguageFormatting: "auto"
+endOfLine: "lf"
+htmlWhitespaceSensitivity: "css"
+printWidth: 128
+proseWrap: always
+semi: false
+singleQuote: false
+tabWidth: 2
+trailingComma: "es5"
+useTabs: true
+vueIndentScriptAndStyle: false
+overrides:
+  - files: "*.md"
+    options:
+      proseWrap: "never"

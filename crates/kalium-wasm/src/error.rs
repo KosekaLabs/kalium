@@ -24,11 +24,7 @@ pub enum Error {
     /// The module decoded but does not validate. `func` is the index of the
     /// function (in the function index space) being validated, if any, and
     /// `instr` the index of the offending instruction in its body.
-    Invalid {
-        msg: &'static str,
-        func: Option<u32>,
-        instr: Option<u32>,
-    },
+    Invalid { msg: &'static str, func: Option<u32>, instr: Option<u32> },
     /// A configured resource limit was exceeded (too many locals, too large
     /// a minimum memory, ...). `msg` names the limit.
     Limit { msg: &'static str },

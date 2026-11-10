@@ -38,9 +38,9 @@
 
 use kalium_wasm::global::Global;
 use kalium_wasm::{
-    Error, ExecResult, Execution, ExportDesc, Extern, ExternType, FuncType, GlobalRef, GlobalType,
-    Host, HostCtx, HostFuncId, HostOutcome, Instance, Limits, MemType, Memory, MemoryRef, Module,
-    RefType, ResizableLimits, Table, TableRef, TableType, Trap, ValType, Value, MAX_TABLE_ELEMENTS,
+    Error, ExecResult, Execution, ExportDesc, Extern, ExternType, FuncType, GlobalRef, GlobalType, Host, HostCtx, HostFuncId,
+    HostOutcome, Instance, Limits, MAX_TABLE_ELEMENTS, MemType, Memory, MemoryRef, Module, RefType, ResizableLimits, Table,
+    TableRef, TableType, Trap, ValType, Value,
 };
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -54,12 +54,8 @@ use wast::{QuoteWat, Wast, WastArg, WastDirective, WastExecute, WastInvoke, Wast
 
 /// Generous limits: the suite grows memories to 803 pages and recurses until
 /// `assert_exhaustion` fires.
-const LIMITS: Limits = Limits {
-    max_memory_pages: 65536,
-    max_stack_values: 1 << 20,
-    max_call_depth: 10_000,
-    max_table_elements: 1 << 20,
-};
+const LIMITS: Limits =
+    Limits { max_memory_pages: 65536, max_stack_values: 1 << 20, max_call_depth: 10_000, max_table_elements: 1 << 20 };
 
 /// Size of each instance's function address range: instance `i` of the
 /// store owns addresses `i * FUNC_ADDR_SPACE ..`, so an address maps back to
@@ -104,33 +100,16 @@ fn spectest_type(name: &str) -> Option<FuncType> {
 impl SpecTest {
     fn new() -> SpecTest {
         let table = Table::new(
-            TableType {
-                elem: RefType::FuncRef,
-                limits: ResizableLimits {
-                    min: 10,
-                    max: Some(20),
-                },
-            },
+            TableType { elem: RefType::FuncRef, limits: ResizableLimits { min: 10, max: Some(20) } },
             MAX_TABLE_ELEMENTS,
         )
         .expect("spectest table")
         .into_shared();
-        let memory = Memory::with_type(
-            MemType {
-                limits: ResizableLimits {
-                    min: 1,
-                    max: Some(2),
-                },
-            },
-            LIMITS.max_memory_pages,
-        )
-        .expect("spectest memory")
-        .into_shared();
+        let memory = Memory::with_type(MemType { limits: ResizableLimits { min: 1, max: Some(2) } }, LIMITS.max_memory_pages)
+            .expect("spectest memory")
+            .into_shared();
         let global = |name, value: Value| {
-            let ty = GlobalType {
-                ty: value.ty(),
-                mutable: false,
-            };
+            let ty = GlobalType { ty: value.ty(), mutable: false };
             (name, Global::new(ty, value).expect("typed").into_shared())
         };
         SpecTest {
@@ -191,11 +170,7 @@ impl Store {
 
     fn instance_of(&self, id: Option<Id<'_>>) -> Result<usize, String> {
         match id {
-            Some(id) => self
-                .by_id
-                .get(id.name())
-                .copied()
-                .ok_or_else(|| format!("unknown module ${}", id.name())),
+            Some(id) => self.by_id.get(id.name()).copied().ok_or_else(|| format!("unknown module ${}", id.name())),
             None => self.current.ok_or_else(|| "no current module".to_owned()),
         }
     }
@@ -207,10 +182,8 @@ impl Store {
     fn instantiate(&mut self, bytes: &[u8]) -> Result<usize, Error> {
         let module = Arc::new(Module::new(bytes)?);
         let idx = self.instances.len();
-        let base = u32::try_from(idx)
-            .ok()
-            .and_then(|i| i.checked_mul(FUNC_ADDR_SPACE))
-            .expect("fewer than 4096 instances per script");
+        let base =
+            u32::try_from(idx).ok().and_then(|i| i.checked_mul(FUNC_ADDR_SPACE)).expect("fewer than 4096 instances per script");
         let instance = {
             let instances = &self.instances;
             let registered = &self.registered;
@@ -225,15 +198,8 @@ impl Store {
                 Some(match target.module().export(n)?.desc {
                     ExportDesc::Func(func) => {
                         let id = HostFuncId(host_funcs.len() as u32);
-                        host_funcs.push(HostFn::Cross {
-                            instance: target_idx,
-                            func,
-                        });
-                        Extern::Func {
-                            id,
-                            ty: target.func_type(func)?.clone(),
-                            addr: target.func_addr(func),
-                        }
+                        host_funcs.push(HostFn::Cross { instance: target_idx, func });
+                        Extern::Func { id, ty: target.func_type(func)?.clone(), addr: target.func_addr(func) }
                     }
                     ExportDesc::Table(t) => Extern::Table(target.table_ref(t)?.clone()),
                     ExportDesc::Memory(_) => Extern::Memory(target.memory_ref().clone()),
@@ -264,15 +230,10 @@ impl Store {
 
     /// Invoke an export of an instance.
     fn invoke(&mut self, idx: usize, name: &str, args: &[Value]) -> Result<ExecResult, String> {
-        let mut inst = self.instances[idx]
-            .take()
-            .ok_or_else(|| "instance is already running".to_owned())?;
+        let mut inst = self.instances[idx].take().ok_or_else(|| "instance is already running".to_owned())?;
         let result = (|| {
-            let func = inst
-                .export_func(name)
-                .ok_or_else(|| format!("no exported function \"{name}\""))?;
-            let mut exec = Execution::new(&inst, func, args)
-                .map_err(|e| format!("cannot call \"{name}\": {e}"))?;
+            let func = inst.export_func(name).ok_or_else(|| format!("no exported function \"{name}\""))?;
+            let mut exec = Execution::new(&inst, func, args).map_err(|e| format!("cannot call \"{name}\": {e}"))?;
             Ok(exec.run(&mut inst, self, u64::MAX))
         })();
         self.instances[idx] = Some(inst);
@@ -281,12 +242,8 @@ impl Store {
 
     /// Read an exported global.
     fn get_global(&self, idx: usize, name: &str) -> Result<Value, String> {
-        let inst = self.instances[idx]
-            .as_ref()
-            .ok_or_else(|| "instance is already running".to_owned())?;
-        inst.export_global(name)
-            .map(|g| g.get())
-            .ok_or_else(|| format!("no exported global \"{name}\""))
+        let inst = self.instances[idx].as_ref().ok_or_else(|| "instance is already running".to_owned())?;
+        inst.export_global(name).map(|g| g.get()).ok_or_else(|| format!("no exported global \"{name}\""))
     }
 
     /// Run function `func` of instance `instance` to completion on behalf of
@@ -294,20 +251,9 @@ impl Store {
     /// interpreter for the duration of the call; an instance that is
     /// already running (a cross call back into the caller) cannot be
     /// re-entered and reports `Trap::Host`.
-    fn run_in(
-        &mut self,
-        instance: usize,
-        func: u32,
-        args: &[Value],
-        results: &mut [Value],
-    ) -> Result<HostOutcome, Trap> {
-        let mut target = self
-            .instances
-            .get_mut(instance)
-            .and_then(Option::take)
-            .ok_or(Trap::Host)?;
-        let r = Execution::new(&target, func, args)
-            .map(|mut exec| exec.run(&mut target, self, u64::MAX));
+    fn run_in(&mut self, instance: usize, func: u32, args: &[Value], results: &mut [Value]) -> Result<HostOutcome, Trap> {
+        let mut target = self.instances.get_mut(instance).and_then(Option::take).ok_or(Trap::Host)?;
+        let r = Execution::new(&target, func, args).map(|mut exec| exec.run(&mut target, self, u64::MAX));
         self.instances[instance] = Some(target);
         match r {
             Ok(ExecResult::Done(vals)) => {
@@ -318,9 +264,7 @@ impl Store {
                 Ok(HostOutcome::Continue)
             }
             Ok(ExecResult::Trap(t)) => Err(t),
-            Ok(ExecResult::Exited(_) | ExecResult::Blocked | ExecResult::OutOfFuel) => {
-                Err(Trap::Host)
-            }
+            Ok(ExecResult::Exited(_) | ExecResult::Blocked | ExecResult::OutOfFuel) => Err(Trap::Host),
             Err(_) => Err(Trap::Host),
         }
     }
@@ -352,11 +296,7 @@ impl Host for Store {
     ) -> Result<HostOutcome, Trap> {
         let instance = (addr / FUNC_ADDR_SPACE) as usize;
         let func = addr % FUNC_ADDR_SPACE;
-        let target = self
-            .instances
-            .get(instance)
-            .and_then(Option::as_ref)
-            .ok_or(Trap::Host)?;
+        let target = self.instances.get(instance).and_then(Option::as_ref).ok_or(Trap::Host)?;
         if target.func_type(func) != Some(ty) {
             return Err(Trap::IndirectCallTypeMismatch);
         }
@@ -370,14 +310,8 @@ impl Host for Store {
 
 fn heap_is_func(h: &HeapType<'_>) -> Option<bool> {
     match h {
-        HeapType::Abstract {
-            ty: AbstractHeapType::Func,
-            ..
-        } => Some(true),
-        HeapType::Abstract {
-            ty: AbstractHeapType::Extern,
-            ..
-        } => Some(false),
+        HeapType::Abstract { ty: AbstractHeapType::Func, .. } => Some(true),
+        HeapType::Abstract { ty: AbstractHeapType::Extern, .. } => Some(false),
         _ => None,
     }
 }
@@ -421,12 +355,8 @@ fn ret_matches(expected: &WastRetCore<'_>, got: Value) -> Result<bool, String> {
             Value::F64(f) => {
                 let bits = f.to_bits();
                 match p {
-                    NanPattern::CanonicalNan => {
-                        bits & 0x7fff_ffff_ffff_ffff == 0x7ff8_0000_0000_0000
-                    }
-                    NanPattern::ArithmeticNan => {
-                        bits & 0x7ff8_0000_0000_0000 == 0x7ff8_0000_0000_0000
-                    }
+                    NanPattern::CanonicalNan => bits & 0x7fff_ffff_ffff_ffff == 0x7ff8_0000_0000_0000,
+                    NanPattern::ArithmeticNan => bits & 0x7ff8_0000_0000_0000 == 0x7ff8_0000_0000_0000,
                     NanPattern::Value(v) => bits == v.bits,
                 }
             }
@@ -439,9 +369,7 @@ fn ret_matches(expected: &WastRetCore<'_>, got: Value) -> Result<bool, String> {
             None => return Err(format!("unsupported heap type {h:?}")),
         },
         WastRetCore::RefExtern(None) => matches!(got, Value::ExternRef(Some(_))),
-        WastRetCore::RefExtern(Some(n)) | WastRetCore::RefHost(n) => {
-            got == Value::ExternRef(Some(*n))
-        }
+        WastRetCore::RefExtern(Some(n)) | WastRetCore::RefHost(n) => got == Value::ExternRef(Some(*n)),
         WastRetCore::RefFunc(None) | WastRetCore::RefFunc(Some(Index::Id(_))) => {
             matches!(got, Value::FuncRef(Some(_)))
         }
@@ -575,8 +503,7 @@ impl Runner<'_> {
     }
 
     fn fail(&mut self, span: Span, msg: String) {
-        self.failures
-            .push(format!("{}:{}: {msg}", self.file, self.line(span)));
+        self.failures.push(format!("{}:{}: {msg}", self.file, self.line(span)));
     }
 
     /// A `module` directive: instantiate and make current.
@@ -634,20 +561,15 @@ impl Runner<'_> {
                 }
             }
             WastDirective::ModuleInstance { span, .. } => {
-                self.fail(
-                    span,
-                    "module instance directives are not supported".to_owned(),
-                );
+                self.fail(span, "module instance directives are not supported".to_owned());
             }
-            WastDirective::Register { span, name, module } => {
-                match self.store.instance_of(module) {
-                    Ok(idx) => {
-                        self.store.registered.insert(name.to_owned(), idx);
-                        self.stats.registers += 1;
-                    }
-                    Err(e) => self.fail(span, format!("register: {e}")),
+            WastDirective::Register { span, name, module } => match self.store.instance_of(module) {
+                Ok(idx) => {
+                    self.store.registered.insert(name.to_owned(), idx);
+                    self.stats.registers += 1;
                 }
-            }
+                Err(e) => self.fail(span, format!("register: {e}")),
+            },
             WastDirective::Invoke(invoke) => {
                 let span = invoke.span;
                 match self.exec_invoke(&invoke) {
@@ -656,77 +578,41 @@ impl Runner<'_> {
                     Err(e) => self.fail(span, format!("invoke \"{}\": {e}", invoke.name)),
                 }
             }
-            WastDirective::AssertReturn {
-                span,
-                exec,
-                results,
-            } => self.assert_return(span, exec, &results),
-            WastDirective::AssertTrap {
-                span,
-                exec,
-                message,
-            } => self.assert_trap(span, exec, message),
-            WastDirective::AssertExhaustion {
-                span,
-                call,
-                message,
-            } => match self.exec_invoke(&call) {
-                Ok(ExecResult::Trap(Trap::CallDepth | Trap::StackOverflow)) => {
-                    self.stats.exhaustions += 1
-                }
-                Ok(other) => self.fail(
-                    span,
-                    format!(
-                        "assert_exhaustion \"{message}\" on \"{}\": got {other:?}",
-                        call.name
-                    ),
-                ),
+            WastDirective::AssertReturn { span, exec, results } => self.assert_return(span, exec, &results),
+            WastDirective::AssertTrap { span, exec, message } => self.assert_trap(span, exec, message),
+            WastDirective::AssertExhaustion { span, call, message } => match self.exec_invoke(&call) {
+                Ok(ExecResult::Trap(Trap::CallDepth | Trap::StackOverflow)) => self.stats.exhaustions += 1,
+                Ok(other) => self.fail(span, format!("assert_exhaustion \"{message}\" on \"{}\": got {other:?}", call.name)),
                 Err(e) => self.fail(span, format!("assert_exhaustion: {e}")),
             },
-            WastDirective::AssertUnlinkable {
-                span,
-                mut module,
-                message,
-            } => match module.encode() {
+            WastDirective::AssertUnlinkable { span, mut module, message } => match module.encode() {
                 Ok(bytes) => match self.store.instantiate(&bytes) {
-                    Ok(_) => self.fail(
-                        span,
-                        format!("assert_unlinkable \"{message}\": module instantiated"),
-                    ),
+                    Ok(_) => self.fail(span, format!("assert_unlinkable \"{message}\": module instantiated")),
                     Err(e @ (Error::Link { .. } | Error::IncompatibleImport { .. })) => {
                         if message_matches(message, e.message()) {
                             self.stats.unlinkable += 1;
                         } else {
                             self.fail(
                                 span,
-                                format!(
-                                    "assert_unlinkable \"{message}\": linking failed with \"{}\"",
-                                    e.message()
-                                ),
+                                format!("assert_unlinkable \"{message}\": linking failed with \"{}\"", e.message()),
                             );
                         }
                     }
-                    Err(e) => self.fail(
-                        span,
-                        format!("assert_unlinkable \"{message}\": wrong error: {e}"),
-                    ),
+                    Err(e) => self.fail(span, format!("assert_unlinkable \"{message}\": wrong error: {e}")),
                 },
                 Err(e) => self.fail(span, format!("wast could not encode module: {e}")),
             },
-            WastDirective::AssertMalformed {
-                span, mut module, ..
-            }
-            | WastDirective::AssertInvalid {
-                span, mut module, ..
-            } => match module.encode() {
-                Ok(bytes) => match Module::new(&bytes) {
-                    Ok(_) => self.fail(span, "malformed/invalid module accepted".to_owned()),
+            WastDirective::AssertMalformed { span, mut module, .. } | WastDirective::AssertInvalid { span, mut module, .. } => {
+                match module.encode() {
+                    Ok(bytes) => match Module::new(&bytes) {
+                        Ok(_) => self.fail(span, "malformed/invalid module accepted".to_owned()),
+                        Err(_) => self.stats.rejected += 1,
+                    },
+                    // A quoted module the text parser itself refuses is
+                    // malformed, as the directive says.
                     Err(_) => self.stats.rejected += 1,
-                },
-                // A quoted module the text parser itself refuses is
-                // malformed, as the directive says.
-                Err(_) => self.stats.rejected += 1,
-            },
+                }
+            }
             WastDirective::Thread(thread) => {
                 for d in thread.directives {
                     self.directive(d);
@@ -747,12 +633,7 @@ impl Runner<'_> {
         let (got, what) = match exec {
             WastExecute::Invoke(invoke) => match self.exec_invoke(&invoke) {
                 Ok(ExecResult::Done(v)) => (v, format!("invoke \"{}\"", invoke.name)),
-                Ok(other) => {
-                    return self.fail(
-                        span,
-                        format!("assert_return on \"{}\": got {other:?}", invoke.name),
-                    )
-                }
+                Ok(other) => return self.fail(span, format!("assert_return on \"{}\": got {other:?}", invoke.name)),
                 Err(e) => return self.fail(span, format!("assert_return: {e}")),
             },
             WastExecute::Get { module, global, .. } => {
@@ -770,14 +651,7 @@ impl Runner<'_> {
             }
         };
         if got.len() != results.len() {
-            return self.fail(
-                span,
-                format!(
-                    "{what}: expected {} results, got {}",
-                    results.len(),
-                    describe(&got)
-                ),
-            );
+            return self.fail(span, format!("{what}: expected {} results, got {}", results.len(), describe(&got)));
         }
         for (i, (r, g)) in results.iter().zip(&got).enumerate() {
             let WastRet::Core(expected) = r else {
@@ -786,13 +660,7 @@ impl Runner<'_> {
             match ret_matches(expected, *g) {
                 Ok(true) => {}
                 Ok(false) => {
-                    return self.fail(
-                        span,
-                        format!(
-                            "{what}: result {i} expected {expected:?}, got {}",
-                            describe(&got)
-                        ),
-                    )
+                    return self.fail(span, format!("{what}: result {i} expected {expected:?}, got {}", describe(&got)));
                 }
                 Err(e) => return self.fail(span, format!("{what}: {e}")),
             }
@@ -809,21 +677,11 @@ impl Runner<'_> {
                     } else {
                         self.fail(
                             span,
-                            format!(
-                                "assert_trap \"{message}\" on \"{}\": trapped with \"{}\"",
-                                invoke.name,
-                                t.message()
-                            ),
+                            format!("assert_trap \"{message}\" on \"{}\": trapped with \"{}\"", invoke.name, t.message()),
                         );
                     }
                 }
-                Ok(other) => self.fail(
-                    span,
-                    format!(
-                        "assert_trap \"{message}\" on \"{}\": got {other:?}",
-                        invoke.name
-                    ),
-                ),
+                Ok(other) => self.fail(span, format!("assert_trap \"{message}\" on \"{}\": got {other:?}", invoke.name)),
                 Err(e) => self.fail(span, format!("assert_trap: {e}")),
             },
             WastExecute::Wat(mut module) => {
@@ -841,10 +699,7 @@ impl Runner<'_> {
                             self.store.by_id.insert(id.name().to_owned(), idx);
                         }
                         self.store.current = Some(idx);
-                        self.fail(
-                            span,
-                            format!("assert_trap \"{message}\": module instantiated"),
-                        );
+                        self.fail(span, format!("assert_trap \"{message}\": module instantiated"));
                     }
                     Err(Error::Trap(t)) => {
                         if trap_message_matches(message, t) {
@@ -852,17 +707,11 @@ impl Runner<'_> {
                         } else {
                             self.fail(
                                 span,
-                                format!(
-                                    "assert_trap \"{message}\": instantiation trapped with \"{}\"",
-                                    t.message()
-                                ),
+                                format!("assert_trap \"{message}\": instantiation trapped with \"{}\"", t.message()),
                             );
                         }
                     }
-                    Err(e) => self.fail(
-                        span,
-                        format!("assert_trap \"{message}\": instantiation failed with {e}"),
-                    ),
+                    Err(e) => self.fail(span, format!("assert_trap \"{message}\": instantiation failed with {e}")),
                 }
             }
             WastExecute::Get { global, .. } => {
@@ -893,41 +742,23 @@ struct FileReport {
 }
 
 fn run_file(path: &Path) -> FileReport {
-    let file = path
-        .file_name()
-        .and_then(|f| f.to_str())
-        .unwrap_or("?")
-        .to_owned();
+    let file = path.file_name().and_then(|f| f.to_str()).unwrap_or("?").to_owned();
     let text = std::fs::read_to_string(path).expect("readable spec file");
     let buf = parse_buffer(&text).unwrap_or_else(|e| panic!("{file}: lexing failed: {e}"));
     let wast: Wast = parser::parse(&buf).unwrap_or_else(|e| panic!("{file}: parsing failed: {e}"));
 
-    let mut runner = Runner {
-        file: &file,
-        text: &text,
-        store: Store::new(),
-        stats: Stats::default(),
-        failures: Vec::new(),
-    };
+    let mut runner = Runner { file: &file, text: &text, store: Store::new(), stats: Stats::default(), failures: Vec::new() };
     for directive in wast.directives {
         runner.directive(directive);
     }
     let (stats, failures) = (runner.stats, runner.failures);
-    FileReport {
-        file,
-        stats,
-        failures,
-    }
+    FileReport { file, stats, failures }
 }
 
 #[test]
 fn spec_suite_executes() {
     let files = spec_files();
-    assert!(
-        files.len() >= 80,
-        "expected the vendored spec suite, found {} files",
-        files.len()
-    );
+    assert!(files.len() >= 80, "expected the vendored spec suite, found {} files", files.len());
 
     let mut total = Stats::default();
     let mut report = String::new();
@@ -996,26 +827,11 @@ fn spec_suite_executes() {
         }
     }
     println!("{report}");
-    assert!(
-        failures.is_empty() && unbalanced.is_empty(),
-        "spec execution failures:\n{report}"
-    );
+    assert!(failures.is_empty() && unbalanced.is_empty(), "spec execution failures:\n{report}");
     assert_eq!(passed_files, files.len(), "every file must run completely");
     // Sanity: the suite really was exercised.
-    assert!(
-        total.returns > 15_000,
-        "too few assert_return: {}",
-        total.returns
-    );
+    assert!(total.returns > 15_000, "too few assert_return: {}", total.returns);
     assert!(total.traps > 500, "too few assert_trap: {}", total.traps);
-    assert!(
-        total.exhaustions >= 5,
-        "too few assert_exhaustion: {}",
-        total.exhaustions
-    );
-    assert!(
-        total.unlinkable >= 80,
-        "too few assert_unlinkable: {}",
-        total.unlinkable
-    );
+    assert!(total.exhaustions >= 5, "too few assert_exhaustion: {}", total.exhaustions);
+    assert!(total.unlinkable >= 80, "too few assert_unlinkable: {}", total.unlinkable);
 }

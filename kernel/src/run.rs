@@ -37,7 +37,7 @@ use kalium_sched::{FuelRate, RunOutcome, ThreadId};
 use kalium_wasm::{ExecResult, Execution};
 
 use crate::host::{Effect, HostCall};
-use crate::kernel::{Kernel, Phase, ENTRY_EXPORT};
+use crate::kernel::{ENTRY_EXPORT, Kernel, Phase};
 
 /// Set from the timer interrupt; cleared by the loop.
 static PREEMPT: AtomicBool = AtomicBool::new(false);
@@ -71,12 +71,7 @@ impl FuelMeter {
     const MIN_SAMPLE_NS: u64 = 500_000;
 
     pub const fn new() -> FuelMeter {
-        FuelMeter {
-            window_fuel: 0,
-            window_ns: 0,
-            total_fuel: 0,
-            total_ns: 0,
-        }
+        FuelMeter { window_fuel: 0, window_ns: 0, total_fuel: 0, total_ns: 0 }
     }
 
     pub fn observe(&mut self, fuel: u64, ns: u64) {
@@ -91,20 +86,12 @@ impl FuelMeter {
     }
 
     pub fn rate(&self) -> FuelRate {
-        if self.window_ns < Self::MIN_SAMPLE_NS {
-            Self::INITIAL
-        } else {
-            FuelRate::new(self.window_fuel, self.window_ns)
-        }
+        if self.window_ns < Self::MIN_SAMPLE_NS { Self::INITIAL } else { FuelRate::new(self.window_fuel, self.window_ns) }
     }
 
     /// Instructions per second over everything measured.
     pub fn instructions_per_second(&self) -> u64 {
-        if self.total_ns == 0 {
-            0
-        } else {
-            ((self.total_fuel as u128 * 1_000_000_000) / self.total_ns as u128) as u64
-        }
+        if self.total_ns == 0 { 0 } else { ((self.total_fuel as u128 * 1_000_000_000) / self.total_ns as u128) as u64 }
     }
 }
 
@@ -150,10 +137,7 @@ fn idle(k: &mut Kernel, now: u64) {
             PREEMPT.store(false, Ordering::Release);
         }
         None => {
-            println!(
-                "kalium: deadlock: {} instance(s) blocked and nothing to wake them",
-                k.live_instances()
-            );
+            println!("kalium: deadlock: {} instance(s) blocked and nothing to wake them", k.live_instances());
             for (i, inst) in k.instances.iter().enumerate() {
                 if inst.exited.is_none() {
                     println!("kalium: instance {} ({}) is blocked", i, inst.name);
@@ -176,17 +160,12 @@ fn run_slice(k: &mut Kernel, meter: &mut FuelMeter, tid: ThreadId, slice_ns: u64
     };
     let rate = meter.rate();
     let slice_fuel = rate.fuel_for_ns(slice_ns).max(MIN_CHUNK_FUEL);
-    let chunk_fuel = rate
-        .fuel_for_ns(CHUNK_NS)
-        .clamp(MIN_CHUNK_FUEL, MAX_CHUNK_FUEL);
+    let chunk_fuel = rate.fuel_for_ns(CHUNK_NS).clamp(MIN_CHUNK_FUEL, MAX_CHUNK_FUEL);
 
     PREEMPT.store(false, Ordering::Release);
     k.reschedule = false;
     let slice_end = start.saturating_add(slice_ns);
-    let deadline = k
-        .sched
-        .next_deadline_ns()
-        .map_or(slice_end, |d| d.min(slice_end));
+    let deadline = k.sched.next_deadline_ns().map_or(slice_end, |d| d.min(slice_end));
     arm_timer(deadline, start);
 
     let mut used: u64 = 0;
@@ -200,9 +179,8 @@ fn run_slice(k: &mut Kernel, meter: &mut FuelMeter, tid: ThreadId, slice_ns: u64
         let result = run.exec.run(&mut run.wasm, &mut host, chunk);
         let effect = host.effect;
         let t1 = timer::now_ns();
-        k.instances[idx].instructions = k.instances[idx]
-            .instructions
-            .saturating_add(run.exec.fuel_used().saturating_sub(fuel_before));
+        k.instances[idx].instructions =
+            k.instances[idx].instructions.saturating_add(run.exec.fuel_used().saturating_sub(fuel_before));
         match result {
             ExecResult::OutOfFuel => {
                 meter.observe(chunk, t1.saturating_sub(t0));
@@ -249,10 +227,7 @@ fn run_slice(k: &mut Kernel, meter: &mut FuelMeter, tid: ThreadId, slice_ns: u64
                 break;
             }
             ExecResult::Trap(trap) => {
-                println!(
-                    "kalium: instance {} ({}) trapped: {}",
-                    idx, k.instances[idx].name, trap
-                );
+                println!("kalium: instance {} ({}) trapped: {}", idx, k.instances[idx].name, trap);
                 exit = Some(kalium_abi::exit::TRAP);
                 outcome = RunOutcome::Exited;
                 break;
@@ -260,8 +235,7 @@ fn run_slice(k: &mut Kernel, meter: &mut FuelMeter, tid: ThreadId, slice_ns: u64
         }
     }
     let end = timer::now_ns();
-    k.sched
-        .account(tid, end.saturating_sub(start), end, outcome);
+    k.sched.account(tid, end.saturating_sub(start), end, outcome);
     match exit {
         Some(code) => {
             drop(run);

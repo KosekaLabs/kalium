@@ -8,7 +8,7 @@
 
 use core::hint::black_box;
 
-use kalium_sdk::{exit, sleep, time_now, Cap, Console, Line};
+use kalium_sdk::{Cap, Console, Line, exit, sleep, time_now};
 
 /// Must match what `init` passes to `spawn`.
 const PERIOD_NS: i64 = 2_000_000;
@@ -17,7 +17,7 @@ const PERIODS: u32 = 400;
 /// 500 µs and the interpreter runs on emulated hardware.
 const WORK_ITERS: u32 = 100;
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn _start() {
     let console = Console::from_cap(Cap::slot(0));
 
@@ -37,12 +37,7 @@ pub extern "C" fn _start() {
         }
     }
 
-    let _ = Line::new()
-        .str("rt: met ")
-        .uint(met as u64)
-        .str("/")
-        .uint(PERIODS as u64)
-        .println(console);
+    let _ = Line::new().str("rt: met ").uint(met as u64).str("/").uint(PERIODS as u64).println(console);
     exit(0);
 }
 

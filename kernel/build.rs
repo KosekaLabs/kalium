@@ -21,21 +21,8 @@ use std::path::PathBuf;
 
 /// Boot image order. Keep in sync with `xtask` (`WASM_MODULES` +
 /// `DEMO_MODULES`) and `sdk/examples/init`.
-const MODULES: [&str; 13] = [
-    "init",
-    "ping",
-    "pong",
-    "rt",
-    "fair",
-    "faulty",
-    "park",
-    "greedy",
-    "revoked",
-    "shelf",
-    "hog",
-    "hello_std",
-    "hello_c",
-];
+const MODULES: [&str; 13] =
+    ["init", "ping", "pong", "rt", "fair", "faulty", "park", "greedy", "revoked", "shelf", "hog", "hello_std", "hello_c"];
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
@@ -46,22 +33,15 @@ fn main() {
     let dest = out_dir.join("boot_image.rs");
 
     if env::var_os("CARGO_FEATURE_BOOT_ONLY").is_some() {
-        fs::write(&dest, "pub const BOOT_IMAGE: [BootModule; 0] = [];\n")
-            .expect("write boot_image.rs");
+        fs::write(&dest, "pub const BOOT_IMAGE: [BootModule; 0] = [];\n").expect("write boot_image.rs");
         return;
     }
 
     let wasm_dir = match env::var_os("KALIUM_WASM_DIR") {
         Some(dir) => PathBuf::from(dir),
         None => {
-            let manifest = PathBuf::from(
-                env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set by cargo"),
-            );
-            manifest
-                .parent()
-                .expect("kernel/ lives one level below the workspace root")
-                .join("target")
-                .join("wasm")
+            let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set by cargo"));
+            manifest.parent().expect("kernel/ lives one level below the workspace root").join("target").join("wasm")
         }
     };
 
@@ -92,10 +72,6 @@ fn main() {
         panic!("boot image modules missing; run `cargo xtask wasm`");
     }
 
-    let generated = format!(
-        "pub const BOOT_IMAGE: [BootModule; {}] = [\n{}];\n",
-        MODULES.len(),
-        entries
-    );
+    let generated = format!("pub const BOOT_IMAGE: [BootModule; {}] = [\n{}];\n", MODULES.len(), entries);
     fs::write(&dest, generated).expect("write boot_image.rs");
 }

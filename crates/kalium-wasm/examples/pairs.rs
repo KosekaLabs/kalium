@@ -103,10 +103,6 @@ fn main() {
     g.sort_by_key(|e| std::cmp::Reverse(e.1));
     println!("\ntop {n}-grams (not crossing control instructions):");
     for (seq, c) in g.iter().take(40) {
-        println!(
-            "{c:>8} {:5.1}%  {}",
-            *c as f64 * 100.0 / total as f64,
-            seq.join(" ")
-        );
+        println!("{c:>8} {:5.1}%  {}", *c as f64 * 100.0 / total as f64, seq.join(" "));
     }
 }

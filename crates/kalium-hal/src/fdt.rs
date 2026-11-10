@@ -76,11 +76,7 @@ impl<'a> Fdt<'a> {
         if structs.end > total || strings.end > total || !off_struct.is_multiple_of(4) {
             return None;
         }
-        Some(Fdt {
-            blob,
-            structs,
-            strings,
-        })
+        Some(Fdt { blob, structs, strings })
     }
 
     /// Read a blob from memory. `max_len` bounds every access: nothing at or
@@ -91,17 +87,19 @@ impl<'a> Fdt<'a> {
     /// `[ptr, ptr + max_len)` must be readable memory that is not written
     /// for the lifetime of the returned value.
     pub unsafe fn from_raw(ptr: *const u8, max_len: usize) -> Option<Fdt<'static>> {
-        if ptr.is_null() || max_len < HEADER_LEN {
-            return None;
+        unsafe {
+            if ptr.is_null() || max_len < HEADER_LEN {
+                return None;
+            }
+            // Read only the header first so a bogus pointer with a sane limit
+            // still touches the minimum.
+            let header = core::slice::from_raw_parts(ptr, HEADER_LEN);
+            if be32(header, 0)? != FDT_MAGIC {
+                return None;
+            }
+            let total = (be32(header, 4)? as usize).min(max_len);
+            Fdt::from_bytes(core::slice::from_raw_parts(ptr, total))
         }
-        // Read only the header first so a bogus pointer with a sane limit
-        // still touches the minimum.
-        let header = core::slice::from_raw_parts(ptr, HEADER_LEN);
-        if be32(header, 0)? != FDT_MAGIC {
-            return None;
-        }
-        let total = (be32(header, 4)? as usize).min(max_len);
-        Fdt::from_bytes(core::slice::from_raw_parts(ptr, total))
     }
 
     /// `totalsize` from the header.
@@ -128,10 +126,7 @@ impl<'a> Fdt<'a> {
 
     /// Walk the structure block, calling `visit(depth, node_name, prop_name,
     /// value)` for every property. Returns `None` on a malformed block.
-    fn for_each_property(
-        &self,
-        mut visit: impl FnMut(usize, &'a [u8], &'a [u8], &'a [u8]),
-    ) -> Option<()> {
+    fn for_each_property(&self, mut visit: impl FnMut(usize, &'a [u8], &'a [u8], &'a [u8])) -> Option<()> {
         // Node names of the current path, by depth; only the leaf name is
         // needed, so remember the name at each depth.
         const MAX_DEPTH: usize = 16;
@@ -240,17 +235,8 @@ fn read_cells(value: &[u8], off: usize, cells: u32) -> Option<u64> {
 
 /// Decode `reg` into `(base, size)` pairs, storing from `out[start..]`.
 /// Returns the number of entries decoded (stored or not).
-fn decode_reg(
-    value: &[u8],
-    address_cells: u32,
-    size_cells: u32,
-    out: &mut [MemoryRegion],
-    start: usize,
-) -> usize {
-    let (Some(ac), Some(sc)) = (
-        usize::try_from(address_cells).ok(),
-        usize::try_from(size_cells).ok(),
-    ) else {
+fn decode_reg(value: &[u8], address_cells: u32, size_cells: u32, out: &mut [MemoryRegion], start: usize) -> usize {
+    let (Some(ac), Some(sc)) = (usize::try_from(address_cells).ok(), usize::try_from(size_cells).ok()) else {
         return 0;
     };
     let Some(entry_len) = ac.checked_add(sc).and_then(|c| c.checked_mul(4)) else {
@@ -262,10 +248,8 @@ fn decode_reg(
     let mut n = 0;
     let mut off = 0;
     while off + entry_len <= value.len() {
-        let (Some(base), Some(size)) = (
-            read_cells(value, off, address_cells),
-            read_cells(value, off + ac * 4, size_cells),
-        ) else {
+        let (Some(base), Some(size)) = (read_cells(value, off, address_cells), read_cells(value, off + ac * 4, size_cells))
+        else {
             return n;
         };
         if size != 0 {
@@ -294,10 +278,7 @@ mod tests {
 
     impl Builder {
         fn new() -> Self {
-            Builder {
-                structs: Vec::new(),
-                strings: Vec::new(),
-            }
+            Builder { structs: Vec::new(), strings: Vec::new() }
         }
         fn tok(&mut self, t: u32) {
             self.structs.extend_from_slice(&t.to_be_bytes());
@@ -395,18 +376,12 @@ mod tests {
         let mut regions: [MemoryRegion; 2] = Default::default();
         assert_eq!(fdt.memory_regions(&mut regions), 1);
         assert_eq!(regions[0], 0x4000_0000..0x5000_0000);
-        assert_eq!(
-            fdt.memory_containing(0x4020_0000),
-            Some(0x4000_0000..0x5000_0000)
-        );
+        assert_eq!(fdt.memory_containing(0x4020_0000), Some(0x4000_0000..0x5000_0000));
         assert_eq!(fdt.memory_containing(0x5000_0000), None);
         // The cpus node's own cell counts must not leak into the decode.
         let blob = qemu_like(512 << 20);
         let fdt = Fdt::from_bytes(&blob).unwrap();
-        assert_eq!(
-            fdt.memory_containing(0x4000_0000),
-            Some(0x4000_0000..0x6000_0000)
-        );
+        assert_eq!(fdt.memory_containing(0x4000_0000), Some(0x4000_0000..0x6000_0000));
     }
 
     #[test]
@@ -429,10 +404,7 @@ mod tests {
         // Two found, one stored.
         assert_eq!(fdt.memory_regions(&mut regions), 2);
         assert_eq!(regions[0], 0x4000_0000..0x5000_0000);
-        assert_eq!(
-            fdt.memory_containing(0x9000_0000),
-            Some(0x8000_0000..0xa000_0000)
-        );
+        assert_eq!(fdt.memory_containing(0x9000_0000), Some(0x8000_0000..0xa000_0000));
     }
 
     #[test]
@@ -529,17 +501,11 @@ mod tests {
         b.end();
         b.end();
         let mut blob = b.finish();
-        assert_eq!(
-            Fdt::from_bytes(&blob).unwrap().memory_regions(&mut regions),
-            1
-        );
+        assert_eq!(Fdt::from_bytes(&blob).unwrap().memory_regions(&mut regions), 1);
         let size_struct = u32::from_be_bytes(blob[36..40].try_into().unwrap()) as usize;
         let end_tok = HEADER_LEN + size_struct - 4;
         blob[end_tok..end_tok + 4].copy_from_slice(&FDT_NOP.to_be_bytes());
-        assert_eq!(
-            Fdt::from_bytes(&blob).unwrap().memory_regions(&mut regions),
-            0
-        );
+        assert_eq!(Fdt::from_bytes(&blob).unwrap().memory_regions(&mut regions), 0);
 
         // FDT_END while nodes are still open.
         let mut b = Builder::new();
@@ -549,10 +515,7 @@ mod tests {
         b.begin("memory");
         b.prop("reg", &reg64(&[(0x4000_0000, 1 << 20)]));
         let blob = b.finish();
-        assert_eq!(
-            Fdt::from_bytes(&blob).unwrap().memory_regions(&mut regions),
-            0
-        );
+        assert_eq!(Fdt::from_bytes(&blob).unwrap().memory_regions(&mut regions), 0);
 
         // Nesting deeper than the walker tracks.
         let mut b = Builder::new();
@@ -563,10 +526,7 @@ mod tests {
             b.end();
         }
         let blob = b.finish();
-        assert_eq!(
-            Fdt::from_bytes(&blob).unwrap().memory_regions(&mut regions),
-            0
-        );
+        assert_eq!(Fdt::from_bytes(&blob).unwrap().memory_regions(&mut regions), 0);
 
         // Unsupported cell widths and zero-sized entries are refused or
         // skipped.
@@ -579,10 +539,7 @@ mod tests {
         b.end();
         b.end();
         let blob = b.finish();
-        assert_eq!(
-            Fdt::from_bytes(&blob).unwrap().memory_regions(&mut regions),
-            0
-        );
+        assert_eq!(Fdt::from_bytes(&blob).unwrap().memory_regions(&mut regions), 0);
         let mut b = Builder::new();
         b.begin("");
         b.prop_u32("#address-cells", 2);
@@ -592,10 +549,7 @@ mod tests {
         b.end();
         b.end();
         let blob = b.finish();
-        assert_eq!(
-            Fdt::from_bytes(&blob).unwrap().memory_regions(&mut regions),
-            1
-        );
+        assert_eq!(Fdt::from_bytes(&blob).unwrap().memory_regions(&mut regions), 1);
         assert_eq!(regions[0], 0x8000_0000..0x8000_1000);
     }
 
@@ -607,10 +561,7 @@ mod tests {
         let short = unsafe { Fdt::from_raw(blob.as_ptr(), blob.len() - 8) };
         assert!(short.is_none());
         let ok = unsafe { Fdt::from_raw(blob.as_ptr(), blob.len() + 1000) }.unwrap();
-        assert_eq!(
-            ok.memory_containing(0x4000_0000),
-            Some(0x4000_0000..0x4800_0000)
-        );
+        assert_eq!(ok.memory_containing(0x4000_0000), Some(0x4000_0000..0x4800_0000));
         assert!(unsafe { Fdt::from_raw(core::ptr::null(), 4096) }.is_none());
         assert!(unsafe { Fdt::from_raw(blob.as_ptr(), 8) }.is_none());
     }

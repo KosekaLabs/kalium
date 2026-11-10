@@ -16,9 +16,7 @@
 #![no_std]
 
 use kalium_sdk::abi::limits::MAX_INSTANCES;
-use kalium_sdk::{
-    cap_drop, exit, rights, spawn, yield_now, Cap, Channel, Class, Console, Errno, Instance, Line,
-};
+use kalium_sdk::{Cap, Channel, Class, Console, Errno, Instance, Line, cap_drop, exit, rights, spawn, yield_now};
 
 /// Boot image index of `park`.
 const MOD_PARK: u32 = 6;
@@ -29,7 +27,7 @@ const GIVE_UP: u32 = MAX_INSTANCES as u32 * 4;
 /// Yields granted to the released children before giving up on a slot.
 const RECLAIM_TRIES: u32 = 10_000;
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn _start() {
     let console = Console::from_cap(Cap::slot(0));
     let spawner = Cap::slot(1);
@@ -38,10 +36,7 @@ pub extern "C" fn _start() {
     let (tx, rx) = Channel::create().unwrap_or_else(|e| fail(console, "channel_create", e));
     let mut spawned: u32 = 0;
     loop {
-        let child_rx = rx
-            .cap()
-            .derive(rights::RECV | rights::TRANSFER)
-            .unwrap_or_else(|e| fail(console, "cap_derive", e));
+        let child_rx = rx.cap().derive(rights::RECV | rights::TRANSFER).unwrap_or_else(|e| fail(console, "cap_derive", e));
         match spawn(spawner, MOD_PARK, &[child_rx], Class::Fair, 0, 0) {
             Ok(child) => {
                 // Hostile: forget the child. The kernel must bound the loop
@@ -61,16 +56,9 @@ pub extern "C" fn _start() {
             Err(e) => fail(console, "spawn", e),
         }
     }
-    let _ = Line::new()
-        .str("greedy: spawn refused (ENOMEM) after ")
-        .uint(spawned as u64)
-        .str(" instances")
-        .println(console);
+    let _ = Line::new().str("greedy: spawn refused (ENOMEM) after ").uint(spawned as u64).str(" instances").println(console);
     if spawned != EXPECTED {
-        let _ = Line::new()
-            .str("greedy: expected the limit after ")
-            .uint(EXPECTED as u64)
-            .println(console);
+        let _ = Line::new().str("greedy: expected the limit after ").uint(EXPECTED as u64).println(console);
         exit(1);
     }
 
@@ -96,10 +84,7 @@ pub extern "C" fn _start() {
             let _ = console.println("greedy: slot reclaimed, park exited 0");
         }
         Ok(code) => {
-            let _ = Line::new()
-                .str("greedy: park exited ")
-                .int(code as i64)
-                .println(console);
+            let _ = Line::new().str("greedy: park exited ").int(code as i64).println(console);
             exit(1);
         }
         Err(e) => fail(console, "instance_wait", e),
@@ -108,11 +93,6 @@ pub extern "C" fn _start() {
 }
 
 fn fail(console: Console, what: &str, e: Errno) -> ! {
-    let _ = Line::new()
-        .str("greedy: ")
-        .str(what)
-        .str(" failed: ")
-        .errno(e)
-        .println(console);
+    let _ = Line::new().str("greedy: ").str(what).str(" failed: ").errno(e).println(console);
     exit(1)
 }

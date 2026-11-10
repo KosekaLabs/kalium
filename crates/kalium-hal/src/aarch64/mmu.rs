@@ -75,8 +75,7 @@ pub const MAIR_DEVICE_NGNRNE: u64 = 0x00;
 /// MAIR encoding of attribute index 1: Normal, write-back, read/write-allocate.
 pub const MAIR_NORMAL_WB: u64 = 0xff;
 
-const MAIR_VALUE: u64 =
-    (MAIR_DEVICE_NGNRNE << (8 * ATTR_DEVICE)) | (MAIR_NORMAL_WB << (8 * ATTR_NORMAL));
+const MAIR_VALUE: u64 = (MAIR_DEVICE_NGNRNE << (8 * ATTR_DEVICE)) | (MAIR_NORMAL_WB << (8 * ATTR_NORMAL));
 
 /// Access permissions and executability of a mapping.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -139,11 +138,7 @@ fn image_page_perm(pa: usize) -> Option<Perm> {
 /// The permission a 4 KiB page of RAM outside the kernel image gets: the
 /// device tree area is read-only, everything else is heap.
 fn ram_page_perm(pa: usize) -> Perm {
-    if boot::dtb_area_range().contains(&pa) {
-        Perm::ReadOnly
-    } else {
-        Perm::ReadWrite
-    }
+    if boot::dtb_area_range().contains(&pa) { Perm::ReadOnly } else { Perm::ReadWrite }
 }
 
 /// Fill the level-3 table `l3` for the 2 MiB block at `block` with the pages
@@ -154,18 +149,15 @@ fn ram_page_perm(pa: usize) -> Perm {
 ///
 /// `l3` must point at a table nothing else is using, and the MMU must be
 /// off (the writes bypass no cache then).
-unsafe fn fill_l3(
-    l3: *mut Table,
-    block: usize,
-    ram_end: usize,
-    perm: impl Fn(usize) -> Option<Perm>,
-) {
-    for j in 0..ENTRIES {
-        let page = block + j * PAGE_4K;
-        (*l3).0[j] = match perm(page) {
-            Some(p) if page < ram_end => normal_page(page, p),
-            _ => 0,
-        };
+unsafe fn fill_l3(l3: *mut Table, block: usize, ram_end: usize, perm: impl Fn(usize) -> Option<Perm>) {
+    unsafe {
+        for j in 0..ENTRIES {
+            let page = block + j * PAGE_4K;
+            (*l3).0[j] = match perm(page) {
+                Some(p) if page < ram_end => normal_page(page, p),
+                _ => 0,
+            };
+        }
     }
 }
 
@@ -212,11 +204,7 @@ pub fn enable() {
     // end exactly there: whole 2 MiB blocks up to `ram.end`, the last,
     // partial block (if any) through `L3_RAM_TAIL`.
     let ram_end = ram.end;
-    assert!(
-        ram_end.is_multiple_of(PAGE_4K),
-        "end of RAM {:#x} is not page aligned",
-        ram_end
-    );
+    assert!(ram_end.is_multiple_of(PAGE_4K), "end of RAM {:#x} is not page aligned", ram_end);
     let image_blocks = (image.end - image.start).div_ceil(BLOCK_2M);
     assert!(
         image.start.is_multiple_of(BLOCK_2M) && image_blocks <= IMAGE_L3_TABLES,
@@ -279,13 +267,7 @@ pub fn enable() {
     write_sysreg!("mair_el1", MAIR_VALUE);
     write_sysreg!(
         "tcr_el1",
-        TCR_T0SZ_39BIT
-            | TCR_IRGN0_WB
-            | TCR_ORGN0_WB
-            | TCR_SH0_INNER
-            | TCR_TG0_4K
-            | TCR_EPD1
-            | (ips << TCR_IPS_SHIFT)
+        TCR_T0SZ_39BIT | TCR_IRGN0_WB | TCR_ORGN0_WB | TCR_SH0_INNER | TCR_TG0_4K | TCR_EPD1 | (ips << TCR_IPS_SHIFT)
     );
     write_sysreg!("ttbr0_el1", l1 as u64);
     cpu::isb();
@@ -293,14 +275,7 @@ pub fn enable() {
     // Invalidate TLBs and the instruction cache before turning things on.
     // SAFETY: cache and TLB maintenance only.
     unsafe {
-        core::arch::asm!(
-            "tlbi vmalle1",
-            "dsb nsh",
-            "ic iallu",
-            "dsb nsh",
-            "isb",
-            options(nostack)
-        );
+        core::arch::asm!("tlbi vmalle1", "dsb nsh", "ic iallu", "dsb nsh", "isb", options(nostack));
     }
 
     let sctlr = read_sysreg!("sctlr_el1");

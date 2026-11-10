@@ -178,8 +178,8 @@ use kalium_ipc::{Channel, IpcError, Message, WaitQueue};
 use kalium_mm::MemObject;
 use kalium_sched::{Class, Scheduler, ThreadId};
 use kalium_wasm::{
-    Budget, BudgetRef, Error as WasmError, Execution, Extern, ExternType, Instance as WasmInstance,
-    Limits, Module, Snapshot, PAGE_SIZE,
+    Budget, BudgetRef, Error as WasmError, Execution, Extern, ExternType, Instance as WasmInstance, Limits, Module, PAGE_SIZE,
+    Snapshot,
 };
 
 use crate::boot_image::BootModule;
@@ -204,10 +204,7 @@ pub const HEAP_HEADROOM: usize = 8 << 20;
 /// value stack (`u64` per value) and the call frames.
 pub fn instance_state_bytes(limits: &Limits) -> usize {
     const FRAME_BYTES: usize = 16;
-    limits
-        .max_stack_values
-        .saturating_mul(8)
-        .saturating_add(limits.max_call_depth.saturating_mul(FRAME_BYTES))
+    limits.max_stack_values.saturating_mul(8).saturating_add(limits.max_call_depth.saturating_mul(FRAME_BYTES))
 }
 
 /// What an instance has been charged for (module docs, "Quotas and the
@@ -261,23 +258,13 @@ pub enum Object {
     /// The authority to create instances.
     Spawn,
     /// An IPC channel and the threads blocked on it.
-    Channel {
-        channel: Channel,
-        waiters: WaitQueue<ThreadId>,
-    },
+    Channel { channel: Channel, waiters: WaitQueue<ThreadId> },
     /// A memory object.
     MemObj(MemObject),
     /// An instance: its exit state and the threads waiting for it.
-    Instance {
-        instance: usize,
-        exit: Option<i32>,
-        waiters: WaitQueue<ThreadId>,
-    },
+    Instance { instance: usize, exit: Option<i32>, waiters: WaitQueue<ThreadId> },
     /// The captured state of an instance of boot module `module`.
-    Snapshot {
-        module: usize,
-        snapshot: Arc<Snapshot>,
-    },
+    Snapshot { module: usize, snapshot: Arc<Snapshot> },
 }
 
 struct Entry {
@@ -399,28 +386,17 @@ fn push_marked(list: &mut Vec<u64>, limit: usize, id: u64, overflow: &mut bool) 
 
 /// Marks the objects the queued messages of channel `id` refer to (nothing
 /// for another kind of object).
-fn mark_queued(
-    objects: &BTreeMap<u64, Entry>,
-    id: u64,
-    epoch: u64,
-    list: &mut Vec<u64>,
-    limit: usize,
-    overflow: &mut bool,
-) {
-    let Some(Entry {
-        object: Object::Channel { channel, .. },
-        ..
-    }) = objects.get(&id)
-    else {
+fn mark_queued(objects: &BTreeMap<u64, Entry>, id: u64, epoch: u64, list: &mut Vec<u64>, limit: usize, overflow: &mut bool) {
+    let Some(Entry { object: Object::Channel { channel, .. }, .. }) = objects.get(&id) else {
         return;
     };
     for msg in channel.messages() {
         for c in &msg.caps {
-            if let Some(child) = objects.get(&c.object.0) {
-                if child.mark.get() != epoch {
-                    child.mark.set(epoch);
-                    push_marked(list, limit, c.object.0, overflow);
-                }
+            if let Some(child) = objects.get(&c.object.0)
+                && child.mark.get() != epoch
+            {
+                child.mark.set(epoch);
+                push_marked(list, limit, c.object.0, overflow);
             }
         }
     }
@@ -585,21 +561,8 @@ impl Kernel {
     /// charged to `owner` with [`charge`](Kernel::charge): the charge
     /// (`bytes` of the budget, and the object's quota) is released when
     /// the object is freed.
-    pub fn new_owned_object(
-        &mut self,
-        object: Object,
-        pins: usize,
-        owner: usize,
-        bytes: usize,
-    ) -> ObjectId {
-        self.new_object_with(
-            object,
-            pins,
-            Cost {
-                owner: Some(owner),
-                bytes,
-            },
-        )
+    pub fn new_owned_object(&mut self, object: Object, pins: usize, owner: usize, bytes: usize) -> ObjectId {
+        self.new_object_with(object, pins, Cost { owner: Some(owner), bytes })
     }
 
     fn new_object_with(&mut self, object: Object, pins: usize, cost: Cost) -> ObjectId {
@@ -630,10 +593,9 @@ impl Kernel {
         };
         let a = &inst.account;
         let within = match quota {
-            Quota::MemObj => a
-                .memobj_bytes
-                .checked_add(bytes as u64)
-                .is_some_and(|t| t <= kalium_abi::limits::MAX_MEMOBJ_BYTES_PER_INSTANCE),
+            Quota::MemObj => {
+                a.memobj_bytes.checked_add(bytes as u64).is_some_and(|t| t <= kalium_abi::limits::MAX_MEMOBJ_BYTES_PER_INSTANCE)
+            }
             Quota::Snapshot => a
                 .snapshot_bytes
                 .checked_add(bytes as u64)
@@ -664,13 +626,7 @@ impl Kernel {
 
     /// Gives back a charge whose object was never registered.
     pub fn refund(&mut self, owner: usize, quota: Quota, bytes: usize) {
-        self.uncharge(
-            Cost {
-                owner: Some(owner),
-                bytes,
-            },
-            quota,
-        );
+        self.uncharge(Cost { owner: Some(owner), bytes }, quota);
     }
 
     /// Releases an object's charge: its bytes from the budget, and its
@@ -683,9 +639,7 @@ impl Kernel {
         let a = &mut inst.account;
         match quota {
             Quota::MemObj => a.memobj_bytes = a.memobj_bytes.saturating_sub(cost.bytes as u64),
-            Quota::Snapshot => {
-                a.snapshot_bytes = a.snapshot_bytes.saturating_sub(cost.bytes as u64)
-            }
+            Quota::Snapshot => a.snapshot_bytes = a.snapshot_bytes.saturating_sub(cost.bytes as u64),
             Quota::Channel => a.channels = a.channels.saturating_sub(1),
         }
     }
@@ -723,9 +677,7 @@ impl Kernel {
     /// above it in the object's lineage has been revoked since it was
     /// derived. Every host call checks this before kind and rights.
     pub fn is_valid(&self, cap: Capability) -> bool {
-        self.objects
-            .get(&cap.object.0)
-            .is_some_and(|e| e.lineage.is_valid(cap.node))
+        self.objects.get(&cap.object.0).is_some_and(|e| e.lineage.is_valid(cap.node))
     }
 
     /// A capability on `cap.object` was destroyed. Wakes receivers when the
@@ -799,10 +751,7 @@ impl Kernel {
         while *head != NO_DYING {
             let id = *head;
             let next = match self.objects.get_mut(&id) {
-                Some(Entry {
-                    object: Object::Channel { channel, .. },
-                    ..
-                }) => channel.try_recv().ok(),
+                Some(Entry { object: Object::Channel { channel, .. }, .. }) => channel.try_recv().ok(),
                 _ => None,
             };
             match next {
@@ -896,11 +845,7 @@ impl Kernel {
     fn collect_unreachable(&mut self, now: u64) {
         self.collect_pending = false;
         // The common release leaves nothing held by queued messages only.
-        if !self
-            .objects
-            .values()
-            .any(|e| e.refs > 0 && e.refs == e.queued)
-        {
+        if !self.objects.values().any(|e| e.refs > 0 && e.refs == e.queued) {
             return;
         }
         let limit = self.objects.len().min(MARK_LIST_LIMIT);
@@ -949,10 +894,10 @@ impl Kernel {
                 if e.mark.get() == epoch || list.len() >= limit {
                     continue;
                 }
-                if let Object::Channel { channel, .. } = &e.object {
-                    if !channel.is_empty() {
-                        list.push(id);
-                    }
+                if let Object::Channel { channel, .. } = &e.object
+                    && !channel.is_empty()
+                {
+                    list.push(id);
                 }
             }
             if list.is_empty() {
@@ -969,9 +914,7 @@ impl Kernel {
             println!(
                 "kalium: collected {} unreachable objects: {} queued messages, {} budget bytes",
                 freed,
-                self.drained
-                    .messages
-                    .saturating_sub(drained_before.messages),
+                self.drained.messages.saturating_sub(drained_before.messages),
                 self.drained.bytes.saturating_sub(drained_before.bytes),
             );
         }
@@ -984,11 +927,7 @@ impl Kernel {
         let mut dying = NO_DYING;
         loop {
             let msg = match self.objects.get_mut(&id) {
-                Some(Entry {
-                    object: Object::Channel { channel, .. },
-                    dying: false,
-                    ..
-                }) => channel.try_recv().ok(),
+                Some(Entry { object: Object::Channel { channel, .. }, dying: false, .. }) => channel.try_recv().ok(),
                 _ => None,
             };
             let Some(msg) = msg else {
@@ -1012,13 +951,7 @@ impl Kernel {
         kind: ObjectKind,
         rights: Rights,
     ) -> Result<CapIndex, CapError> {
-        mint_fresh(
-            &mut self.objects,
-            &mut self.instances[instance].caps,
-            object,
-            kind,
-            rights,
-        )
+        mint_fresh(&mut self.objects, &mut self.instances[instance].caps, object, kind, rights)
     }
 
     /// [`mint_root`](Kernel::mint_root) into a table that is not (yet) an
@@ -1037,18 +970,10 @@ impl Kernel {
     /// source's lineage node, into the same table. Errors in order:
     /// `BadCap` (no such slot, or revoked), `Perm` (no `DERIVE`), `NoMem`
     /// (table full, or `MAX_DERIVE_DEPTH` reached).
-    pub fn derive_into(
-        &mut self,
-        instance: usize,
-        idx: CapIndex,
-        rights: Rights,
-    ) -> Result<CapIndex, CapError> {
+    pub fn derive_into(&mut self, instance: usize, idx: CapIndex, rights: Rights) -> Result<CapIndex, CapError> {
         let table = &mut self.instances[instance].caps;
         let src = *table.get(idx)?;
-        let entry = self
-            .objects
-            .get_mut(&src.object.0)
-            .ok_or(CapError::BadCap)?;
+        let entry = self.objects.get_mut(&src.object.0).ok_or(CapError::BadCap)?;
         if !entry.lineage.is_valid(src.node) {
             return Err(CapError::BadCap);
         }
@@ -1096,10 +1021,7 @@ impl Kernel {
         // ancestors are untouched, and one already invalid stays so).
         let lineage = &entry.lineage;
         let dies = |c: &Capability| {
-            c.object == id
-                && c.node != cap.node
-                && lineage.is_descendant(c.node, cap.node)
-                && lineage.is_valid(c.node)
+            c.object == id && c.node != cap.node && lineage.is_descendant(c.node, cap.node) && lineage.is_valid(c.node)
         };
         let mut dead = 0usize;
         let mut senders = 0usize;
@@ -1151,12 +1073,7 @@ impl Kernel {
     }
 
     /// Removes a slot and destroys its capability, live or revoked.
-    pub fn destroy_slot(
-        &mut self,
-        instance: usize,
-        idx: CapIndex,
-        now: u64,
-    ) -> Result<(), CapError> {
+    pub fn destroy_slot(&mut self, instance: usize, idx: CapIndex, now: u64) -> Result<(), CapError> {
         let cap = self.instances[instance].caps.take(idx)?;
         self.release(cap, now);
         Ok(())
@@ -1231,10 +1148,7 @@ impl Kernel {
                 Ok(m)
             }
             Err(e) => {
-                println!(
-                    "kalium: module {} ({}) failed to load: {}",
-                    index, boot.name, e
-                );
+                println!("kalium: module {} ({}) failed to load: {}", index, boot.name, e);
                 Err(SpawnError::NoModule)
             }
         }
@@ -1245,14 +1159,11 @@ impl Kernel {
     /// while there are fewer than `MAX_INSTANCES`. Slot 0 (`init`) is never
     /// reused: the run loop treats its exit as the end of the kernel.
     fn free_slot(&self) -> Option<usize> {
-        let reusable = (1..self.instances.len()).find(|&i| {
-            self.instances[i].exited.is_some() && !self.sched.contains(ThreadId(i as u32))
-        });
+        let reusable =
+            (1..self.instances.len()).find(|&i| self.instances[i].exited.is_some() && !self.sched.contains(ThreadId(i as u32)));
         match reusable {
             Some(i) => Some(i),
-            None if self.instances.len() < kalium_abi::limits::MAX_INSTANCES => {
-                Some(self.instances.len())
-            }
+            None if self.instances.len() < kalium_abi::limits::MAX_INSTANCES => Some(self.instances.len()),
             None => None,
         }
     }
@@ -1292,10 +1203,7 @@ impl Kernel {
     /// call has checked that the instance is parked. `None` if it has no
     /// Wasm state (exited, or being run right now).
     pub fn snapshot_instance(&self, target: usize) -> Option<Result<Snapshot, WasmError>> {
-        self.instances
-            .get(target)
-            .and_then(|i| i.run.as_ref())
-            .map(|r| r.wasm.snapshot())
+        self.instances.get(target).and_then(|i| i.run.as_ref()).map(|r| r.wasm.snapshot())
     }
 
     /// Charges a freshly built instance to the budget: its memory and
@@ -1308,10 +1216,8 @@ impl Kernel {
             return false;
         }
         for i in 0..wasm.num_tables() {
-            let fits = u32::try_from(i)
-                .ok()
-                .and_then(|i| wasm.table_ref(i))
-                .is_some_and(|t| t.borrow_mut().set_budget(&self.budget));
+            let fits =
+                u32::try_from(i).ok().and_then(|i| wasm.table_ref(i)).is_some_and(|t| t.borrow_mut().set_budget(&self.budget));
             if !fits {
                 return false;
             }
@@ -1324,11 +1230,7 @@ impl Kernel {
     /// state or its memory is borrowed.
     pub fn memory_size_of(&self, target: usize) -> Option<usize> {
         let run = self.instances.get(target)?.run.as_ref()?;
-        run.wasm
-            .memory_ref()
-            .try_borrow()
-            .ok()
-            .map(|m| m.size_bytes())
+        run.wasm.memory_ref().try_borrow().ok().map(|m| m.size_bytes())
     }
 
     fn create(
@@ -1353,18 +1255,14 @@ impl Kernel {
         // memory is allocated and zeroed for nothing.
         let state = instance_state_bytes(&self.limits);
         let initial = match source {
-            Source::Fresh => decoded
-                .memories
-                .first()
-                .map_or(0, |m| (m.limits.min as usize).saturating_mul(PAGE_SIZE)),
+            Source::Fresh => decoded.memories.first().map_or(0, |m| (m.limits.min as usize).saturating_mul(PAGE_SIZE)),
             Source::Snapshot(snapshot, _) => snapshot.memory().len(),
         };
         if self.budget.available() < state.saturating_add(initial) {
             return Err((SpawnError::NoMem, caps));
         }
         let has_spawn = caps.holds_kind(ObjectKind::Spawn);
-        let mut resolve =
-            |m: &str, n: &str, ty: &kalium_wasm::FuncType| host::resolve(m, n, ty, has_spawn);
+        let mut resolve = |m: &str, n: &str, ty: &kalium_wasm::FuncType| host::resolve(m, n, ty, has_spawn);
         let built = match source {
             Source::Fresh => WasmInstance::new(decoded.clone(), &mut resolve, &self.limits),
             Source::Snapshot(snapshot, _) => {
@@ -1372,20 +1270,10 @@ impl Kernel {
                 // `from_snapshot` wants it; a table, memory or global import
                 // is a link error as in `Instance::new`.
                 let mut resolve_ext = |m: &str, n: &str, ty: &ExternType<'_>| match *ty {
-                    ExternType::Func(ft) => resolve(m, n, ft).ok().map(|id| Extern::Func {
-                        id,
-                        ty: ft.clone(),
-                        addr: None,
-                    }),
+                    ExternType::Func(ft) => resolve(m, n, ft).ok().map(|id| Extern::Func { id, ty: ft.clone(), addr: None }),
                     _ => None,
                 };
-                WasmInstance::from_snapshot(
-                    decoded.clone(),
-                    snapshot,
-                    &mut resolve_ext,
-                    &self.limits,
-                    0,
-                )
+                WasmInstance::from_snapshot(decoded.clone(), snapshot, &mut resolve_ext, &self.limits, 0)
             }
         };
         let wasm = match built {
@@ -1396,25 +1284,16 @@ impl Kernel {
                     WasmError::OutOfMemory => SpawnError::NoMem,
                     WasmError::Link { import } => {
                         if let Some(imp) = decoded.imports().get(import as usize) {
-                            println!(
-                                "kalium: module {} ({}): unresolved import {}:{}",
-                                module, name, imp.module, imp.name
-                            );
+                            println!("kalium: module {} ({}): unresolved import {}:{}", module, name, imp.module, imp.name);
                         }
                         SpawnError::Link
                     }
                     WasmError::Snapshot { msg } => {
-                        println!(
-                            "kalium: module {} ({}): snapshot does not fit: {}",
-                            module, name, msg
-                        );
+                        println!("kalium: module {} ({}): snapshot does not fit: {}", module, name, msg);
                         SpawnError::BadSnapshot
                     }
                     other => {
-                        println!(
-                            "kalium: module {} ({}) failed to instantiate: {}",
-                            module, name, other
-                        );
+                        println!("kalium: module {} ({}) failed to instantiate: {}", module, name, other);
                         SpawnError::Link
                     }
                 };
@@ -1426,18 +1305,9 @@ impl Kernel {
             Source::Snapshot(_, entry) => entry,
         };
         let entry = match wasm.export_func(entry_name) {
-            Some(f)
-                if decoded
-                    .func_type_of(f)
-                    .is_some_and(|t| t.params.is_empty() && t.results.is_empty()) =>
-            {
-                f
-            }
+            Some(f) if decoded.func_type_of(f).is_some_and(|t| t.params.is_empty() && t.results.is_empty()) => f,
             _ => {
-                println!(
-                    "kalium: module {} ({}) has no `{}` export of type [] -> []",
-                    module, name, entry_name
-                );
+                println!("kalium: module {} ({}) has no `{}` export of type [] -> []", module, name, entry_name);
                 self.budget.release(state);
                 return Err((SpawnError::Link, caps));
             }
@@ -1463,14 +1333,7 @@ impl Kernel {
             }
         };
 
-        let object = self.new_object(
-            Object::Instance {
-                instance: id,
-                exit: None,
-                waiters: WaitQueue::new(),
-            },
-            1,
-        );
+        let object = self.new_object(Object::Instance { instance: id, exit: None, waiters: WaitQueue::new() }, 1);
         let inst = Inst {
             name,
             module,
@@ -1484,10 +1347,7 @@ impl Kernel {
             parked_on: Vec::new(),
             wasi: crate::wasi::State::default(),
             instructions: 0,
-            account: Account {
-                reserved: state,
-                ..Account::default()
-            },
+            account: Account { reserved: state, ..Account::default() },
         };
         if id == self.instances.len() {
             self.instances.push(inst);
@@ -1537,10 +1397,7 @@ impl Kernel {
                 instance, name, stats.periods, stats.met, stats.missed, stats.budget_exhausted
             );
         }
-        println!(
-            "kalium: instance {} ({}) exited {} after {} instructions",
-            instance, name, code, instructions
-        );
+        println!("kalium: instance {} ({}) exited {} after {} instructions", instance, name, code, instructions);
 
         self.unpark(tid);
         if self.sched.current() != Some(tid) {

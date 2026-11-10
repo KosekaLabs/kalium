@@ -128,8 +128,7 @@ pub mod rights {
 
     /// The union of every defined right. Bits outside this mask are not
     /// rights and a value carrying them is a bad argument.
-    pub const MASK: u64 =
-        READ | WRITE | SEND | RECV | DERIVE | TRANSFER | KILL | WAIT | SPAWN | SNAPSHOT;
+    pub const MASK: u64 = READ | WRITE | SEND | RECV | DERIVE | TRANSFER | KILL | WAIT | SPAWN | SNAPSHOT;
 
     /// Rights of the send end returned by `channel_create`:
     /// > one with `SEND|DERIVE|TRANSFER`
@@ -256,18 +255,8 @@ pub mod imports {
         pub const INSTANCE_ID: &str = "instance_id";
 
         /// Every function in this namespace, in ABI table order.
-        pub const FUNCTIONS: &[&str] = &[
-            CONSOLE_WRITE,
-            CAP_DROP,
-            CAP_DERIVE,
-            CAP_REVOKE,
-            CAP_INFO,
-            TIME_NOW,
-            YIELD,
-            SLEEP,
-            EXIT,
-            INSTANCE_ID,
-        ];
+        pub const FUNCTIONS: &[&str] =
+            &[CONSOLE_WRITE, CAP_DROP, CAP_DERIVE, CAP_REVOKE, CAP_INFO, TIME_NOW, YIELD, SLEEP, EXIT, INSTANCE_ID];
     }
 
     /// `kalium:ipc`: channels with capability transfer. Always resolves.
@@ -379,14 +368,7 @@ pub mod imports {
         pub const SPAWN_SNAPSHOT: &str = "spawn_snapshot";
 
         /// Every function in this namespace, in ABI table order.
-        pub const FUNCTIONS: &[&str] = &[
-            SPAWN,
-            INSTANCE_WAIT,
-            INSTANCE_KILL,
-            MODULE_COUNT,
-            INSTANCE_SNAPSHOT,
-            SPAWN_SNAPSHOT,
-        ];
+        pub const FUNCTIONS: &[&str] = &[SPAWN, INSTANCE_WAIT, INSTANCE_KILL, MODULE_COUNT, INSTANCE_SNAPSHOT, SPAWN_SNAPSHOT];
     }
 
     /// Every import module name, in the order of the plan's table.
@@ -435,9 +417,7 @@ pub mod imports {
     /// function. The position is stable across kernel and SDK and is a
     /// convenient `HostFuncId`.
     pub fn lookup(module: &str, name: &str) -> Option<usize> {
-        ALL_IMPORTS
-            .iter()
-            .position(|(m, n)| *m == module && *n == name)
+        ALL_IMPORTS.iter().position(|(m, n)| *m == module && *n == name)
     }
 }
 
@@ -470,9 +450,7 @@ pub mod layout {
         pub const fn to_le_bytes(self) -> [u8; CAP_INFO_SIZE] {
             let k = self.kind.to_le_bytes();
             let r = self.rights.to_le_bytes();
-            [
-                k[0], k[1], k[2], k[3], r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7],
-            ]
+            [k[0], k[1], k[2], k[3], r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]]
         }
 
         /// Decodes what the kernel wrote at `out`.
@@ -718,14 +696,8 @@ mod tests {
 
     #[test]
     fn kinds_match_plan() {
-        let expected: &[(u32, &str)] = &[
-            (1, "Console"),
-            (2, "Channel"),
-            (3, "MemObj"),
-            (4, "Instance"),
-            (5, "Spawn"),
-            (6, "Snapshot"),
-        ];
+        let expected: &[(u32, &str)] =
+            &[(1, "Console"), (2, "Channel"), (3, "MemObj"), (4, "Instance"), (5, "Spawn"), (6, "Snapshot")];
         assert_eq!(kind::ALL, expected);
         for (i, (value, _)) in kind::ALL.iter().enumerate() {
             assert_eq!(*value as usize, i + 1, "kinds are dense from 1");
@@ -738,10 +710,7 @@ mod tests {
         assert_eq!(imports::ipc::MODULE, "kalium:ipc");
         assert_eq!(imports::memory::MODULE, "kalium:memory");
         assert_eq!(imports::spawn::MODULE, "kalium:spawn");
-        assert_eq!(
-            imports::MODULES,
-            &["kalium:core", "kalium:ipc", "kalium:memory", "kalium:spawn"]
-        );
+        assert_eq!(imports::MODULES, &["kalium:core", "kalium:ipc", "kalium:memory", "kalium:spawn"]);
         for (i, m) in imports::MODULES.iter().enumerate() {
             assert!(m.starts_with("kalium:"));
             assert!(imports::is_known_module(m));
@@ -763,11 +732,7 @@ mod tests {
         let mut flat_len = 0;
         for (module, functions) in namespaces {
             for name in functions.iter() {
-                assert_eq!(
-                    imports::ALL_IMPORTS[flat_len],
-                    (*module, *name),
-                    "ALL_IMPORTS is out of order at {flat_len}"
-                );
+                assert_eq!(imports::ALL_IMPORTS[flat_len], (*module, *name), "ALL_IMPORTS is out of order at {flat_len}");
                 flat_len += 1;
             }
         }
@@ -779,8 +744,7 @@ mod tests {
             assert!(imports::is_known_module(module));
             assert!(!name.is_empty());
             assert!(
-                name.bytes()
-                    .all(|b| b.is_ascii_lowercase() || b == b'_' || b.is_ascii_digit()),
+                name.bytes().all(|b| b.is_ascii_lowercase() || b == b'_' || b.is_ascii_digit()),
                 "{name} is not a plain identifier"
             );
             for (_, other) in &imports::ALL_IMPORTS[..i] {
@@ -835,24 +799,15 @@ mod tests {
     #[test]
     fn cap_info_layout() {
         assert_eq!(layout::CAP_INFO_SIZE, 12);
-        let info = layout::CapInfo {
-            kind: kind::CHANNEL,
-            rights: rights::CHANNEL_RECV_END,
-        };
+        let info = layout::CapInfo { kind: kind::CHANNEL, rights: rights::CHANNEL_RECV_END };
         let bytes = info.to_le_bytes();
         assert_eq!(&bytes[..4], &2u32.to_le_bytes());
         assert_eq!(&bytes[4..], &(8u64 | 128 | 16 | 32).to_le_bytes());
         assert_eq!(layout::CapInfo::from_le_bytes(bytes), info);
 
-        let info = layout::CapInfo {
-            kind: 0xA1B2_C3D4,
-            rights: 0x0102_0304_0506_0708,
-        };
+        let info = layout::CapInfo { kind: 0xA1B2_C3D4, rights: 0x0102_0304_0506_0708 };
         let bytes = info.to_le_bytes();
-        assert_eq!(
-            bytes,
-            [0xD4, 0xC3, 0xB2, 0xA1, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01]
-        );
+        assert_eq!(bytes, [0xD4, 0xC3, 0xB2, 0xA1, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01]);
         assert_eq!(layout::CapInfo::from_le_bytes(bytes), info);
         assert_eq!(layout::CAP_INFO_KIND_OFFSET, 0);
         assert_eq!(layout::CAP_INFO_RIGHTS_OFFSET, 4);
@@ -861,10 +816,7 @@ mod tests {
     #[test]
     fn recv_header_layout() {
         assert_eq!(layout::RECV_HEADER_SIZE, 8);
-        let hdr = layout::RecvHeader {
-            len: 0x0000_1000,
-            ncaps: 3,
-        };
+        let hdr = layout::RecvHeader { len: 0x0000_1000, ncaps: 3 };
         let bytes = hdr.to_le_bytes();
         assert_eq!(bytes, [0x00, 0x10, 0, 0, 3, 0, 0, 0]);
         assert_eq!(layout::RecvHeader::from_le_bytes(bytes), hdr);
@@ -881,10 +833,7 @@ mod tests {
         assert_eq!(imports::lookup(wasi::MODULE, "fd_write"), None);
         assert_eq!(wasi::STDOUT_CONSOLE_SLOT, 0);
         assert_eq!(wasi::STDIN_CHANNEL_SLOT, 1);
-        assert_eq!(
-            [wasi::FD_STDIN, wasi::FD_STDOUT, wasi::FD_STDERR],
-            [0, 1, 2]
-        );
+        assert_eq!([wasi::FD_STDIN, wasi::FD_STDOUT, wasi::FD_STDERR], [0, 1, 2]);
     }
 
     #[test]
@@ -900,16 +849,8 @@ mod tests {
         assert_eq!(limits::MAX_CHANNELS_PER_INSTANCE, 64);
         // The quotas hold whole objects of the largest size and bound the
         // queued payload of an instance's channels to 4 MiB.
-        assert_eq!(
-            limits::MAX_MEMOBJ_BYTES_PER_INSTANCE % limits::MAX_MEMOBJ_SIZE,
-            0
-        );
-        assert_eq!(
-            limits::MAX_CHANNELS_PER_INSTANCE
-                * limits::CHANNEL_QUEUE_DEPTH
-                * limits::MAX_MESSAGE_LEN,
-            4 << 20
-        );
+        assert_eq!(limits::MAX_MEMOBJ_BYTES_PER_INSTANCE % limits::MAX_MEMOBJ_SIZE, 0);
+        assert_eq!(limits::MAX_CHANNELS_PER_INSTANCE * limits::CHANNEL_QUEUE_DEPTH * limits::MAX_MESSAGE_LEN, 4 << 20);
         assert_eq!(sched::CLASS_FAIR, 0);
         assert_eq!(sched::CLASS_REAL_TIME, 1);
         assert_eq!(entry::START, 0);

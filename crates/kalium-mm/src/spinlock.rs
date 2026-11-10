@@ -29,10 +29,7 @@ impl<T> SpinLock<T> {
     /// Creates an unlocked lock around `value`. `const` so it can live in a
     /// `static`.
     pub const fn new(value: T) -> Self {
-        SpinLock {
-            locked: AtomicBool::new(false),
-            data: UnsafeCell::new(value),
-        }
+        SpinLock { locked: AtomicBool::new(false), data: UnsafeCell::new(value) }
     }
 
     /// Acquires the lock, spinning until it is free.
@@ -53,11 +50,7 @@ impl<T> SpinLock<T> {
 
     /// Acquires the lock if it is free, without spinning.
     pub fn try_lock(&self) -> Option<SpinLockGuard<'_, T>> {
-        if self
-            .locked
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_ok()
-        {
+        if self.locked.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok() {
             Some(SpinLockGuard { lock: self })
         } else {
             None

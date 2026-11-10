@@ -56,11 +56,7 @@ pub fn validate(module: &Module) -> Result<(), Error> {
 }
 
 fn invalid(msg: &'static str) -> Error {
-    Error::Invalid {
-        msg,
-        func: None,
-        instr: None,
-    }
+    Error::Invalid { msg, func: None, instr: None }
 }
 
 /// The validation context `C` of the spec: the index spaces of the module
@@ -213,12 +209,7 @@ impl<'m> Context<'m> {
                 }));
             }
         }
-        let mut names: Vec<&str> = self
-            .module
-            .exports
-            .iter()
-            .map(|e| e.name.as_str())
-            .collect();
+        let mut names: Vec<&str> = self.module.exports.iter().map(|e| e.name.as_str()).collect();
         names.sort_unstable();
         if names.windows(2).any(|w| w[0] == w[1]) {
             return Err(invalid("duplicate export name"));
@@ -228,9 +219,7 @@ impl<'m> Context<'m> {
 
     fn check_start(&self) -> Result<(), Error> {
         if let Some(start) = self.module.start {
-            let ty = self
-                .func_type(start)
-                .ok_or_else(|| invalid("unknown function"))?;
+            let ty = self.func_type(start).ok_or_else(|| invalid("unknown function"))?;
             if !ty.params.is_empty() || !ty.results.is_empty() {
                 return Err(invalid("start function"));
             }
@@ -241,10 +230,7 @@ impl<'m> Context<'m> {
     fn check_elements(&self) -> Result<(), Error> {
         for seg in &self.module.elements {
             if let ElemMode::Active { table, offset } = &seg.mode {
-                let tt = self
-                    .tables
-                    .get(*table as usize)
-                    .ok_or_else(|| invalid("unknown table"))?;
+                let tt = self.tables.get(*table as usize).ok_or_else(|| invalid("unknown table"))?;
                 if tt.elem != seg.ty {
                     return Err(invalid("type mismatch"));
                 }
@@ -304,10 +290,7 @@ impl<'m> Context<'m> {
                     // Only imported globals are in scope for constant
                     // expressions (2.0 rules), and they must be immutable.
                     let idx = idx as usize;
-                    let g = self
-                        .globals
-                        .get(idx)
-                        .ok_or_else(|| invalid("unknown global"))?;
+                    let g = self.globals.get(idx).ok_or_else(|| invalid("unknown global"))?;
                     if idx >= self.num_imported_globals {
                         return Err(invalid("unknown global"));
                     }
@@ -328,10 +311,10 @@ impl<'m> Context<'m> {
 }
 
 fn check_table_limits(l: &ResizableLimits) -> Result<(), Error> {
-    if let Some(max) = l.max {
-        if max < l.min {
-            return Err(invalid("size minimum must not be greater than maximum"));
-        }
+    if let Some(max) = l.max
+        && max < l.min
+    {
+        return Err(invalid("size minimum must not be greater than maximum"));
     }
     Ok(())
 }
@@ -399,11 +382,7 @@ struct Frame {
 impl Frame {
     /// The types a branch to this frame's label carries.
     fn label_types<'a>(&'a self, types: &'a [FuncType]) -> &'a [ValType] {
-        if self.kind == FrameKind::Loop {
-            self.sig.params(types)
-        } else {
-            self.sig.results(types)
-        }
+        if self.kind == FrameKind::Loop { self.sig.params(types) } else { self.sig.results(types) }
     }
 }
 
@@ -428,23 +407,11 @@ const ALIGN_64: u32 = 3;
 
 impl<'c, 'm> FuncValidator<'c, 'm> {
     fn new(ctx: &'c Context<'m>) -> Self {
-        FuncValidator {
-            ctx,
-            vals: Vec::new(),
-            ctrls: Vec::new(),
-            func: 0,
-            pc: 0,
-            params: &[],
-            locals: &[],
-        }
+        FuncValidator { ctx, vals: Vec::new(), ctrls: Vec::new(), func: 0, pc: 0, params: &[], locals: &[] }
     }
 
     fn err(&self, msg: &'static str) -> Error {
-        Error::Invalid {
-            msg,
-            func: Some(self.func),
-            instr: Some(self.pc),
-        }
+        Error::Invalid { msg, func: Some(self.func), instr: Some(self.pc) }
     }
 
     fn validate_body(&mut self, func_idx: u32, body: &'m FuncBody) -> Result<(), Error> {
@@ -452,24 +419,11 @@ impl<'c, 'm> FuncValidator<'c, 'm> {
         self.pc = 0;
         self.vals.clear();
         self.ctrls.clear();
-        let type_idx = *self
-            .ctx
-            .funcs
-            .get(func_idx as usize)
-            .ok_or_else(|| self.err("unknown function"))?;
-        let ty = self
-            .ctx
-            .types
-            .get(type_idx as usize)
-            .ok_or_else(|| self.err("unknown type"))?;
+        let type_idx = *self.ctx.funcs.get(func_idx as usize).ok_or_else(|| self.err("unknown function"))?;
+        let ty = self.ctx.types.get(type_idx as usize).ok_or_else(|| self.err("unknown type"))?;
         self.params = &ty.params;
         self.locals = &body.locals;
-        self.ctrls.push(Frame {
-            kind: FrameKind::Func,
-            sig: Sig::Type(type_idx),
-            height: 0,
-            unreachable: false,
-        });
+        self.ctrls.push(Frame { kind: FrameKind::Func, sig: Sig::Type(type_idx), height: 0, unreachable: false });
 
         for (pc, instr) in body.instrs.iter().enumerate() {
             self.pc = u32::try_from(pc).map_err(|_| self.err("function body too large"))?;
@@ -554,12 +508,7 @@ impl<'c, 'm> FuncValidator<'c, 'm> {
 
     fn push_ctrl(&mut self, kind: FrameKind, sig: Sig) {
         let height = self.vals.len();
-        self.ctrls.push(Frame {
-            kind,
-            sig,
-            height,
-            unreachable: false,
-        });
+        self.ctrls.push(Frame { kind, sig, height, unreachable: false });
         self.push_vals(sig.params(self.ctx.types));
     }
 
@@ -589,10 +538,7 @@ impl<'c, 'm> FuncValidator<'c, 'm> {
             .checked_sub(1)
             .and_then(|top| top.checked_sub(depth as usize))
             .ok_or_else(|| self.err("unknown label"))?;
-        self.ctrls
-            .get(idx)
-            .copied()
-            .ok_or_else(|| self.err("unknown label"))
+        self.ctrls.get(idx).copied().ok_or_else(|| self.err("unknown label"))
     }
 
     fn block_sig(&self, bt: BlockType) -> Result<Sig, Error> {
@@ -615,26 +561,15 @@ impl<'c, 'm> FuncValidator<'c, 'm> {
         if let Some(t) = self.params.get(idx) {
             return Ok(*t);
         }
-        idx.checked_sub(self.params.len())
-            .and_then(|i| self.locals.get(i))
-            .copied()
-            .ok_or_else(|| self.err("unknown local"))
+        idx.checked_sub(self.params.len()).and_then(|i| self.locals.get(i)).copied().ok_or_else(|| self.err("unknown local"))
     }
 
     fn global(&self, idx: u32) -> Result<GlobalType, Error> {
-        self.ctx
-            .globals
-            .get(idx as usize)
-            .copied()
-            .ok_or_else(|| self.err("unknown global"))
+        self.ctx.globals.get(idx as usize).copied().ok_or_else(|| self.err("unknown global"))
     }
 
     fn table(&self, idx: u32) -> Result<TableType, Error> {
-        self.ctx
-            .tables
-            .get(idx as usize)
-            .copied()
-            .ok_or_else(|| self.err("unknown table"))
+        self.ctx.tables.get(idx as usize).copied().ok_or_else(|| self.err("unknown table"))
     }
 
     fn memory(&self) -> Result<(), Error> {
@@ -645,17 +580,11 @@ impl<'c, 'm> FuncValidator<'c, 'm> {
     }
 
     fn func_type(&self, idx: u32) -> Result<&'m FuncType, Error> {
-        self.ctx
-            .func_type(idx)
-            .ok_or_else(|| self.err("unknown function"))
+        self.ctx.func_type(idx).ok_or_else(|| self.err("unknown function"))
     }
 
     fn elem(&self, idx: u32) -> Result<RefType, Error> {
-        self.ctx
-            .elems
-            .get(idx as usize)
-            .copied()
-            .ok_or_else(|| self.err("unknown elem segment"))
+        self.ctx.elems.get(idx as usize).copied().ok_or_else(|| self.err("unknown elem segment"))
     }
 
     fn data(&self, idx: u32) -> Result<(), Error> {
@@ -784,9 +713,7 @@ impl<'c, 'm> FuncValidator<'c, 'm> {
                 self.push_vals(types);
             }
             BrTable(idx) => {
-                let table = body
-                    .br_table(idx)
-                    .ok_or_else(|| self.err("unknown label"))?;
+                let table = body.br_table(idx).ok_or_else(|| self.err("unknown label"))?;
                 self.pop(I32)?;
                 let default = self.label(table.default)?;
                 let arity = default.label_types(self.ctx.types).len();
@@ -802,10 +729,7 @@ impl<'c, 'm> FuncValidator<'c, 'm> {
                 self.unreachable()?;
             }
             Return => {
-                let func = *self
-                    .ctrls
-                    .first()
-                    .ok_or_else(|| self.err("type mismatch"))?;
+                let func = *self.ctrls.first().ok_or_else(|| self.err("type mismatch"))?;
                 self.pop_vals(func.sig.results(self.ctx.types))?;
                 self.unreachable()?;
             }
@@ -818,11 +742,7 @@ impl<'c, 'm> FuncValidator<'c, 'm> {
                 if tt.elem != RefType::FuncRef {
                     return Err(self.err("type mismatch"));
                 }
-                let ft = self
-                    .ctx
-                    .types
-                    .get(ty as usize)
-                    .ok_or_else(|| self.err("unknown type"))?;
+                let ft = self.ctx.types.get(ty as usize).ok_or_else(|| self.err("unknown type"))?;
                 self.pop(I32)?;
                 self.call_type(ft)?;
             }
@@ -838,10 +758,10 @@ impl<'c, 'm> FuncValidator<'c, 'm> {
                 if t1.is_some_and(ValType::is_ref) || t2.is_some_and(ValType::is_ref) {
                     return Err(self.err("type mismatch"));
                 }
-                if let (Some(a), Some(b)) = (t1, t2) {
-                    if a != b {
-                        return Err(self.err("type mismatch"));
-                    }
+                if let (Some(a), Some(b)) = (t1, t2)
+                    && a != b
+                {
+                    return Err(self.err("type mismatch"));
                 }
                 self.push_opt(t1.or(t2));
             }
@@ -881,10 +801,10 @@ impl<'c, 'm> FuncValidator<'c, 'm> {
             // ---- reference ----
             RefNull(r) => self.push(r.into()),
             RefIsNull => {
-                if let Some(t) = self.pop_any()? {
-                    if !t.is_ref() {
-                        return Err(self.err("type mismatch"));
-                    }
+                if let Some(t) = self.pop_any()?
+                    && !t.is_ref()
+                {
+                    return Err(self.err("type mismatch"));
                 }
                 self.push(I32);
             }
@@ -998,49 +918,35 @@ impl<'c, 'm> FuncValidator<'c, 'm> {
 
             // ---- i32 ----
             I32Eqz => self.testop(I32)?,
-            I32Eq | I32Ne | I32LtS | I32LtU | I32GtS | I32GtU | I32LeS | I32LeU | I32GeS
-            | I32GeU => self.relop(I32)?,
+            I32Eq | I32Ne | I32LtS | I32LtU | I32GtS | I32GtU | I32LeS | I32LeU | I32GeS | I32GeU => self.relop(I32)?,
             I32Clz | I32Ctz | I32Popcnt => self.unop(I32)?,
-            I32Add | I32Sub | I32Mul | I32DivS | I32DivU | I32RemS | I32RemU | I32And | I32Or
-            | I32Xor | I32Shl | I32ShrS | I32ShrU | I32Rotl | I32Rotr => self.binop(I32)?,
+            I32Add | I32Sub | I32Mul | I32DivS | I32DivU | I32RemS | I32RemU | I32And | I32Or | I32Xor | I32Shl | I32ShrS
+            | I32ShrU | I32Rotl | I32Rotr => self.binop(I32)?,
 
             // ---- i64 ----
             I64Eqz => self.testop(I64)?,
-            I64Eq | I64Ne | I64LtS | I64LtU | I64GtS | I64GtU | I64LeS | I64LeU | I64GeS
-            | I64GeU => self.relop(I64)?,
+            I64Eq | I64Ne | I64LtS | I64LtU | I64GtS | I64GtU | I64LeS | I64LeU | I64GeS | I64GeU => self.relop(I64)?,
             I64Clz | I64Ctz | I64Popcnt => self.unop(I64)?,
-            I64Add | I64Sub | I64Mul | I64DivS | I64DivU | I64RemS | I64RemU | I64And | I64Or
-            | I64Xor | I64Shl | I64ShrS | I64ShrU | I64Rotl | I64Rotr => self.binop(I64)?,
+            I64Add | I64Sub | I64Mul | I64DivS | I64DivU | I64RemS | I64RemU | I64And | I64Or | I64Xor | I64Shl | I64ShrS
+            | I64ShrU | I64Rotl | I64Rotr => self.binop(I64)?,
 
             // ---- f32 ----
             F32Eq | F32Ne | F32Lt | F32Gt | F32Le | F32Ge => self.relop(F32)?,
-            F32Abs | F32Neg | F32Ceil | F32Floor | F32Trunc | F32Nearest | F32Sqrt => {
-                self.unop(F32)?
-            }
+            F32Abs | F32Neg | F32Ceil | F32Floor | F32Trunc | F32Nearest | F32Sqrt => self.unop(F32)?,
             F32Add | F32Sub | F32Mul | F32Div | F32Min | F32Max | F32Copysign => self.binop(F32)?,
 
             // ---- f64 ----
             F64Eq | F64Ne | F64Lt | F64Gt | F64Le | F64Ge => self.relop(F64)?,
-            F64Abs | F64Neg | F64Ceil | F64Floor | F64Trunc | F64Nearest | F64Sqrt => {
-                self.unop(F64)?
-            }
+            F64Abs | F64Neg | F64Ceil | F64Floor | F64Trunc | F64Nearest | F64Sqrt => self.unop(F64)?,
             F64Add | F64Sub | F64Mul | F64Div | F64Min | F64Max | F64Copysign => self.binop(F64)?,
 
             // ---- conversions ----
             I32WrapI64 => self.cvtop(I64, I32)?,
-            I32TruncF32S | I32TruncF32U | I32TruncSatF32S | I32TruncSatF32U | I32ReinterpretF32 => {
-                self.cvtop(F32, I32)?
-            }
-            I32TruncF64S | I32TruncF64U | I32TruncSatF64S | I32TruncSatF64U => {
-                self.cvtop(F64, I32)?
-            }
+            I32TruncF32S | I32TruncF32U | I32TruncSatF32S | I32TruncSatF32U | I32ReinterpretF32 => self.cvtop(F32, I32)?,
+            I32TruncF64S | I32TruncF64U | I32TruncSatF64S | I32TruncSatF64U => self.cvtop(F64, I32)?,
             I64ExtendI32S | I64ExtendI32U => self.cvtop(I32, I64)?,
-            I64TruncF32S | I64TruncF32U | I64TruncSatF32S | I64TruncSatF32U => {
-                self.cvtop(F32, I64)?
-            }
-            I64TruncF64S | I64TruncF64U | I64TruncSatF64S | I64TruncSatF64U | I64ReinterpretF64 => {
-                self.cvtop(F64, I64)?
-            }
+            I64TruncF32S | I64TruncF32U | I64TruncSatF32S | I64TruncSatF32U => self.cvtop(F32, I64)?,
+            I64TruncF64S | I64TruncF64U | I64TruncSatF64S | I64TruncSatF64U | I64ReinterpretF64 => self.cvtop(F64, I64)?,
             F32ConvertI32S | F32ConvertI32U | F32ReinterpretI32 => self.cvtop(I32, F32)?,
             F32ConvertI64S | F32ConvertI64U => self.cvtop(I64, F32)?,
             F32DemoteF64 => self.cvtop(F64, F32)?,
@@ -1068,11 +974,7 @@ mod tests {
         Module {
             types: vec![ty],
             funcs: vec![0],
-            code: vec![FuncBody {
-                locals,
-                instrs,
-                br_tables: Vec::new(),
-            }],
+            code: vec![FuncBody { locals, instrs, br_tables: Vec::new() }],
             ..Module::default()
         }
     }
@@ -1088,24 +990,9 @@ mod tests {
 
     #[test]
     fn body_errors_carry_location() {
-        let m = func_module(
-            FuncType::default(),
-            vec![],
-            vec![
-                Instr::I32Const(1),
-                Instr::I64Const(2),
-                Instr::I32Add,
-                Instr::End,
-            ],
-        );
-        assert_eq!(
-            validate(&m),
-            Err(Error::Invalid {
-                msg: "type mismatch",
-                func: Some(0),
-                instr: Some(2),
-            })
-        );
+        let m =
+            func_module(FuncType::default(), vec![], vec![Instr::I32Const(1), Instr::I64Const(2), Instr::I32Add, Instr::End]);
+        assert_eq!(validate(&m), Err(Error::Invalid { msg: "type mismatch", func: Some(0), instr: Some(2) }));
     }
 
     #[test]
@@ -1118,93 +1005,41 @@ mod tests {
                 desc: ImportDesc::Func(0),
             }],
             funcs: vec![0],
-            code: vec![FuncBody {
-                locals: vec![],
-                instrs: vec![Instr::LocalGet(0), Instr::End],
-                br_tables: Vec::new(),
-            }],
+            code: vec![FuncBody { locals: vec![], instrs: vec![Instr::LocalGet(0), Instr::End], br_tables: Vec::new() }],
             ..Module::default()
         };
-        assert_eq!(
-            validate(&m),
-            Err(Error::Invalid {
-                msg: "unknown local",
-                func: Some(1),
-                instr: Some(0),
-            })
-        );
+        assert_eq!(validate(&m), Err(Error::Invalid { msg: "unknown local", func: Some(1), instr: Some(0) }));
     }
 
     #[test]
     fn missing_br_table_entry_is_not_a_panic() {
         // A `BrTable` index with no side-table entry can only come from a
         // hand-built module; it must be an error, not a panic.
-        let m = func_module(
-            FuncType::default(),
-            vec![],
-            vec![Instr::BrTable(7), Instr::End],
-        );
+        let m = func_module(FuncType::default(), vec![], vec![Instr::BrTable(7), Instr::End]);
         assert_eq!(msg(validate(&m)), Some("unknown label"));
-        let mut m = func_module(
-            FuncType::default(),
-            vec![],
-            vec![Instr::I32Const(0), Instr::BrTable(0), Instr::End],
-        );
-        m.code[0].br_tables.push(BrTable {
-            targets: vec![0],
-            default: 0,
-        });
+        let mut m = func_module(FuncType::default(), vec![], vec![Instr::I32Const(0), Instr::BrTable(0), Instr::End]);
+        m.code[0].br_tables.push(BrTable { targets: vec![0], default: 0 });
         assert_eq!(validate(&m), Ok(()));
     }
 
     #[test]
     fn stray_end_and_missing_end_are_errors() {
         let m = func_module(FuncType::default(), vec![], vec![Instr::End, Instr::Nop]);
-        assert_eq!(
-            msg(validate(&m)),
-            Some("operators remaining after end of function")
-        );
+        assert_eq!(msg(validate(&m)), Some("operators remaining after end of function"));
         let m = func_module(FuncType::default(), vec![], vec![Instr::Nop]);
         assert_eq!(msg(validate(&m)), Some("unexpected end of function"));
-        let m = func_module(
-            FuncType::default(),
-            vec![],
-            vec![Instr::Else { end: 1 }, Instr::End],
-        );
+        let m = func_module(FuncType::default(), vec![], vec![Instr::Else { end: 1 }, Instr::End]);
         assert_eq!(msg(validate(&m)), Some("unexpected else"));
     }
 
     #[test]
     fn hand_built_module_level_errors() {
-        let m = Module {
-            funcs: vec![3],
-            code: vec![FuncBody::default()],
-            ..Module::default()
-        };
-        assert_eq!(
-            validate(&m),
-            Err(Error::Invalid {
-                msg: "unknown type",
-                func: Some(0),
-                instr: None
-            })
-        );
-        let m = Module {
-            exports: vec![Export {
-                name: String::from("g"),
-                desc: ExportDesc::Global(0),
-            }],
-            ..Module::default()
-        };
+        let m = Module { funcs: vec![3], code: vec![FuncBody::default()], ..Module::default() };
+        assert_eq!(validate(&m), Err(Error::Invalid { msg: "unknown type", func: Some(0), instr: None }));
+        let m = Module { exports: vec![Export { name: String::from("g"), desc: ExportDesc::Global(0) }], ..Module::default() };
         assert_eq!(msg(validate(&m)), Some("unknown global"));
         let m = Module {
-            globals: vec![Global {
-                ty: GlobalType {
-                    ty: ValType::I32,
-                    mutable: false,
-                },
-                init: ConstExpr { instrs: vec![] },
-            }],
+            globals: vec![Global { ty: GlobalType { ty: ValType::I32, mutable: false }, init: ConstExpr { instrs: vec![] } }],
             ..Module::default()
         };
         assert_eq!(msg(validate(&m)), Some("type mismatch"));

@@ -44,17 +44,9 @@ fn invalid(fields: &str, msg: &str) {
 fn invalid_at(fields: &str, msg: &str, func: u32, instr: u32) {
     match check(fields) {
         Ok(_) => panic!("expected invalid ({msg}), got valid\n(module {fields})"),
-        Err(Error::Invalid {
-            msg: got,
-            func: f,
-            instr: i,
-        }) => {
+        Err(Error::Invalid { msg: got, func: f, instr: i }) => {
             assert_eq!(got, msg, "wrong message for\n(module {fields})");
-            assert_eq!(
-                (f, i),
-                (Some(func), Some(instr)),
-                "wrong location for\n(module {fields})"
-            );
+            assert_eq!((f, i), (Some(func), Some(instr)), "wrong location for\n(module {fields})");
         }
         Err(e) => panic!("expected Error::Invalid({msg}), got {e:?}\n(module {fields})"),
     }
@@ -84,40 +76,16 @@ fn numeric_operand_typing() {
         ("(func (result f64) f64.const 1 f64.sqrt)", None),
         ("(func (result i32) i64.const 1 i64.eqz)", None),
         ("(func (result i32) f64.const 1 f64.const 2 f64.lt)", None),
-        (
-            "(func (result i32) i32.const 1 i64.const 2 i32.add)",
-            Some("type mismatch"),
-        ),
-        (
-            "(func (result i32) i32.const 1 i32.add)",
-            Some("type mismatch"),
-        ),
-        (
-            "(func (result i64) i32.const 1 i32.const 2 i32.add)",
-            Some("type mismatch"),
-        ),
+        ("(func (result i32) i32.const 1 i64.const 2 i32.add)", Some("type mismatch")),
+        ("(func (result i32) i32.const 1 i32.add)", Some("type mismatch")),
+        ("(func (result i64) i32.const 1 i32.const 2 i32.add)", Some("type mismatch")),
         ("(func i32.const 1)", Some("type mismatch")),
         ("(func (result i32))", Some("type mismatch")),
-        (
-            "(func (result i32) i32.const 1 i32.const 2)",
-            Some("type mismatch"),
-        ),
-        (
-            "(func (result i32) f32.const 1 i32.eqz)",
-            Some("type mismatch"),
-        ),
-        (
-            "(func (result i32) i32.const 1 i64.eqz)",
-            Some("type mismatch"),
-        ),
-        (
-            "(func (result f32) f32.const 1 f64.neg)",
-            Some("type mismatch"),
-        ),
-        (
-            "(func (result i32) i32.const 0 i32.const 0 i32.const 0 i32.add)",
-            Some("type mismatch"),
-        ),
+        ("(func (result i32) i32.const 1 i32.const 2)", Some("type mismatch")),
+        ("(func (result i32) f32.const 1 i32.eqz)", Some("type mismatch")),
+        ("(func (result i32) i32.const 1 i64.eqz)", Some("type mismatch")),
+        ("(func (result f32) f32.const 1 f64.neg)", Some("type mismatch")),
+        ("(func (result i32) i32.const 0 i32.const 0 i32.const 0 i32.add)", Some("type mismatch")),
         ("(func drop)", Some("type mismatch")),
         ("(func i32.const 0 drop drop)", Some("type mismatch")),
     ]);
@@ -138,26 +106,11 @@ fn conversion_typing() {
         ("(func (result f64) i64.const 1 f64.reinterpret_i64)", None),
         ("(func (result i32) i32.const 1 i32.extend8_s)", None),
         ("(func (result i64) i64.const 1 i64.extend32_s)", None),
-        (
-            "(func (result i32) i32.const 1 i32.wrap_i64)",
-            Some("type mismatch"),
-        ),
-        (
-            "(func (result i32) f64.const 1 i32.trunc_f32_s)",
-            Some("type mismatch"),
-        ),
-        (
-            "(func (result i64) i32.const 1 i32.extend8_s)",
-            Some("type mismatch"),
-        ),
-        (
-            "(func (result i32) i64.const 1 i32.reinterpret_f32)",
-            Some("type mismatch"),
-        ),
-        (
-            "(func (result f64) f32.const 1 f64.reinterpret_i64)",
-            Some("type mismatch"),
-        ),
+        ("(func (result i32) i32.const 1 i32.wrap_i64)", Some("type mismatch")),
+        ("(func (result i32) f64.const 1 i32.trunc_f32_s)", Some("type mismatch")),
+        ("(func (result i64) i32.const 1 i32.extend8_s)", Some("type mismatch")),
+        ("(func (result i32) i64.const 1 i32.reinterpret_f32)", Some("type mismatch")),
+        ("(func (result f64) f32.const 1 f64.reinterpret_i64)", Some("type mismatch")),
     ]);
 }
 
@@ -197,62 +150,29 @@ fn stack_is_polymorphic_after_unreachable() {
 fn block_loop_if_typing() {
     table(&[
         ("(func block end)", None),
-        (
-            "(func (result i32) block (result i32) i32.const 1 end)",
-            None,
-        ),
-        (
-            "(func (result i32) block (result i32) i64.const 1 end)",
-            Some("type mismatch"),
-        ),
+        ("(func (result i32) block (result i32) i32.const 1 end)", None),
+        ("(func (result i32) block (result i32) i64.const 1 end)", Some("type mismatch")),
         ("(func block (result i32) end)", Some("type mismatch")),
         ("(func block i32.const 1 end)", Some("type mismatch")),
-        (
-            "(func (result i32) loop (result i32) i32.const 1 end)",
-            None,
-        ),
+        ("(func (result i32) loop (result i32) i32.const 1 end)", None),
         ("(func loop (result i32) end)", Some("type mismatch")),
         ("(func i32.const 0 if end)", None),
         ("(func i32.const 0 if else end)", None),
         ("(func if end)", Some("type mismatch")),
         ("(func i64.const 0 if end)", Some("type mismatch")),
-        (
-            "(func (result i32) i32.const 0 if (result i32) i32.const 1 else i32.const 2 end)",
-            None,
-        ),
-        (
-            "(func (result i32) i32.const 0 if (result i32) i32.const 1 else i64.const 2 end)",
-            Some("type mismatch"),
-        ),
-        (
-            "(func (result i32) i32.const 0 if (result i32) i64.const 1 else i32.const 2 end)",
-            Some("type mismatch"),
-        ),
-        (
-            "(func (result i32) i32.const 0 if (result i32) else i32.const 2 end)",
-            Some("type mismatch"),
-        ),
+        ("(func (result i32) i32.const 0 if (result i32) i32.const 1 else i32.const 2 end)", None),
+        ("(func (result i32) i32.const 0 if (result i32) i32.const 1 else i64.const 2 end)", Some("type mismatch")),
+        ("(func (result i32) i32.const 0 if (result i32) i64.const 1 else i32.const 2 end)", Some("type mismatch")),
+        ("(func (result i32) i32.const 0 if (result i32) else i32.const 2 end)", Some("type mismatch")),
         // `if` without `else` must have params == results.
-        (
-            "(func (result i32) i32.const 0 if (result i32) i32.const 1 end)",
-            Some("type mismatch"),
-        ),
+        ("(func (result i32) i32.const 0 if (result i32) i32.const 1 end)", Some("type mismatch")),
         ("(func i32.const 0 if nop end)", None),
         // Values entering a block are not visible inside it.
-        (
-            "(func (result i32) i32.const 1 block (result i32) i32.const 2 i32.add end)",
-            Some("type mismatch"),
-        ),
+        ("(func (result i32) i32.const 1 block (result i32) i32.const 2 i32.add end)", Some("type mismatch")),
         ("(func i32.const 1 block drop end)", Some("type mismatch")),
         // Nested blocks.
-        (
-            "(func (result i32) block (result i32) block (result i32) i32.const 1 end end)",
-            None,
-        ),
-        (
-            "(func (result i32) block (result i32) block (result i64) i64.const 1 end end)",
-            Some("type mismatch"),
-        ),
+        ("(func (result i32) block (result i32) block (result i32) i32.const 1 end end)", None),
+        ("(func (result i32) block (result i32) block (result i64) i64.const 1 end end)", Some("type mismatch")),
     ]);
 }
 
@@ -271,7 +191,10 @@ fn multi_value_block_types() {
         ("(func (result i32) i32.const 1 i32.const 0 if (param i32) (result i32) end)", None),
         ("(func (result i32) i32.const 1 i32.const 0 if (param i32) (result i32) drop i32.const 2 end)", None),
         ("(func (result i64) i32.const 1 i32.const 0 if (param i32) (result i64) end)", Some("type mismatch")),
-        ("(func (result i64) i32.const 1 i32.const 0 if (param i32) (result i64) drop i64.const 2 else drop i64.const 3 end)", None),
+        (
+            "(func (result i64) i32.const 1 i32.const 0 if (param i32) (result i64) drop i64.const 2 else drop i64.const 3 end)",
+            None,
+        ),
         // Loop labels carry the params; block labels the results.
         ("(func i32.const 1 loop (param i32) br 0 end)", None),
         ("(func i32.const 1 loop (param i32) drop br 0 end)", Some("type mismatch")),
@@ -327,19 +250,10 @@ fn br_table_arity() {
         ("(func block i32.const 0 br_table 2 0 end)", Some("unknown label")),
         ("(func block br_table 0 end)", Some("type mismatch")),
         ("(func block i64.const 0 br_table 0 end)", Some("type mismatch")),
-        (
-            "(func (result i32) block (result i32) block (result i32) i32.const 1 i32.const 0 br_table 0 1 end end)",
-            None,
-        ),
+        ("(func (result i32) block (result i32) block (result i32) i32.const 1 i32.const 0 br_table 0 1 end end)", None),
         // All targets must have the same arity.
-        (
-            "(func (result i32) block (result i32) block i32.const 1 i32.const 0 br_table 0 1 end end)",
-            Some("type mismatch"),
-        ),
-        (
-            "(func (result i32) block (result i32) block i32.const 0 br_table 1 0 end i32.const 1 end)",
-            Some("type mismatch"),
-        ),
+        ("(func (result i32) block (result i32) block i32.const 1 i32.const 0 br_table 0 1 end end)", Some("type mismatch")),
+        ("(func (result i32) block (result i32) block i32.const 0 br_table 1 0 end i32.const 1 end)", Some("type mismatch")),
         // Same arity but different types.
         (
             "(func (result i32) block (result i32) block (result i64) i32.const 1 i32.const 0 br_table 0 1 end drop i32.const 2 end)",
@@ -430,55 +344,22 @@ fn reference_instructions() {
 fn locals() {
     table(&[
         ("(func (param i32) (result i32) local.get 0)", None),
-        (
-            "(func (param i32) (result i64) (local i64) local.get 1)",
-            None,
-        ),
-        (
-            "(func (param i32) (result i32) (local i64) local.get 1)",
-            Some("type mismatch"),
-        ),
-        (
-            "(func (param i32) (result i32) local.get 1)",
-            Some("unknown local"),
-        ),
+        ("(func (param i32) (result i64) (local i64) local.get 1)", None),
+        ("(func (param i32) (result i32) (local i64) local.get 1)", Some("type mismatch")),
+        ("(func (param i32) (result i32) local.get 1)", Some("unknown local")),
         ("(func local.get 0)", Some("unknown local")),
         ("(func (local i32) local.get 1)", Some("unknown local")),
         ("(func (local i32) i32.const 0 local.set 0)", None),
-        (
-            "(func (local i32) i64.const 0 local.set 0)",
-            Some("type mismatch"),
-        ),
+        ("(func (local i32) i64.const 0 local.set 0)", Some("type mismatch")),
         ("(func (local i32) local.set 0)", Some("type mismatch")),
-        (
-            "(func (local i32) i32.const 0 local.set 1)",
-            Some("unknown local"),
-        ),
-        (
-            "(func (result i32) (local i32) i32.const 0 local.tee 0)",
-            None,
-        ),
-        (
-            "(func (result i32) (local i32) i64.const 0 local.tee 0)",
-            Some("type mismatch"),
-        ),
-        (
-            "(func (result i64) (local i32) i32.const 0 local.tee 0)",
-            Some("type mismatch"),
-        ),
-        (
-            "(func (result i32) (local i32) i32.const 0 local.tee 1)",
-            Some("unknown local"),
-        ),
+        ("(func (local i32) i32.const 0 local.set 1)", Some("unknown local")),
+        ("(func (result i32) (local i32) i32.const 0 local.tee 0)", None),
+        ("(func (result i32) (local i32) i64.const 0 local.tee 0)", Some("type mismatch")),
+        ("(func (result i64) (local i32) i32.const 0 local.tee 0)", Some("type mismatch")),
+        ("(func (result i32) (local i32) i32.const 0 local.tee 1)", Some("unknown local")),
         ("(func (result funcref) (local funcref) local.get 0)", None),
-        (
-            "(func (result funcref) (local externref) local.get 0)",
-            Some("type mismatch"),
-        ),
-        (
-            "(func (local i32) local.get 4294967295 drop)",
-            Some("unknown local"),
-        ),
+        ("(func (result funcref) (local externref) local.get 0)", Some("type mismatch")),
+        ("(func (local i32) local.get 4294967295 drop)", Some("unknown local")),
     ]);
 }
 
@@ -497,7 +378,10 @@ fn globals_in_function_bodies() {
         ("(import \"m\" \"g\" (global i32)) (func i32.const 1 global.set 0)", Some("global is immutable")),
         ("(import \"m\" \"g\" (global (mut i32))) (func i32.const 1 global.set 0)", None),
         ("(import \"m\" \"g\" (global (mut i32))) (global i64 (i64.const 0)) (func (result i64) global.get 1)", None),
-        ("(import \"m\" \"g\" (global (mut i32))) (global i64 (i64.const 0)) (func (result i32) global.get 1)", Some("type mismatch")),
+        (
+            "(import \"m\" \"g\" (global (mut i32))) (global i64 (i64.const 0)) (func (result i32) global.get 1)",
+            Some("type mismatch"),
+        ),
     ]);
 }
 
@@ -514,7 +398,10 @@ fn calls() {
         ("(func $f (param i32) (result i64) i64.const 0) (func (result i32) i32.const 1 call $f)", Some("type mismatch")),
         ("(func call 1)", Some("unknown function")),
         ("(import \"m\" \"f\" (func (param i32 i32) (result i32))) (func (result i32) i32.const 1 i32.const 2 call 0)", None),
-        ("(import \"m\" \"f\" (func (param i32 i32) (result i32))) (func (result i32) i32.const 1 call 0)", Some("type mismatch")),
+        (
+            "(import \"m\" \"f\" (func (param i32 i32) (result i32))) (func (result i32) i32.const 1 call 0)",
+            Some("type mismatch"),
+        ),
         ("(func $f (result i32 i64) i32.const 0 i64.const 0) (func (result i32 i64) call $f)", None),
         ("(func $f (result i32 i64) i32.const 0 i64.const 0) (func (result i32) call $f drop)", None),
         ("(func $f (result i32 i64) i32.const 0 i64.const 0) (func (result i64) call $f drop)", Some("type mismatch")),
@@ -524,17 +411,32 @@ fn calls() {
 #[test]
 fn call_indirect() {
     table(&[
-        ("(type $t (func (param i32) (result i32))) (table 1 funcref) (func (result i32) i32.const 1 i32.const 0 call_indirect (type $t))", None),
-        ("(type $t (func (param i32) (result i32))) (table 1 funcref) (func (result i32) i32.const 0 call_indirect (type $t))", Some("type mismatch")),
-        ("(type $t (func (param i32) (result i32))) (table 1 funcref) (func (result i32) i32.const 1 i64.const 0 call_indirect (type $t))", Some("type mismatch")),
-        ("(type $t (func (param i32) (result i32))) (table 1 funcref) (func (result i64) i32.const 1 i32.const 0 call_indirect (type $t))", Some("type mismatch")),
+        (
+            "(type $t (func (param i32) (result i32))) (table 1 funcref) (func (result i32) i32.const 1 i32.const 0 call_indirect (type $t))",
+            None,
+        ),
+        (
+            "(type $t (func (param i32) (result i32))) (table 1 funcref) (func (result i32) i32.const 0 call_indirect (type $t))",
+            Some("type mismatch"),
+        ),
+        (
+            "(type $t (func (param i32) (result i32))) (table 1 funcref) (func (result i32) i32.const 1 i64.const 0 call_indirect (type $t))",
+            Some("type mismatch"),
+        ),
+        (
+            "(type $t (func (param i32) (result i32))) (table 1 funcref) (func (result i64) i32.const 1 i32.const 0 call_indirect (type $t))",
+            Some("type mismatch"),
+        ),
         ("(type $t (func)) (func i32.const 0 call_indirect (type $t))", Some("unknown table")),
         ("(type $t (func)) (table 1 funcref) (func i32.const 0 call_indirect 1 (type $t))", Some("unknown table")),
         ("(type $t (func)) (table 1 funcref) (func i32.const 0 call_indirect (type 1))", Some("unknown type")),
         ("(type $t (func)) (table 1 externref) (func i32.const 0 call_indirect (type $t))", Some("type mismatch")),
         ("(type $t (func)) (table 1 externref) (table $f 1 funcref) (func i32.const 0 call_indirect $f (type $t))", None),
         ("(type $t (func)) (import \"m\" \"t\" (table 1 funcref)) (func i32.const 0 call_indirect (type $t))", None),
-        ("(type $t (func (result i32 i64))) (table 1 funcref) (func (result i32 i64) i32.const 0 call_indirect (type $t))", None),
+        (
+            "(type $t (func (result i32 i64))) (table 1 funcref) (func (result i32 i64) i32.const 0 call_indirect (type $t))",
+            None,
+        ),
     ]);
 }
 
@@ -549,262 +451,88 @@ fn memory_instructions() {
         ("(memory 1) (func (result i64) i32.const 0 i64.load)", None),
         ("(memory 1) (func (result f32) i32.const 0 f32.load)", None),
         ("(memory 1) (func (result f64) i32.const 0 f64.load)", None),
-        (
-            "(memory 1) (func (result i32) i32.const 0 i32.load8_s)",
-            None,
-        ),
-        (
-            "(memory 1) (func (result i64) i32.const 0 i64.load32_u)",
-            None,
-        ),
-        (
-            "(memory 1) (func (result i32) i64.const 0 i32.load)",
-            Some("type mismatch"),
-        ),
-        (
-            "(memory 1) (func (result i64) i32.const 0 i32.load)",
-            Some("type mismatch"),
-        ),
-        (
-            "(memory 1) (func (result i32) i32.load)",
-            Some("type mismatch"),
-        ),
-        (
-            "(func (result i32) i32.const 0 i32.load)",
-            Some("unknown memory"),
-        ),
+        ("(memory 1) (func (result i32) i32.const 0 i32.load8_s)", None),
+        ("(memory 1) (func (result i64) i32.const 0 i64.load32_u)", None),
+        ("(memory 1) (func (result i32) i64.const 0 i32.load)", Some("type mismatch")),
+        ("(memory 1) (func (result i64) i32.const 0 i32.load)", Some("type mismatch")),
+        ("(memory 1) (func (result i32) i32.load)", Some("type mismatch")),
+        ("(func (result i32) i32.const 0 i32.load)", Some("unknown memory")),
         ("(memory 1) (func i32.const 0 i32.const 1 i32.store)", None),
         ("(memory 1) (func i32.const 0 i64.const 1 i64.store)", None),
         ("(memory 1) (func i32.const 0 f64.const 1 f64.store)", None),
         ("(memory 1) (func i32.const 0 i64.const 1 i64.store8)", None),
-        (
-            "(memory 1) (func i32.const 0 i64.const 1 i32.store)",
-            Some("type mismatch"),
-        ),
-        (
-            "(memory 1) (func i64.const 0 i32.const 1 i32.store)",
-            Some("type mismatch"),
-        ),
-        (
-            "(memory 1) (func i32.const 1 i32.store)",
-            Some("type mismatch"),
-        ),
-        (
-            "(func i32.const 0 i32.const 1 i32.store)",
-            Some("unknown memory"),
-        ),
+        ("(memory 1) (func i32.const 0 i64.const 1 i32.store)", Some("type mismatch")),
+        ("(memory 1) (func i64.const 0 i32.const 1 i32.store)", Some("type mismatch")),
+        ("(memory 1) (func i32.const 1 i32.store)", Some("type mismatch")),
+        ("(func i32.const 0 i32.const 1 i32.store)", Some("unknown memory")),
         ("(memory 1) (func (result i32) memory.size)", None),
         ("(func (result i32) memory.size)", Some("unknown memory")),
-        (
-            "(memory 1) (func (result i32) i32.const 1 memory.grow)",
-            None,
-        ),
-        (
-            "(memory 1) (func (result i32) i64.const 1 memory.grow)",
-            Some("type mismatch"),
-        ),
-        (
-            "(memory 1) (func (result i32) memory.grow)",
-            Some("type mismatch"),
-        ),
-        (
-            "(func (result i32) i32.const 1 memory.grow)",
-            Some("unknown memory"),
-        ),
-        (
-            "(import \"m\" \"mem\" (memory 1)) (func (result i32) i32.const 0 i32.load)",
-            None,
-        ),
-        (
-            "(memory 1) (func (result i32) i32.const 0 i32.load offset=4294967295)",
-            None,
-        ),
+        ("(memory 1) (func (result i32) i32.const 1 memory.grow)", None),
+        ("(memory 1) (func (result i32) i64.const 1 memory.grow)", Some("type mismatch")),
+        ("(memory 1) (func (result i32) memory.grow)", Some("type mismatch")),
+        ("(func (result i32) i32.const 1 memory.grow)", Some("unknown memory")),
+        ("(import \"m\" \"mem\" (memory 1)) (func (result i32) i32.const 0 i32.load)", None),
+        ("(memory 1) (func (result i32) i32.const 0 i32.load offset=4294967295)", None),
     ]);
 }
 
 #[test]
 fn alignment_must_not_exceed_natural() {
     table(&[
-        (
-            "(memory 1) (func (result i32) i32.const 0 i32.load align=4)",
-            None,
-        ),
-        (
-            "(memory 1) (func (result i32) i32.const 0 i32.load align=8)",
-            Some("alignment must not be larger than natural"),
-        ),
-        (
-            "(memory 1) (func (result i64) i32.const 0 i64.load align=8)",
-            None,
-        ),
-        (
-            "(memory 1) (func (result i64) i32.const 0 i64.load align=16)",
-            Some("alignment must not be larger than natural"),
-        ),
-        (
-            "(memory 1) (func (result f32) i32.const 0 f32.load align=4)",
-            None,
-        ),
-        (
-            "(memory 1) (func (result f32) i32.const 0 f32.load align=8)",
-            Some("alignment must not be larger than natural"),
-        ),
-        (
-            "(memory 1) (func (result f64) i32.const 0 f64.load align=8)",
-            None,
-        ),
-        (
-            "(memory 1) (func (result f64) i32.const 0 f64.load align=16)",
-            Some("alignment must not be larger than natural"),
-        ),
-        (
-            "(memory 1) (func (result i32) i32.const 0 i32.load8_s align=1)",
-            None,
-        ),
-        (
-            "(memory 1) (func (result i32) i32.const 0 i32.load8_u align=2)",
-            Some("alignment must not be larger than natural"),
-        ),
-        (
-            "(memory 1) (func (result i32) i32.const 0 i32.load16_s align=2)",
-            None,
-        ),
-        (
-            "(memory 1) (func (result i32) i32.const 0 i32.load16_u align=4)",
-            Some("alignment must not be larger than natural"),
-        ),
-        (
-            "(memory 1) (func (result i64) i32.const 0 i64.load8_s align=2)",
-            Some("alignment must not be larger than natural"),
-        ),
-        (
-            "(memory 1) (func (result i64) i32.const 0 i64.load16_u align=4)",
-            Some("alignment must not be larger than natural"),
-        ),
-        (
-            "(memory 1) (func (result i64) i32.const 0 i64.load32_s align=4)",
-            None,
-        ),
-        (
-            "(memory 1) (func (result i64) i32.const 0 i64.load32_u align=8)",
-            Some("alignment must not be larger than natural"),
-        ),
-        (
-            "(memory 1) (func i32.const 0 i32.const 0 i32.store align=4)",
-            None,
-        ),
-        (
-            "(memory 1) (func i32.const 0 i32.const 0 i32.store align=8)",
-            Some("alignment must not be larger than natural"),
-        ),
-        (
-            "(memory 1) (func i32.const 0 i64.const 0 i64.store align=16)",
-            Some("alignment must not be larger than natural"),
-        ),
-        (
-            "(memory 1) (func i32.const 0 f32.const 0 f32.store align=8)",
-            Some("alignment must not be larger than natural"),
-        ),
-        (
-            "(memory 1) (func i32.const 0 f64.const 0 f64.store align=16)",
-            Some("alignment must not be larger than natural"),
-        ),
-        (
-            "(memory 1) (func i32.const 0 i32.const 0 i32.store8 align=2)",
-            Some("alignment must not be larger than natural"),
-        ),
-        (
-            "(memory 1) (func i32.const 0 i32.const 0 i32.store16 align=4)",
-            Some("alignment must not be larger than natural"),
-        ),
-        (
-            "(memory 1) (func i32.const 0 i64.const 0 i64.store8 align=2)",
-            Some("alignment must not be larger than natural"),
-        ),
-        (
-            "(memory 1) (func i32.const 0 i64.const 0 i64.store16 align=4)",
-            Some("alignment must not be larger than natural"),
-        ),
-        (
-            "(memory 1) (func i32.const 0 i64.const 0 i64.store32 align=4)",
-            None,
-        ),
-        (
-            "(memory 1) (func i32.const 0 i64.const 0 i64.store32 align=8)",
-            Some("alignment must not be larger than natural"),
-        ),
+        ("(memory 1) (func (result i32) i32.const 0 i32.load align=4)", None),
+        ("(memory 1) (func (result i32) i32.const 0 i32.load align=8)", Some("alignment must not be larger than natural")),
+        ("(memory 1) (func (result i64) i32.const 0 i64.load align=8)", None),
+        ("(memory 1) (func (result i64) i32.const 0 i64.load align=16)", Some("alignment must not be larger than natural")),
+        ("(memory 1) (func (result f32) i32.const 0 f32.load align=4)", None),
+        ("(memory 1) (func (result f32) i32.const 0 f32.load align=8)", Some("alignment must not be larger than natural")),
+        ("(memory 1) (func (result f64) i32.const 0 f64.load align=8)", None),
+        ("(memory 1) (func (result f64) i32.const 0 f64.load align=16)", Some("alignment must not be larger than natural")),
+        ("(memory 1) (func (result i32) i32.const 0 i32.load8_s align=1)", None),
+        ("(memory 1) (func (result i32) i32.const 0 i32.load8_u align=2)", Some("alignment must not be larger than natural")),
+        ("(memory 1) (func (result i32) i32.const 0 i32.load16_s align=2)", None),
+        ("(memory 1) (func (result i32) i32.const 0 i32.load16_u align=4)", Some("alignment must not be larger than natural")),
+        ("(memory 1) (func (result i64) i32.const 0 i64.load8_s align=2)", Some("alignment must not be larger than natural")),
+        ("(memory 1) (func (result i64) i32.const 0 i64.load16_u align=4)", Some("alignment must not be larger than natural")),
+        ("(memory 1) (func (result i64) i32.const 0 i64.load32_s align=4)", None),
+        ("(memory 1) (func (result i64) i32.const 0 i64.load32_u align=8)", Some("alignment must not be larger than natural")),
+        ("(memory 1) (func i32.const 0 i32.const 0 i32.store align=4)", None),
+        ("(memory 1) (func i32.const 0 i32.const 0 i32.store align=8)", Some("alignment must not be larger than natural")),
+        ("(memory 1) (func i32.const 0 i64.const 0 i64.store align=16)", Some("alignment must not be larger than natural")),
+        ("(memory 1) (func i32.const 0 f32.const 0 f32.store align=8)", Some("alignment must not be larger than natural")),
+        ("(memory 1) (func i32.const 0 f64.const 0 f64.store align=16)", Some("alignment must not be larger than natural")),
+        ("(memory 1) (func i32.const 0 i32.const 0 i32.store8 align=2)", Some("alignment must not be larger than natural")),
+        ("(memory 1) (func i32.const 0 i32.const 0 i32.store16 align=4)", Some("alignment must not be larger than natural")),
+        ("(memory 1) (func i32.const 0 i64.const 0 i64.store8 align=2)", Some("alignment must not be larger than natural")),
+        ("(memory 1) (func i32.const 0 i64.const 0 i64.store16 align=4)", Some("alignment must not be larger than natural")),
+        ("(memory 1) (func i32.const 0 i64.const 0 i64.store32 align=4)", None),
+        ("(memory 1) (func i32.const 0 i64.const 0 i64.store32 align=8)", Some("alignment must not be larger than natural")),
         // The memory check comes first.
-        (
-            "(func (result i32) i32.const 0 i32.load align=8)",
-            Some("unknown memory"),
-        ),
+        ("(func (result i32) i32.const 0 i32.load align=8)", Some("unknown memory")),
     ]);
 }
 
 #[test]
 fn bulk_memory() {
     table(&[
-        (
-            "(memory 1) (func i32.const 0 i32.const 0 i32.const 0 memory.copy)",
-            None,
-        ),
-        (
-            "(memory 1) (func i32.const 0 i32.const 0 memory.copy)",
-            Some("type mismatch"),
-        ),
-        (
-            "(memory 1) (func i32.const 0 i32.const 0 i64.const 0 memory.copy)",
-            Some("type mismatch"),
-        ),
-        (
-            "(func i32.const 0 i32.const 0 i32.const 0 memory.copy)",
-            Some("unknown memory"),
-        ),
-        (
-            "(memory 1) (func i32.const 0 i32.const 0 i32.const 0 memory.fill)",
-            None,
-        ),
-        (
-            "(memory 1) (func i32.const 0 i64.const 0 i32.const 0 memory.fill)",
-            Some("type mismatch"),
-        ),
-        (
-            "(func i32.const 0 i32.const 0 i32.const 0 memory.fill)",
-            Some("unknown memory"),
-        ),
-        (
-            "(memory 1) (data \"x\") (func i32.const 0 i32.const 0 i32.const 0 memory.init 0)",
-            None,
-        ),
-        (
-            "(memory 1) (data \"x\") (func i32.const 0 i32.const 0 i32.const 0 memory.init 1)",
-            Some("unknown data segment"),
-        ),
-        (
-            "(memory 1) (func i32.const 0 i32.const 0 i32.const 0 memory.init 0)",
-            Some("unknown data segment"),
-        ),
-        (
-            "(data \"x\") (func i32.const 0 i32.const 0 i32.const 0 memory.init 0)",
-            Some("unknown memory"),
-        ),
-        (
-            "(memory 1) (data \"x\") (func i32.const 0 i32.const 0 memory.init 0)",
-            Some("type mismatch"),
-        ),
+        ("(memory 1) (func i32.const 0 i32.const 0 i32.const 0 memory.copy)", None),
+        ("(memory 1) (func i32.const 0 i32.const 0 memory.copy)", Some("type mismatch")),
+        ("(memory 1) (func i32.const 0 i32.const 0 i64.const 0 memory.copy)", Some("type mismatch")),
+        ("(func i32.const 0 i32.const 0 i32.const 0 memory.copy)", Some("unknown memory")),
+        ("(memory 1) (func i32.const 0 i32.const 0 i32.const 0 memory.fill)", None),
+        ("(memory 1) (func i32.const 0 i64.const 0 i32.const 0 memory.fill)", Some("type mismatch")),
+        ("(func i32.const 0 i32.const 0 i32.const 0 memory.fill)", Some("unknown memory")),
+        ("(memory 1) (data \"x\") (func i32.const 0 i32.const 0 i32.const 0 memory.init 0)", None),
+        ("(memory 1) (data \"x\") (func i32.const 0 i32.const 0 i32.const 0 memory.init 1)", Some("unknown data segment")),
+        ("(memory 1) (func i32.const 0 i32.const 0 i32.const 0 memory.init 0)", Some("unknown data segment")),
+        ("(data \"x\") (func i32.const 0 i32.const 0 i32.const 0 memory.init 0)", Some("unknown memory")),
+        ("(memory 1) (data \"x\") (func i32.const 0 i32.const 0 memory.init 0)", Some("type mismatch")),
         ("(memory 1) (data \"x\") (func data.drop 0)", None),
-        (
-            "(memory 1) (data \"x\") (func data.drop 1)",
-            Some("unknown data segment"),
-        ),
+        ("(memory 1) (data \"x\") (func data.drop 1)", Some("unknown data segment")),
         ("(func data.drop 0)", Some("unknown data segment")),
         // data.drop does not need a memory.
         ("(data \"x\") (func data.drop 0)", None),
         // Active segments count too.
-        (
-            "(memory 1) (data (i32.const 0) \"x\") (data \"y\") (func data.drop 1)",
-            None,
-        ),
+        ("(memory 1) (data (i32.const 0) \"x\") (data \"y\") (func data.drop 1)", None),
     ]);
 }
 
@@ -843,7 +571,10 @@ fn table_instructions() {
         ("(func i32.const 0 ref.null func i32.const 1 table.fill 0)", Some("unknown table")),
         // Multiple tables, imported tables.
         ("(import \"m\" \"t\" (table 1 funcref)) (table 1 externref) (func (result externref) i32.const 0 table.get 1)", None),
-        ("(import \"m\" \"t\" (table 1 funcref)) (table 1 externref) (func (result funcref) i32.const 0 table.get 1)", Some("type mismatch")),
+        (
+            "(import \"m\" \"t\" (table 1 funcref)) (table 1 externref) (func (result funcref) i32.const 0 table.get 1)",
+            Some("type mismatch"),
+        ),
     ]);
 }
 
@@ -852,21 +583,39 @@ fn bulk_table() {
     table(&[
         ("(table 1 funcref) (elem funcref (ref.null func)) (func i32.const 0 i32.const 0 i32.const 0 table.init 0)", None),
         ("(table 1 funcref) (elem func) (func i32.const 0 i32.const 0 i32.const 0 table.init 0)", None),
-        ("(table 1 funcref) (elem funcref (ref.null func)) (func i32.const 0 i32.const 0 i32.const 0 table.init 1)", Some("unknown elem segment")),
+        (
+            "(table 1 funcref) (elem funcref (ref.null func)) (func i32.const 0 i32.const 0 i32.const 0 table.init 1)",
+            Some("unknown elem segment"),
+        ),
         ("(table 1 funcref) (func i32.const 0 i32.const 0 i32.const 0 table.init 0)", Some("unknown elem segment")),
         ("(elem funcref (ref.null func)) (func i32.const 0 i32.const 0 i32.const 0 table.init 0)", Some("unknown table")),
-        ("(table 1 funcref) (elem funcref (ref.null func)) (func i32.const 0 i32.const 0 i32.const 0 table.init 1 0)", Some("unknown table")),
-        ("(table 1 externref) (elem funcref (ref.null func)) (func i32.const 0 i32.const 0 i32.const 0 table.init 0)", Some("type mismatch")),
-        ("(table 1 externref) (elem externref (ref.null extern)) (func i32.const 0 i32.const 0 i32.const 0 table.init 0)", None),
+        (
+            "(table 1 funcref) (elem funcref (ref.null func)) (func i32.const 0 i32.const 0 i32.const 0 table.init 1 0)",
+            Some("unknown table"),
+        ),
+        (
+            "(table 1 externref) (elem funcref (ref.null func)) (func i32.const 0 i32.const 0 i32.const 0 table.init 0)",
+            Some("type mismatch"),
+        ),
+        (
+            "(table 1 externref) (elem externref (ref.null extern)) (func i32.const 0 i32.const 0 i32.const 0 table.init 0)",
+            None,
+        ),
         ("(table 1 funcref) (elem funcref (ref.null func)) (func i32.const 0 i32.const 0 table.init 0)", Some("type mismatch")),
-        ("(table 1 funcref) (elem funcref (ref.null func)) (func i32.const 0 i64.const 0 i32.const 0 table.init 0)", Some("type mismatch")),
+        (
+            "(table 1 funcref) (elem funcref (ref.null func)) (func i32.const 0 i64.const 0 i32.const 0 table.init 0)",
+            Some("type mismatch"),
+        ),
         ("(elem funcref (ref.null func)) (func elem.drop 0)", None),
         ("(elem funcref (ref.null func)) (func elem.drop 1)", Some("unknown elem segment")),
         ("(func elem.drop 0)", Some("unknown elem segment")),
         ("(elem declare func) (func elem.drop 0)", None),
         ("(table 1 funcref) (func i32.const 0 i32.const 0 i32.const 0 table.copy)", None),
         ("(table 1 funcref) (table 1 funcref) (func i32.const 0 i32.const 0 i32.const 0 table.copy 0 1)", None),
-        ("(table 1 funcref) (table 1 externref) (func i32.const 0 i32.const 0 i32.const 0 table.copy 0 1)", Some("type mismatch")),
+        (
+            "(table 1 funcref) (table 1 externref) (func i32.const 0 i32.const 0 i32.const 0 table.copy 0 1)",
+            Some("type mismatch"),
+        ),
         ("(table 1 funcref) (func i32.const 0 i32.const 0 i32.const 0 table.copy 0 1)", Some("unknown table")),
         ("(table 1 funcref) (func i32.const 0 i32.const 0 i32.const 0 table.copy 1 0)", Some("unknown table")),
         ("(func i32.const 0 i32.const 0 i32.const 0 table.copy)", Some("unknown table")),
@@ -938,7 +687,10 @@ fn element_segments() {
         ("(table 1 funcref) (elem (i32.const 0) funcref (i32.const 0))", Some("type mismatch")),
         ("(table 1 funcref) (elem (i32.const 0) funcref (nop))", Some("constant expression required")),
         ("(import \"m\" \"g\" (global i32)) (table 1 funcref) (elem (global.get 0))", None),
-        ("(import \"m\" \"g\" (global (mut i32))) (table 1 funcref) (elem (global.get 0))", Some("constant expression required")),
+        (
+            "(import \"m\" \"g\" (global (mut i32))) (table 1 funcref) (elem (global.get 0))",
+            Some("constant expression required"),
+        ),
         ("(global i32 (i32.const 0)) (table 1 funcref) (elem (global.get 0))", Some("unknown global")),
         // Passive and declarative segments need no table.
         ("(elem funcref (ref.null func))", None),
@@ -959,54 +711,21 @@ fn data_segments() {
         ("(memory 1) (data \"abc\")", None),
         ("(data \"abc\")", None),
         ("(data (i32.const 0) \"abc\")", Some("unknown memory")),
-        (
-            "(memory 1) (data (memory 1) (i32.const 0) \"abc\")",
-            Some("unknown memory"),
-        ),
-        (
-            "(memory 1) (data (i64.const 0) \"abc\")",
-            Some("type mismatch"),
-        ),
-        (
-            "(memory 1) (data (f32.const 0) \"abc\")",
-            Some("type mismatch"),
-        ),
-        (
-            "(memory 1) (data (offset (i32.const 0) (i32.const 0)) \"abc\")",
-            Some("type mismatch"),
-        ),
-        (
-            "(memory 1) (data (nop) \"abc\")",
-            Some("constant expression required"),
-        ),
-        (
-            "(memory 1) (data (offset (i32.const 0) (nop)) \"abc\")",
-            Some("constant expression required"),
-        ),
-        (
-            "(memory 1) (data (ref.null func) \"abc\")",
-            Some("type mismatch"),
-        ),
-        (
-            "(import \"m\" \"g\" (global i32)) (memory 1) (data (global.get 0) \"abc\")",
-            None,
-        ),
-        (
-            "(import \"m\" \"g\" (global i64)) (memory 1) (data (global.get 0) \"abc\")",
-            Some("type mismatch"),
-        ),
+        ("(memory 1) (data (memory 1) (i32.const 0) \"abc\")", Some("unknown memory")),
+        ("(memory 1) (data (i64.const 0) \"abc\")", Some("type mismatch")),
+        ("(memory 1) (data (f32.const 0) \"abc\")", Some("type mismatch")),
+        ("(memory 1) (data (offset (i32.const 0) (i32.const 0)) \"abc\")", Some("type mismatch")),
+        ("(memory 1) (data (nop) \"abc\")", Some("constant expression required")),
+        ("(memory 1) (data (offset (i32.const 0) (nop)) \"abc\")", Some("constant expression required")),
+        ("(memory 1) (data (ref.null func) \"abc\")", Some("type mismatch")),
+        ("(import \"m\" \"g\" (global i32)) (memory 1) (data (global.get 0) \"abc\")", None),
+        ("(import \"m\" \"g\" (global i64)) (memory 1) (data (global.get 0) \"abc\")", Some("type mismatch")),
         (
             "(import \"m\" \"g\" (global (mut i32))) (memory 1) (data (global.get 0) \"abc\")",
             Some("constant expression required"),
         ),
-        (
-            "(global i32 (i32.const 0)) (memory 1) (data (global.get 0) \"abc\")",
-            Some("unknown global"),
-        ),
-        (
-            "(import \"m\" \"mem\" (memory 1)) (data (i32.const 0) \"abc\")",
-            None,
-        ),
+        ("(global i32 (i32.const 0)) (memory 1) (data (global.get 0) \"abc\")", Some("unknown global")),
+        ("(import \"m\" \"mem\" (memory 1)) (data (i32.const 0) \"abc\")", None),
     ]);
 }
 
@@ -1018,63 +737,27 @@ fn data_segments() {
 fn imports_and_exports() {
     table(&[
         ("(import \"m\" \"f\" (func (type 0))) (type (func))", None),
-        (
-            "(import \"m\" \"f\" (func (type 1))) (type (func))",
-            Some("unknown type"),
-        ),
+        ("(import \"m\" \"f\" (func (type 1))) (type (func))", Some("unknown type")),
         ("(type (func)) (func (type 1))", Some("unknown type")),
-        (
-            "(import \"m\" \"t\" (table 1 funcref)) (import \"m\" \"u\" (table 1 externref))",
-            None,
-        ),
-        (
-            "(import \"m\" \"g\" (global i32)) (import \"m\" \"h\" (global (mut f64)))",
-            None,
-        ),
+        ("(import \"m\" \"t\" (table 1 funcref)) (import \"m\" \"u\" (table 1 externref))", None),
+        ("(import \"m\" \"g\" (global i32)) (import \"m\" \"h\" (global (mut f64)))", None),
         ("(func) (export \"f\" (func 0))", None),
         ("(func) (export \"f\" (func 1))", Some("unknown function")),
         ("(export \"f\" (func 0))", Some("unknown function")),
         ("(table 1 funcref) (export \"t\" (table 0))", None),
-        (
-            "(table 1 funcref) (export \"t\" (table 1))",
-            Some("unknown table"),
-        ),
+        ("(table 1 funcref) (export \"t\" (table 1))", Some("unknown table")),
         ("(memory 1) (export \"m\" (memory 0))", None),
-        (
-            "(memory 1) (export \"m\" (memory 1))",
-            Some("unknown memory"),
-        ),
+        ("(memory 1) (export \"m\" (memory 1))", Some("unknown memory")),
         ("(export \"m\" (memory 0))", Some("unknown memory")),
         ("(global i32 (i32.const 0)) (export \"g\" (global 0))", None),
-        (
-            "(global i32 (i32.const 0)) (export \"g\" (global 1))",
-            Some("unknown global"),
-        ),
+        ("(global i32 (i32.const 0)) (export \"g\" (global 1))", Some("unknown global")),
         ("(import \"m\" \"f\" (func)) (export \"f\" (func 0))", None),
-        (
-            "(import \"m\" \"g\" (global (mut i32))) (export \"g\" (global 0))",
-            None,
-        ),
-        (
-            "(func) (export \"a\" (func 0)) (export \"b\" (func 0))",
-            None,
-        ),
-        (
-            "(func) (export \"a\" (func 0)) (export \"a\" (func 0))",
-            Some("duplicate export name"),
-        ),
-        (
-            "(func) (memory 1) (export \"a\" (func 0)) (export \"a\" (memory 0))",
-            Some("duplicate export name"),
-        ),
-        (
-            "(func) (export \"\" (func 0)) (export \"\" (func 0))",
-            Some("duplicate export name"),
-        ),
-        (
-            "(func) (export \"a\" (func 0)) (export \"b\" (func 0)) (export \"a\" (func 0))",
-            Some("duplicate export name"),
-        ),
+        ("(import \"m\" \"g\" (global (mut i32))) (export \"g\" (global 0))", None),
+        ("(func) (export \"a\" (func 0)) (export \"b\" (func 0))", None),
+        ("(func) (export \"a\" (func 0)) (export \"a\" (func 0))", Some("duplicate export name")),
+        ("(func) (memory 1) (export \"a\" (func 0)) (export \"a\" (memory 0))", Some("duplicate export name")),
+        ("(func) (export \"\" (func 0)) (export \"\" (func 0))", Some("duplicate export name")),
+        ("(func) (export \"a\" (func 0)) (export \"b\" (func 0)) (export \"a\" (func 0))", Some("duplicate export name")),
     ]);
 }
 
@@ -1084,14 +767,8 @@ fn start_function() {
         ("(func $s) (start $s)", None),
         ("(import \"m\" \"s\" (func $s)) (start $s)", None),
         ("(func $s (param i32)) (start $s)", Some("start function")),
-        (
-            "(func $s (result i32) i32.const 0) (start $s)",
-            Some("start function"),
-        ),
-        (
-            "(func $s (param i32) (result i32) local.get 0) (start $s)",
-            Some("start function"),
-        ),
+        ("(func $s (result i32) i32.const 0) (start $s)", Some("start function")),
+        ("(func $s (param i32) (result i32) local.get 0) (start $s)", Some("start function")),
         ("(start 0)", Some("unknown function")),
         ("(func) (start 1)", Some("unknown function")),
     ]);
@@ -1105,64 +782,25 @@ fn limits_and_memory_count() {
         ("(memory 0 65536)", None),
         ("(memory 65536)", None),
         ("(memory 65536 65536)", None),
-        (
-            "(memory 1 0)",
-            Some("size minimum must not be greater than maximum"),
-        ),
-        (
-            "(memory 65537)",
-            Some("memory size must be at most 65536 pages (4GiB)"),
-        ),
-        (
-            "(memory 0 65537)",
-            Some("memory size must be at most 65536 pages (4GiB)"),
-        ),
-        (
-            "(memory 2147483648)",
-            Some("memory size must be at most 65536 pages (4GiB)"),
-        ),
-        (
-            "(memory 0 4294967295)",
-            Some("memory size must be at most 65536 pages (4GiB)"),
-        ),
-        (
-            "(import \"m\" \"mem\" (memory 1 0))",
-            Some("size minimum must not be greater than maximum"),
-        ),
-        (
-            "(import \"m\" \"mem\" (memory 65537))",
-            Some("memory size must be at most 65536 pages (4GiB)"),
-        ),
+        ("(memory 1 0)", Some("size minimum must not be greater than maximum")),
+        ("(memory 65537)", Some("memory size must be at most 65536 pages (4GiB)")),
+        ("(memory 0 65537)", Some("memory size must be at most 65536 pages (4GiB)")),
+        ("(memory 2147483648)", Some("memory size must be at most 65536 pages (4GiB)")),
+        ("(memory 0 4294967295)", Some("memory size must be at most 65536 pages (4GiB)")),
+        ("(import \"m\" \"mem\" (memory 1 0))", Some("size minimum must not be greater than maximum")),
+        ("(import \"m\" \"mem\" (memory 65537))", Some("memory size must be at most 65536 pages (4GiB)")),
         ("(memory 0) (memory 0)", Some("multiple memories")),
-        (
-            "(import \"m\" \"mem\" (memory 0)) (memory 0)",
-            Some("multiple memories"),
-        ),
-        (
-            "(import \"m\" \"a\" (memory 0)) (import \"m\" \"b\" (memory 0))",
-            Some("multiple memories"),
-        ),
+        ("(import \"m\" \"mem\" (memory 0)) (memory 0)", Some("multiple memories")),
+        ("(import \"m\" \"a\" (memory 0)) (import \"m\" \"b\" (memory 0))", Some("multiple memories")),
         ("(table 0 funcref)", None),
         ("(table 1 1 funcref)", None),
         ("(table 0 4294967295 funcref)", None),
         ("(table 4294967295 externref)", None),
-        (
-            "(table 1 0 funcref)",
-            Some("size minimum must not be greater than maximum"),
-        ),
-        (
-            "(table 2 1 externref)",
-            Some("size minimum must not be greater than maximum"),
-        ),
-        (
-            "(import \"m\" \"t\" (table 1 0 funcref))",
-            Some("size minimum must not be greater than maximum"),
-        ),
+        ("(table 1 0 funcref)", Some("size minimum must not be greater than maximum")),
+        ("(table 2 1 externref)", Some("size minimum must not be greater than maximum")),
+        ("(import \"m\" \"t\" (table 1 0 funcref))", Some("size minimum must not be greater than maximum")),
         // Several tables are fine (reference types).
-        (
-            "(table 1 funcref) (table 1 externref) (table 0 funcref)",
-            None,
-        ),
+        ("(table 1 funcref) (table 1 externref) (table 0 funcref)", None),
     ]);
 }
 
@@ -1172,12 +810,7 @@ fn limits_and_memory_count() {
 
 #[test]
 fn errors_carry_function_and_instruction() {
-    invalid_at(
-        "(func i32.const 1 i64.const 2 i32.add)",
-        "type mismatch",
-        0,
-        2,
-    );
+    invalid_at("(func i32.const 1 i64.const 2 i32.add)", "type mismatch", 0, 2);
     invalid_at("(func) (func nop local.get 0)", "unknown local", 1, 1);
     invalid_at(
         "(import \"m\" \"f\" (func)) (import \"m\" \"g\" (func)) (func) (func block block br 3 end end)",
@@ -1185,32 +818,12 @@ fn errors_carry_function_and_instruction() {
         3,
         2,
     );
-    invalid_at(
-        "(func (result i32) i32.const 0 call 4)",
-        "unknown function",
-        0,
-        1,
-    );
-    invalid_at(
-        "(global (mut i32) (i32.const 0)) (func nop nop i32.const 0 global.set 1)",
-        "unknown global",
-        0,
-        3,
-    );
-    invalid_at(
-        "(memory 1) (func nop i32.const 0 i32.load align=8 drop)",
-        "alignment must not be larger than natural",
-        0,
-        2,
-    );
+    invalid_at("(func (result i32) i32.const 0 call 4)", "unknown function", 0, 1);
+    invalid_at("(global (mut i32) (i32.const 0)) (func nop nop i32.const 0 global.set 1)", "unknown global", 0, 3);
+    invalid_at("(memory 1) (func nop i32.const 0 i32.load align=8 drop)", "alignment must not be larger than natural", 0, 2);
     // The function's own `end` is where a missing result is detected.
     invalid_at("(func (result i32) nop)", "type mismatch", 0, 1);
-    invalid_at(
-        "(func (result i32) block (result i32) i64.const 0 end)",
-        "type mismatch",
-        0,
-        2,
-    );
+    invalid_at("(func (result i32) block (result i32) i64.const 0 end)", "type mismatch", 0, 2);
 
     // Module-level errors have no location.
     match check("(memory 1 0)") {
@@ -1219,9 +832,7 @@ fn errors_carry_function_and_instruction() {
     }
     // A bad type index on a defined function names the function.
     match check("(type (func)) (import \"m\" \"f\" (func)) (func (type 1))") {
-        Err(Error::Invalid {
-            msg, func, instr, ..
-        }) => {
+        Err(Error::Invalid { msg, func, instr, .. }) => {
             assert_eq!(msg, "unknown type");
             assert_eq!((func, instr), (Some(1), None));
         }
@@ -1229,10 +840,7 @@ fn errors_carry_function_and_instruction() {
     }
 
     let e = check("(func i32.const 1 i64.const 2 i32.add)").unwrap_err();
-    assert_eq!(
-        e.to_string(),
-        "invalid module: type mismatch (function 0, instruction 2)"
-    );
+    assert_eq!(e.to_string(), "invalid module: type mismatch (function 0, instruction 2)");
 }
 
 // ---------------------------------------------------------------------------
@@ -1351,20 +959,13 @@ fn random_instr(rng: &mut XorShift) -> Instr {
         1 => BlockType::Val(random_valtype(rng)),
         _ => BlockType::Type(idx),
     };
-    let ma = MemArg {
-        align: (rng.next() >> 60) as u32,
-        offset: big,
-    };
+    let ma = MemArg { align: (rng.next() >> 60) as u32, offset: big };
     match rng.below(64) {
         0 => Unreachable,
         1 => Nop,
         2 => Block { ty: bt, end: big },
         3 => Loop { ty: bt, end: big },
-        4 => If {
-            ty: bt,
-            else_: big,
-            end: big,
-        },
+        4 => If { ty: bt, else_: big, end: big },
         5 => Else { end: big },
         6..=8 => End,
         9 => Br(idx),
@@ -1372,10 +973,7 @@ fn random_instr(rng: &mut XorShift) -> Instr {
         11 => BrTable(idx),
         12 => Return,
         13 => Call(idx),
-        14 => CallIndirect {
-            ty: idx,
-            table: idx,
-        },
+        14 => CallIndirect { ty: idx, table: idx },
         15 => Drop,
         16 => Select,
         17 => SelectT(random_valtype(rng)),
@@ -1389,10 +987,7 @@ fn random_instr(rng: &mut XorShift) -> Instr {
         25 => RefFunc(idx),
         26 => TableGet(idx),
         27 => TableSet(idx),
-        28 => TableInit {
-            elem: idx,
-            table: idx,
-        },
+        28 => TableInit { elem: idx, table: idx },
         29 => ElemDrop(idx),
         30 => TableCopy { dst: idx, src: idx },
         31 => TableGrow(idx),
@@ -1422,10 +1017,7 @@ fn random_instr(rng: &mut XorShift) -> Instr {
         57 => F32DemoteF64,
         58 => I32Extend8S,
         59 => I64ReinterpretF64,
-        60 => I32Load(MemArg {
-            align: u32::MAX,
-            offset: u32::MAX,
-        }),
+        60 => I32Load(MemArg { align: u32::MAX, offset: u32::MAX }),
         61 => Br(big),
         62 => Call(big),
         _ => LocalGet(big),
@@ -1456,10 +1048,7 @@ fn fuzz_hand_built_bodies_never_panic() {
             imports: vec![Import {
                 module: "m".into(),
                 name: "g".into(),
-                desc: ImportDesc::Global(GlobalType {
-                    ty: ValType::I32,
-                    mutable: rng.below(2) == 0,
-                }),
+                desc: ImportDesc::Global(GlobalType { ty: ValType::I32, mutable: rng.below(2) == 0 }),
             }],
             funcs: vec![0, 1],
             tables: vec![kalium_wasm::TableType {
@@ -1467,48 +1056,26 @@ fn fuzz_hand_built_bodies_never_panic() {
                 limits: kalium_wasm::ResizableLimits { min: 1, max: None },
             }],
             memories: if rng.below(2) == 0 {
-                vec![kalium_wasm::MemType {
-                    limits: kalium_wasm::ResizableLimits { min: 1, max: None },
-                }]
+                vec![kalium_wasm::MemType { limits: kalium_wasm::ResizableLimits { min: 1, max: None } }]
             } else {
                 vec![]
             },
             globals: vec![Global {
-                ty: GlobalType {
-                    ty: ValType::I64,
-                    mutable: true,
-                },
-                init: ConstExpr {
-                    instrs: vec![Instr::I64Const(0)],
-                },
+                ty: GlobalType { ty: ValType::I64, mutable: true },
+                init: ConstExpr { instrs: vec![Instr::I64Const(0)] },
             }],
-            exports: vec![Export {
-                name: "f".into(),
-                desc: ExportDesc::Func(1),
-            }],
+            exports: vec![Export { name: "f".into(), desc: ExportDesc::Func(1) }],
             start: None,
             elements: vec![],
-            data: vec![kalium_wasm::Data {
-                mode: kalium_wasm::DataMode::Passive,
-                bytes: vec![],
-            }],
+            data: vec![kalium_wasm::Data { mode: kalium_wasm::DataMode::Passive, bytes: vec![] }],
             data_count: Some(1),
             code: vec![
                 FuncBody {
-                    locals: (0..rng.below(3))
-                        .map(|_| random_valtype(&mut rng))
-                        .collect(),
+                    locals: (0..rng.below(3)).map(|_| random_valtype(&mut rng)).collect(),
                     instrs,
-                    br_tables: vec![BrTable {
-                        targets: vec![0, rng.below(4) as u32],
-                        default: rng.below(3) as u32,
-                    }],
+                    br_tables: vec![BrTable { targets: vec![0, rng.below(4) as u32], default: rng.below(3) as u32 }],
                 },
-                FuncBody {
-                    locals: vec![],
-                    instrs: vec![Instr::End],
-                    br_tables: vec![],
-                },
+                FuncBody { locals: vec![], instrs: vec![Instr::End], br_tables: vec![] },
             ],
             program: Default::default(),
         };

@@ -1,34 +1,54 @@
 [workspace]
 resolver = "2"
 members = [
-    "kernel",
-    "crates/kalium-abi",
-    "crates/kalium-wasm",
-    "crates/kalium-hal",
-    "crates/kalium-mm",
-    "crates/kalium-cap",
-    "crates/kalium-ipc",
-    "crates/kalium-sched",
-    "xtask",
+  "kernel",
+  "crates/kalium-abi",
+  "crates/kalium-wasm",
+  "crates/kalium-hal",
+  "crates/kalium-mm",
+  "crates/kalium-cap",
+  "crates/kalium-ipc",
+  "crates/kalium-sched",
+  "xtask",
 ]
 # Host-testable crates. `cargo test` at the root runs these. The kernel binary
 # and the wasm examples are built through `cargo xtask`.
 default-members = [
-    "crates/kalium-abi",
-    "crates/kalium-wasm",
-    "crates/kalium-mm",
-    "crates/kalium-cap",
-    "crates/kalium-ipc",
-    "crates/kalium-sched",
+  "crates/kalium-abi",
+  "crates/kalium-wasm",
+  "crates/kalium-mm",
+  "crates/kalium-cap",
+  "crates/kalium-ipc",
+  "crates/kalium-sched",
 ]
 # The SDK and examples target wasm32 and have their own workspace in sdk/.
 exclude = ["sdk"]
 
 [workspace.package]
-version = "0.1.0"
-edition = "2021"
-license = "Apache-2.0"
+version = "0.0.0"
+edition = "2024"
+authors = ["Amon Rayfa <amon@koseka.net>"]
+description = "The kernel of QualiaOS: a Rust kernel that runs only WebAssembly."
 repository = "https://github.com/KosekaLabs/kalium"
+license = "Apache-2.0"
+readme = "README.md"
+exclude = [
+  ".cargo",
+  ".env",
+  ".github",
+  ".gitignore",
+  ".trunk",
+  "CHANGELOG.md",
+  "CONTRIBUTING.md",
+  "dist",
+  "docs",
+  "img",
+  "node_modules",
+  "package.json",
+  "package-lock.json",
+  "SECURITY.md",
+]
+publish = false
 
 [workspace.dependencies]
 kalium-abi = { path = "crates/kalium-abi" }

@@ -39,9 +39,7 @@ const SELFTEST_ODD_MEMORY: &str = "129M";
 /// The SDK example modules in boot-image order (`init=0, ping=1, pong=2,
 /// rt=3, fair=4, faulty=5, park=6, greedy=7, revoked=8, shelf=9, hog=10`);
 /// the kernel's `build.rs` embeds `target/wasm/<name>.wasm` in this order.
-const WASM_MODULES: [&str; 11] = [
-    "init", "ping", "pong", "rt", "fair", "faulty", "park", "greedy", "revoked", "shelf", "hog",
-];
+const WASM_MODULES: [&str; 11] = ["init", "ping", "pong", "rt", "fair", "faulty", "park", "greedy", "revoked", "shelf", "hog"];
 /// The WASI demo programs from `demos/`, which follow the SDK modules in
 /// the boot image (`hello_std=11, hello_c=12`). `hello_std` is a Rust `std`
 /// program built for `wasm32-wasip1`; `hello_c` is a C program compiled with
@@ -67,9 +65,7 @@ const WASI_SYSROOT_CANDIDATES: [&str; 5] = [
     "/usr",
 ];
 /// Compilers tried, in order, when `CLANG` is not set.
-const CLANG_CANDIDATES: [&str; 6] = [
-    "clang", "clang-20", "clang-19", "clang-18", "clang-17", "clang-16",
-];
+const CLANG_CANDIDATES: [&str; 6] = ["clang", "clang-20", "clang-19", "clang-18", "clang-17", "clang-16"];
 /// Where the SDK workspace builds (kept apart from the kernel's target dir
 /// so the two workspaces never share a lock or a profile).
 const WASM_BUILD_DIR: &str = "target/wasm-build";
@@ -142,7 +138,8 @@ fn usage() {
          \x20                        check the M1 scenario output and exit code\n\
          \x20 clippy                 clippy with -D warnings on the host crates, the kernel\n\
          \x20                        and the SDK\n\
-         \x20 fmt-check              cargo fmt --check on both workspaces\n\
+         \x20 fmt-check              cargo fmt --check on the three workspaces, with\n\
+         \x20                        {RUSTFMT_CONFIG} (shared with trunk fmt)\n\
          \n\
          KALIUM_QEMU_TIMEOUT=<seconds> overrides the {QEMU_TIMEOUT_SECS} s QEMU limit."
     );
@@ -200,10 +197,7 @@ fn describe_exit(code: Option<i32>) -> &'static str {
 
 /// The workspace root: the parent of this crate's directory.
 fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("xtask lives one level below the workspace root")
-        .to_path_buf()
+    Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("xtask lives one level below the workspace root").to_path_buf()
 }
 
 fn cargo() -> Command {
@@ -247,16 +241,7 @@ fn wasm(root: &Path) -> i32 {
     let code = run_cargo(
         root,
         &format!("building SDK examples for {WASM_TARGET}"),
-        &[
-            "build",
-            "--release",
-            "--target",
-            WASM_TARGET,
-            "--manifest-path",
-            SDK_MANIFEST,
-            "--target-dir",
-            WASM_BUILD_DIR,
-        ],
+        &["build", "--release", "--target", WASM_TARGET, "--manifest-path", SDK_MANIFEST, "--target-dir", WASM_BUILD_DIR],
     );
     if code != 0 {
         return code;
@@ -272,11 +257,7 @@ fn wasm(root: &Path) -> i32 {
         let src = built.join(format!("{name}.wasm"));
         let dst = out_dir.join(format!("{name}.wasm"));
         if let Err(e) = fs::copy(&src, &dst) {
-            eprintln!(
-                "xtask: cannot copy {} to {}: {e}",
-                src.display(),
-                dst.display()
-            );
+            eprintln!("xtask: cannot copy {} to {}: {e}", src.display(), dst.display());
             return 1;
         }
         let size = fs::metadata(&dst).map(|m| m.len()).unwrap_or(0);
@@ -287,11 +268,7 @@ fn wasm(root: &Path) -> i32 {
 
 /// Whether every boot image module is present in `target/wasm/`.
 fn wasm_present(root: &Path) -> bool {
-    WASM_MODULES.iter().chain(DEMO_MODULES.iter()).all(|name| {
-        root.join(WASM_OUT_DIR)
-            .join(format!("{name}.wasm"))
-            .is_file()
-    })
+    WASM_MODULES.iter().chain(DEMO_MODULES.iter()).all(|name| root.join(WASM_OUT_DIR).join(format!("{name}.wasm")).is_file())
 }
 
 /// Copies a built module into `target/wasm/<name>.wasm` and prints its
@@ -304,11 +281,7 @@ fn install_module(root: &Path, index: usize, name: &str, src: &Path) -> i32 {
     }
     let dst = out_dir.join(format!("{name}.wasm"));
     if let Err(e) = fs::copy(src, &dst) {
-        eprintln!(
-            "xtask: cannot copy {} to {}: {e}",
-            src.display(),
-            dst.display()
-        );
+        eprintln!("xtask: cannot copy {} to {}: {e}", src.display(), dst.display());
         return 1;
     }
     let size = fs::metadata(&dst).map(|m| m.len()).unwrap_or(0);
@@ -324,26 +297,13 @@ fn demos(root: &Path) -> i32 {
     let code = run_cargo(
         root,
         &format!("building WASI demo hello_std for {WASIP1_TARGET}"),
-        &[
-            "build",
-            "--release",
-            "--target",
-            WASIP1_TARGET,
-            "--manifest-path",
-            DEMOS_MANIFEST,
-            "--target-dir",
-            DEMOS_BUILD_DIR,
-        ],
+        &["build", "--release", "--target", WASIP1_TARGET, "--manifest-path", DEMOS_MANIFEST, "--target-dir", DEMOS_BUILD_DIR],
     );
     if code != 0 {
         return code;
     }
     let base = WASM_MODULES.len();
-    let built = root
-        .join(DEMOS_BUILD_DIR)
-        .join(WASIP1_TARGET)
-        .join("release")
-        .join("hello_std.wasm");
+    let built = root.join(DEMOS_BUILD_DIR).join(WASIP1_TARGET).join("release").join("hello_std.wasm");
     let code = install_module(root, base, DEMO_MODULES[0], &built);
     if code != 0 {
         return code;
@@ -383,7 +343,9 @@ fn demos(root: &Path) -> i32 {
             }
         },
         Err(why) => {
-            eprintln!("xtask: skipping the hello_c build: {why}; using the prebuilt binary {HELLO_C_PREBUILT} (set CLANG and WASI_SYSROOT, or install clang, lld and wasi-libc, to rebuild it)");
+            eprintln!(
+                "xtask: skipping the hello_c build: {why}; using the prebuilt binary {HELLO_C_PREBUILT} (set CLANG and WASI_SYSROOT, or install clang, lld and wasi-libc, to rebuild it)"
+            );
             prebuilt
         }
     };
@@ -407,12 +369,7 @@ fn find_wasi_toolchain() -> Result<WasiToolchain, String> {
     let clang = candidates
         .iter()
         .find(|c| {
-            Command::new(c)
-                .arg("--version")
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .is_ok_and(|s| s.success())
+            Command::new(c).arg("--version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
         })
         .cloned()
         .ok_or_else(|| format!("no clang found (tried {})", candidates.join(", ")))?;
@@ -424,18 +381,13 @@ fn find_wasi_toolchain() -> Result<WasiToolchain, String> {
         .iter()
         .find(|s| {
             s.join("lib/wasm32-wasi/libc.a").is_file()
-                && (s.join("include/wasm32-wasi/stdio.h").is_file()
-                    || s.join("include/stdio.h").is_file())
+                && (s.join("include/wasm32-wasi/stdio.h").is_file() || s.join("include/stdio.h").is_file())
         })
         .cloned()
         .ok_or_else(|| {
             format!(
                 "no wasi-libc sysroot (lib/wasm32-wasi/libc.a) under {}",
-                sysroots
-                    .iter()
-                    .map(|p| p.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                sysroots.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
             )
         })?;
     Ok(WasiToolchain { clang, sysroot })
@@ -492,14 +444,7 @@ fn build(root: &Path, flags: BuildFlags) -> i32 {
             return code;
         }
     }
-    let mut args = vec![
-        "build",
-        "-p",
-        "kalium-kernel",
-        "--target",
-        KERNEL_TARGET,
-        "--release",
-    ];
+    let mut args = vec!["build", "-p", "kalium-kernel", "--target", KERNEL_TARGET, "--release"];
     let features = flags.features().join(",");
     if !features.is_empty() {
         args.extend(["--features", &features]);
@@ -508,11 +453,7 @@ fn build(root: &Path, flags: BuildFlags) -> i32 {
         root,
         &format!(
             "building kernel for {KERNEL_TARGET}{}",
-            if features.is_empty() {
-                String::new()
-            } else {
-                format!(" ({features})")
-            }
+            if features.is_empty() { String::new() } else { format!(" ({features})") }
         ),
         &args,
     )
@@ -574,10 +515,7 @@ fn run(root: &Path, flags: BuildFlags) -> i32 {
     match wait_with_timeout(&mut child, timeout) {
         Ok(Some(status)) => status_code(status),
         Ok(None) => {
-            eprintln!(
-                "xtask: QEMU timed out after {} s, killed",
-                timeout.as_secs()
-            );
+            eprintln!("xtask: QEMU timed out after {} s, killed", timeout.as_secs());
             EXIT_TIMEOUT
         }
         Err(e) => {
@@ -609,15 +547,8 @@ struct Captured {
 /// status (`None` on timeout).
 fn boot_captured(root: &Path, label: &str, memory: &str) -> Result<Captured, i32> {
     let timeout = qemu_timeout();
-    eprintln!(
-        "xtask: {label}: starting QEMU with -m {memory} (timeout {} s)",
-        timeout.as_secs()
-    );
-    let mut child = match qemu_command(root, memory)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+    eprintln!("xtask: {label}: starting QEMU with -m {memory} (timeout {} s)", timeout.as_secs());
+    let mut child = match qemu_command(root, memory).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()
     {
         Ok(c) => c,
         Err(e) => {
@@ -647,16 +578,10 @@ fn boot_captured(root: &Path, label: &str, memory: &str) -> Result<Captured, i32
         }
         eprintln!("---------------------");
     }
-    eprintln!(
-        "xtask: {label}: QEMU ran {:.1} s",
-        started.elapsed().as_secs_f64()
-    );
+    eprintln!("xtask: {label}: QEMU ran {:.1} s", started.elapsed().as_secs_f64());
 
     match outcome {
-        Ok(status) => Ok(Captured {
-            status,
-            stdout: out,
-        }),
+        Ok(status) => Ok(Captured { status, stdout: out }),
         Err(e) => {
             eprintln!("xtask: {label}: waiting for QEMU failed: {e}");
             Err(1)
@@ -679,14 +604,8 @@ fn report(label: &str, failures: &[String]) -> i32 {
 /// The failure, if any, in how a captured QEMU run ended.
 fn check_exit(captured: &Captured) -> Option<String> {
     match captured.status {
-        None => Some(format!(
-            "QEMU timed out after {} s",
-            qemu_timeout().as_secs()
-        )),
-        Some(s) if s.code() != Some(0) => Some(format!(
-            "QEMU exited with {s}{}, expected code 0",
-            describe_exit(s.code())
-        )),
+        None => Some(format!("QEMU timed out after {} s", qemu_timeout().as_secs())),
+        Some(s) if s.code() != Some(0) => Some(format!("QEMU exited with {s}{}, expected code 0", describe_exit(s.code()))),
         Some(_) => None,
     }
 }
@@ -712,11 +631,7 @@ fn boot_only_check_built(root: &Path, label: &str, memory: &str, markers: &[&str
     let mut failures = Vec::new();
     failures.extend(check_exit(&captured));
     for marker in [BOOT_TEST_MARKER].iter().chain(markers) {
-        if !captured
-            .stdout
-            .lines()
-            .any(|l| l.trim_end().starts_with(marker))
-        {
+        if !captured.stdout.lines().any(|l| l.trim_end().starts_with(marker)) {
             failures.push(format!("console output does not contain `{marker}`"));
         }
     }
@@ -726,25 +641,13 @@ fn boot_only_check_built(root: &Path, label: &str, memory: &str, markers: &[&str
         }
     }
     let code = report(label, &failures);
-    if captured.status.is_none() {
-        EXIT_TIMEOUT
-    } else {
-        code
-    }
+    if captured.status.is_none() { EXIT_TIMEOUT } else { code }
 }
 
 /// HAL-only check: build with `boot-only`, boot in QEMU, require the tick
 /// marker and exit code 0.
 fn boot_test(root: &Path) -> i32 {
-    boot_only_check(
-        root,
-        "boot-test",
-        BuildFlags {
-            boot_only: true,
-            selftest: false,
-        },
-        &[],
-    )
+    boot_only_check(root, "boot-test", BuildFlags { boot_only: true, selftest: false }, &[])
 }
 
 /// HAL hardening check: `boot-only` plus `hal-selftest`; the self-test must
@@ -753,20 +656,11 @@ fn boot_test(root: &Path) -> i32 {
 /// that the mapping of a partial last 2 MiB block of RAM (and the fault on
 /// the first byte past it) is checked as well.
 fn selftest(root: &Path) -> i32 {
-    let code = build(
-        root,
-        BuildFlags {
-            boot_only: true,
-            selftest: true,
-        },
-    );
+    let code = build(root, BuildFlags { boot_only: true, selftest: true });
     if code != 0 {
         return code;
     }
-    for (label, memory) in [
-        ("selftest", QEMU_MEMORY),
-        ("selftest (odd RAM size)", SELFTEST_ODD_MEMORY),
-    ] {
+    for (label, memory) in [("selftest", QEMU_MEMORY), ("selftest (odd RAM size)", SELFTEST_ODD_MEMORY)] {
         let code = boot_only_check_built(root, label, memory, &[SELFTEST_PASS_MARKER]);
         if code != 0 {
             return code;
@@ -778,34 +672,18 @@ fn selftest(root: &Path) -> i32 {
 /// The full M1 check: host tests, the HAL self-test, wasm, kernel, QEMU,
 /// scenario output.
 fn test(root: &Path) -> i32 {
-    let code = run_cargo(
-        root,
-        "running host tests (workspace default members)",
-        &["test"],
-    );
+    let code = run_cargo(root, "running host tests (workspace default members)", &["test"]);
     if code != 0 {
         return code;
     }
-    let code = run_cargo(
-        root,
-        "running HAL host tests (device tree reader)",
-        &["test", "-p", "kalium-hal"],
-    );
+    let code = run_cargo(root, "running HAL host tests (device tree reader)", &["test", "-p", "kalium-hal"]);
     if code != 0 {
         return code;
     }
     let code = run_cargo(
         root,
         "running SDK host tests",
-        &[
-            "test",
-            "--manifest-path",
-            SDK_MANIFEST,
-            "-p",
-            "kalium-sdk",
-            "--target-dir",
-            WASM_BUILD_DIR,
-        ],
+        &["test", "--manifest-path", SDK_MANIFEST, "-p", "kalium-sdk", "--target-dir", WASM_BUILD_DIR],
     );
     if code != 0 {
         return code;
@@ -832,11 +710,7 @@ fn test(root: &Path) -> i32 {
     failures.extend(check_exit(&captured));
     failures.extend(check_scenario(&captured.stdout));
     let code = report("test", &failures);
-    if captured.status.is_none() {
-        EXIT_TIMEOUT
-    } else {
-        code
-    }
+    if captured.status.is_none() { EXIT_TIMEOUT } else { code }
 }
 
 /// `rt` must meet at least this many of its 400 periods (95%).
@@ -849,8 +723,7 @@ const GREEDY_CHILDREN: u32 = kalium_abi::limits::MAX_INSTANCES as u32 - 2;
 /// largest size up to its memory object quota, linear memory up to the
 /// kernel's page limit, channels up to its channel quota, and a full queue
 /// on each.
-const HOG_MEMOBJS: u64 =
-    kalium_abi::limits::MAX_MEMOBJ_BYTES_PER_INSTANCE / kalium_abi::limits::MAX_MEMOBJ_SIZE;
+const HOG_MEMOBJS: u64 = kalium_abi::limits::MAX_MEMOBJ_BYTES_PER_INSTANCE / kalium_abi::limits::MAX_MEMOBJ_SIZE;
 const HOG_PAGES: u64 = 256;
 const HOG_CHANNELS: u64 = kalium_abi::limits::MAX_CHANNELS_PER_INSTANCE as u64;
 const HOG_QUEUE_DEPTH: u64 = kalium_abi::limits::CHANNEL_QUEUE_DEPTH as u64;
@@ -869,13 +742,10 @@ const HOG_RECEIVED_BACK: u64 = HOG_QUEUE_DEPTH / 2;
 /// (`kalium_ipc::Message::cost_of`: slot, payload and capabilities), not
 /// just the payload, or a queue of cap-only messages is free and eats the
 /// kernel's headroom.
-const HOG_DRAINED_MESSAGES: u64 =
-    (HOG_CHANNELS - 1) * HOG_QUEUE_DEPTH + (HOG_QUEUE_DEPTH - HOG_RECEIVED_BACK);
-const HOG_DRAINED_BYTES: u64 = (HOG_CHANNELS - 1)
-    * HOG_QUEUE_DEPTH
-    * kalium_ipc::Message::cost_of(kalium_abi::limits::MAX_MESSAGE_LEN, 0) as u64
-    + (HOG_QUEUE_DEPTH - HOG_RECEIVED_BACK)
-        * kalium_ipc::Message::cost_of(0, kalium_abi::limits::MAX_MESSAGE_CAPS) as u64;
+const HOG_DRAINED_MESSAGES: u64 = (HOG_CHANNELS - 1) * HOG_QUEUE_DEPTH + (HOG_QUEUE_DEPTH - HOG_RECEIVED_BACK);
+const HOG_DRAINED_BYTES: u64 =
+    (HOG_CHANNELS - 1) * HOG_QUEUE_DEPTH * kalium_ipc::Message::cost_of(kalium_abi::limits::MAX_MESSAGE_LEN, 0) as u64
+        + (HOG_QUEUE_DEPTH - HOG_RECEIVED_BACK) * kalium_ipc::Message::cost_of(0, kalium_abi::limits::MAX_MESSAGE_CAPS) as u64;
 /// The reference cycle `hog` leaves before it hoards: one channel whose
 /// queue holds one zero-byte message carrying one capability on that
 /// channel, with both ends dropped. The kernel must collect the channel
@@ -934,53 +804,39 @@ impl Expect {
         match self {
             Expect::Line(l) => line == *l,
             Expect::FaultyTrap => {
-                line.starts_with("kalium: instance ")
-                    && line.contains("(faulty) trapped: out of bounds memory access")
+                line.starts_with("kalium: instance ") && line.contains("(faulty) trapped: out of bounds memory access")
             }
-            Expect::RtMet => parse_rt_met(line)
-                .is_some_and(|(met, total)| total == RT_PERIODS && met >= RT_MIN_MET),
+            Expect::RtMet => parse_rt_met(line).is_some_and(|(met, total)| total == RT_PERIODS && met >= RT_MIN_MET),
             Expect::GreedyLimit => parse_greedy_refused(line) == Some(GREEDY_CHILDREN),
             Expect::HelloCTime => line
                 .strip_prefix("hello_c: time() ok (")
                 .and_then(|r| r.strip_suffix(" s)"))
                 .is_some_and(|n| n.parse::<u64>().is_ok()),
-            Expect::ShelfRestoreFaster => {
-                parse_shelf_times(line).is_some_and(|(init, restore)| restore < init)
-            }
-            Expect::HogQuota => {
-                parse_hog(line) == Some((HOG_MEMOBJS, HOG_PAGES, HOG_CHANNELS, HOG_MESSAGES))
-            }
-            Expect::HogCapOnly => {
-                parse_hog_cap_only(line) == Some((HOG_CAP_ONLY_SENT, HOG_RECEIVED_BACK))
-            }
-            Expect::HogDrain => {
-                parse_hog_drain(line) == Some((HOG_DRAINED_MESSAGES, HOG_DRAINED_BYTES))
-            }
+            Expect::ShelfRestoreFaster => parse_shelf_times(line).is_some_and(|(init, restore)| restore < init),
+            Expect::HogQuota => parse_hog(line) == Some((HOG_MEMOBJS, HOG_PAGES, HOG_CHANNELS, HOG_MESSAGES)),
+            Expect::HogCapOnly => parse_hog_cap_only(line) == Some((HOG_CAP_ONLY_SENT, HOG_RECEIVED_BACK)),
+            Expect::HogDrain => parse_hog_drain(line) == Some((HOG_DRAINED_MESSAGES, HOG_DRAINED_BYTES)),
             Expect::BudgetSettled => parse_budget_in_use(line) == Some(0),
-            Expect::CycleCollected => {
-                parse_collected(line) == Some((CYCLE_OBJECTS, CYCLE_MESSAGES, CYCLE_BYTES))
-            }
+            Expect::CycleCollected => parse_collected(line) == Some((CYCLE_OBJECTS, CYCLE_MESSAGES, CYCLE_BYTES)),
         }
     }
 
     fn describe(&self) -> String {
         match self {
             Expect::Line(l) => format!("`{l}`"),
-            Expect::FaultyTrap => {
-                "`kalium: instance <id> (faulty) trapped: out of bounds memory access`".into()
-            }
+            Expect::FaultyTrap => "`kalium: instance <id> (faulty) trapped: out of bounds memory access`".into(),
             Expect::RtMet => format!("`rt: met N/{RT_PERIODS}` with N >= {RT_MIN_MET}"),
             Expect::GreedyLimit => {
                 format!("`greedy: spawn refused (ENOMEM) after {GREEDY_CHILDREN} instances`")
             }
             Expect::HelloCTime => "`hello_c: time() ok (N s)`".into(),
             Expect::ShelfRestoreFaster => "`init: shelf init N us, restore M us` with M < N".into(),
-            Expect::HogQuota => format!(
-                "`hog: memobjs {HOG_MEMOBJS}, pages {HOG_PAGES}, channels {HOG_CHANNELS}, messages {HOG_MESSAGES}`"
-            ),
-            Expect::HogCapOnly => format!(
-                "`hog: {HOG_CAP_ONLY_SENT} cap-only messages sent, {HOG_RECEIVED_BACK} received back`"
-            ),
+            Expect::HogQuota => {
+                format!("`hog: memobjs {HOG_MEMOBJS}, pages {HOG_PAGES}, channels {HOG_CHANNELS}, messages {HOG_MESSAGES}`")
+            }
+            Expect::HogCapOnly => {
+                format!("`hog: {HOG_CAP_ONLY_SENT} cap-only messages sent, {HOG_RECEIVED_BACK} received back`")
+            }
             Expect::HogDrain => format!(
                 "`kalium: instance <id> (hog) exit drained {HOG_DRAINED_MESSAGES} queued messages, {HOG_DRAINED_BYTES} budget bytes`"
             ),
@@ -999,11 +855,7 @@ fn parse_collected(line: &str) -> Option<(u64, u64, u64)> {
     let (objects, rest) = rest.split_once(" unreachable objects: ")?;
     let (messages, rest) = rest.split_once(" queued messages, ")?;
     let bytes = rest.strip_suffix(" budget bytes")?;
-    Some((
-        objects.parse().ok()?,
-        messages.parse().ok()?,
-        bytes.parse().ok()?,
-    ))
+    Some((objects.parse().ok()?, messages.parse().ok()?, bytes.parse().ok()?))
 }
 
 /// Parses `hog: N cap-only messages sent, M received back` into `(N, M)`.
@@ -1026,10 +878,7 @@ fn parse_hog_drain(line: &str) -> Option<(u64, u64)> {
 
 /// Parses `kalium: instance budget: N bytes in use` into `N`.
 fn parse_budget_in_use(line: &str) -> Option<u64> {
-    line.strip_prefix("kalium: instance budget: ")?
-        .strip_suffix(" bytes in use")?
-        .parse()
-        .ok()
+    line.strip_prefix("kalium: instance budget: ")?.strip_suffix(" bytes in use")?.parse().ok()
 }
 
 /// Parses `hog: memobjs N, pages P, channels C, messages M`.
@@ -1038,12 +887,7 @@ fn parse_hog(line: &str) -> Option<(u64, u64, u64, u64)> {
     let (memobjs, rest) = rest.split_once(", pages ")?;
     let (pages, rest) = rest.split_once(", channels ")?;
     let (channels, messages) = rest.split_once(", messages ")?;
-    Some((
-        memobjs.parse().ok()?,
-        pages.parse().ok()?,
-        channels.parse().ok()?,
-        messages.parse().ok()?,
-    ))
+    Some((memobjs.parse().ok()?, pages.parse().ok()?, channels.parse().ok()?, messages.parse().ok()?))
 }
 
 /// Parses `init: shelf init N us, restore M us` into `(N, M)`.
@@ -1056,10 +900,7 @@ fn parse_shelf_times(line: &str) -> Option<(u64, u64)> {
 
 /// Parses `greedy: spawn refused (ENOMEM) after N instances` into `N`.
 fn parse_greedy_refused(line: &str) -> Option<u32> {
-    line.strip_prefix("greedy: spawn refused (ENOMEM) after ")?
-        .strip_suffix(" instances")?
-        .parse()
-        .ok()
+    line.strip_prefix("greedy: spawn refused (ENOMEM) after ")?.strip_suffix(" instances")?.parse().ok()
 }
 
 /// Parses `rt: met N/T` into `(N, T)`.
@@ -1176,76 +1017,55 @@ fn check_scenario(out: &str) -> Vec<String> {
 
     let mut pos = 0;
     for expect in ORDERED {
-        match lines[pos.min(lines.len())..]
-            .iter()
-            .position(|l| expect.matches(l))
-        {
+        match lines[pos.min(lines.len())..].iter().position(|l| expect.matches(l)) {
             Some(i) => pos += i + 1,
             None => {
-                let detail =
-                    match expect {
-                        Expect::RtMet => match lines.iter().find_map(|l| parse_rt_met(l)) {
-                            Some((met, total)) => format!(" (found `rt: met {met}/{total}`)"),
-                            None => String::new(),
-                        },
-                        Expect::GreedyLimit => {
-                            match lines.iter().find_map(|l| parse_greedy_refused(l)) {
-                                Some(n) => format!(" (found `... after {n} instances`)"),
-                                None => String::new(),
-                            }
+                let detail = match expect {
+                    Expect::RtMet => match lines.iter().find_map(|l| parse_rt_met(l)) {
+                        Some((met, total)) => format!(" (found `rt: met {met}/{total}`)"),
+                        None => String::new(),
+                    },
+                    Expect::GreedyLimit => match lines.iter().find_map(|l| parse_greedy_refused(l)) {
+                        Some(n) => format!(" (found `... after {n} instances`)"),
+                        None => String::new(),
+                    },
+                    Expect::ShelfRestoreFaster => match lines.iter().find_map(|l| parse_shelf_times(l)) {
+                        Some((init, restore)) => {
+                            format!(" (found `init {init} us, restore {restore} us`)")
                         }
-                        Expect::ShelfRestoreFaster => {
-                            match lines.iter().find_map(|l| parse_shelf_times(l)) {
-                                Some((init, restore)) => {
-                                    format!(" (found `init {init} us, restore {restore} us`)")
-                                }
-                                None => String::new(),
-                            }
+                        None => String::new(),
+                    },
+                    Expect::HogQuota => match lines.iter().find_map(|l| parse_hog(l)) {
+                        Some((m, p, c, n)) => {
+                            format!(" (found `memobjs {m}, pages {p}, channels {c}, messages {n}`)")
                         }
-                        Expect::HogQuota => {
-                            match lines.iter().find_map(|l| parse_hog(l)) {
-                                Some((m, p, c, n)) => {
-                                    format!(" (found `memobjs {m}, pages {p}, channels {c}, messages {n}`)")
-                                }
-                                None => String::new(),
-                            }
+                        None => String::new(),
+                    },
+                    Expect::HogCapOnly => match lines.iter().find_map(|l| parse_hog_cap_only(l)) {
+                        Some((s, r)) => {
+                            format!(" (found `{s} cap-only messages sent, {r} received back`)")
                         }
-                        Expect::HogCapOnly => {
-                            match lines.iter().find_map(|l| parse_hog_cap_only(l)) {
-                                Some((s, r)) => {
-                                    format!(
-                                        " (found `{s} cap-only messages sent, {r} received back`)"
-                                    )
-                                }
-                                None => String::new(),
-                            }
+                        None => String::new(),
+                    },
+                    Expect::HogDrain => match lines.iter().find_map(|l| parse_hog_drain(l)) {
+                        Some((n, b)) => {
+                            format!(" (found `drained {n} queued messages, {b} budget bytes`)")
                         }
-                        Expect::HogDrain => match lines.iter().find_map(|l| parse_hog_drain(l)) {
-                            Some((n, b)) => {
-                                format!(" (found `drained {n} queued messages, {b} budget bytes`)")
-                            }
-                            None => String::new(),
-                        },
-                        Expect::BudgetSettled => {
-                            match lines.iter().find_map(|l| parse_budget_in_use(l)) {
-                                Some(b) => format!(" (found `{b} bytes in use`)"),
-                                None => String::new(),
-                            }
+                        None => String::new(),
+                    },
+                    Expect::BudgetSettled => match lines.iter().find_map(|l| parse_budget_in_use(l)) {
+                        Some(b) => format!(" (found `{b} bytes in use`)"),
+                        None => String::new(),
+                    },
+                    Expect::CycleCollected => match lines.iter().find_map(|l| parse_collected(l)) {
+                        Some((o, m, b)) => {
+                            format!(" (found `collected {o} unreachable objects: {m} queued messages, {b} budget bytes`)")
                         }
-                        Expect::CycleCollected => {
-                            match lines.iter().find_map(|l| parse_collected(l)) {
-                            Some((o, m, b)) => format!(
-                                " (found `collected {o} unreachable objects: {m} queued messages, {b} budget bytes`)"
-                            ),
-                            None => String::new(),
-                        }
-                        }
-                        _ => String::new(),
-                    };
-                failures.push(format!(
-                    "missing {} after line {pos}{detail}",
-                    expect.describe()
-                ));
+                        None => String::new(),
+                    },
+                    _ => String::new(),
+                };
+                failures.push(format!("missing {} after line {pos}{detail}", expect.describe()));
             }
         }
     }
@@ -1256,9 +1076,7 @@ fn check_scenario(out: &str) -> Vec<String> {
     let pong = lines.iter().position(|l| *l == "init: pong exited 0");
     match (ping, pong) {
         (None, _) => failures.push("missing `init: ping exited 0`".into()),
-        (Some(a), Some(b)) if a > b => {
-            failures.push("`init: ping exited 0` must come before `init: pong exited 0`".into())
-        }
+        (Some(a), Some(b)) if a > b => failures.push("`init: ping exited 0` must come before `init: pong exited 0`".into()),
         _ => {}
     }
 
@@ -1284,16 +1102,7 @@ fn clippy(root: &Path) -> i32 {
     let code = run_cargo(
         root,
         "clippy: host crates",
-        &[
-            "clippy",
-            "--workspace",
-            "--exclude",
-            "kalium-kernel",
-            "--all-targets",
-            "--",
-            "-D",
-            "warnings",
-        ],
+        &["clippy", "--workspace", "--exclude", "kalium-kernel", "--all-targets", "--", "-D", "warnings"],
     );
     if code != 0 {
         return code;
@@ -1307,16 +1116,7 @@ fn clippy(root: &Path) -> i32 {
     let code = run_cargo(
         root,
         "clippy: kernel",
-        &[
-            "clippy",
-            "-p",
-            "kalium-kernel",
-            "--target",
-            KERNEL_TARGET,
-            "--",
-            "-D",
-            "warnings",
-        ],
+        &["clippy", "-p", "kalium-kernel", "--target", KERNEL_TARGET, "--", "-D", "warnings"],
     );
     if code != 0 {
         return code;
@@ -1360,43 +1160,32 @@ fn clippy(root: &Path) -> i32 {
     )
 }
 
-/// `cargo fmt --all -- --check` on the three workspaces (root, SDK, demos).
+/// The rustfmt configuration shared with Trunk (`trunk fmt`), so both format
+/// the same way.
+const RUSTFMT_CONFIG: &str = ".trunk/configs/.rustfmt.toml";
+
+/// `cargo fmt --all -- --check` on the three workspaces (root, SDK, demos),
+/// with [`RUSTFMT_CONFIG`].
 fn fmt_check(root: &Path) -> i32 {
-    let code = run_cargo(
-        root,
-        "fmt-check: workspace",
-        &["fmt", "--all", "--", "--check"],
-    );
-    if code != 0 {
-        return code;
+    let config = root.join(RUSTFMT_CONFIG);
+    let config = config.to_str().expect("workspace path is UTF-8");
+    let workspaces: [(&str, Option<&str>); 3] = [
+        ("fmt-check: workspace", None),
+        ("fmt-check: SDK", Some(SDK_MANIFEST)),
+        ("fmt-check: WASI demos", Some(DEMOS_MANIFEST)),
+    ];
+    for (label, manifest) in workspaces {
+        let mut args = vec!["fmt", "--all"];
+        if let Some(manifest) = manifest {
+            args.extend(["--manifest-path", manifest]);
+        }
+        args.extend(["--", "--check", "--config-path", config]);
+        let code = run_cargo(root, label, &args);
+        if code != 0 {
+            return code;
+        }
     }
-    let code = run_cargo(
-        root,
-        "fmt-check: SDK",
-        &[
-            "fmt",
-            "--all",
-            "--manifest-path",
-            SDK_MANIFEST,
-            "--",
-            "--check",
-        ],
-    );
-    if code != 0 {
-        return code;
-    }
-    run_cargo(
-        root,
-        "fmt-check: WASI demos",
-        &[
-            "fmt",
-            "--all",
-            "--manifest-path",
-            DEMOS_MANIFEST,
-            "--",
-            "--check",
-        ],
-    )
+    0
 }
 
 #[cfg(test)]
@@ -1410,21 +1199,12 @@ mod tests {
         GOOD_TEMPLATE
             .replace(
                 "{hog_cap_only}",
-                &format!(
-                    "{HOG_CAP_ONLY_SENT} cap-only messages sent, {HOG_RECEIVED_BACK} received back"
-                ),
+                &format!("{HOG_CAP_ONLY_SENT} cap-only messages sent, {HOG_RECEIVED_BACK} received back"),
             )
-            .replace(
-                "{hog_drain}",
-                &format!(
-                    "{HOG_DRAINED_MESSAGES} queued messages, {HOG_DRAINED_BYTES} budget bytes"
-                ),
-            )
+            .replace("{hog_drain}", &format!("{HOG_DRAINED_MESSAGES} queued messages, {HOG_DRAINED_BYTES} budget bytes"))
             .replace(
                 "{cycle}",
-                &format!(
-                    "{CYCLE_OBJECTS} unreachable objects: {CYCLE_MESSAGES} queued messages, {CYCLE_BYTES} budget bytes"
-                ),
+                &format!("{CYCLE_OBJECTS} unreachable objects: {CYCLE_MESSAGES} queued messages, {CYCLE_BYTES} budget bytes"),
             )
     });
 
@@ -1519,11 +1299,7 @@ mod tests {
 
     #[test]
     fn good_output_passes() {
-        assert!(
-            check_scenario(&GOOD).is_empty(),
-            "{:?}",
-            check_scenario(&GOOD)
-        );
+        assert!(check_scenario(&GOOD).is_empty(), "{:?}", check_scenario(&GOOD));
         assert!(check_scenario(&GOOD.replace('\n', "\r\n")).is_empty());
     }
 
@@ -1545,14 +1321,9 @@ mod tests {
         assert_eq!(check_scenario(&missing).len(), 1);
         let one_fair = GOOD.replacen("init: fair exited 0\n", "", 1);
         assert_eq!(check_scenario(&one_fair).len(), 1);
-        let no_trap = GOOD.replace(
-            "kalium: instance 1 (faulty) trapped: out of bounds memory access\n",
-            "",
-        );
+        let no_trap = GOOD.replace("kalium: instance 1 (faulty) trapped: out of bounds memory access\n", "");
         assert_eq!(check_scenario(&no_trap).len(), 1);
-        let late_ping = GOOD
-            .replace("init: ping exited 0\n", "")
-            .replace("init: done\n", "init: ping exited 0\ninit: done\n");
+        let late_ping = GOOD.replace("init: ping exited 0\n", "").replace("init: done\n", "init: ping exited 0\ninit: done\n");
         assert!(check_scenario(&late_ping)[0].contains("before"));
         let panicked = format!("{}kalium: panic at x: y\n", *GOOD);
         assert_eq!(check_scenario(&panicked).len(), 1);
@@ -1568,10 +1339,7 @@ mod tests {
     fn wasi_demos_are_checked() {
         let wrong_code = GOOD.replace("init: hello_std exited 3", "init: hello_std exited 0");
         assert_eq!(check_scenario(&wrong_code).len(), 1);
-        let no_time = GOOD.replace(
-            "hello_c: time() ok (2 s)\n",
-            "hello_c: time() failed (-1 s)\n",
-        );
+        let no_time = GOOD.replace("hello_c: time() ok (2 s)\n", "hello_c: time() failed (-1 s)\n");
         let f = check_scenario(&no_time);
         assert_eq!(f.len(), 1, "{f:?}");
         assert!(f[0].contains("time() ok"));
@@ -1582,17 +1350,12 @@ mod tests {
         // Revocation: the console must still have worked before, must not
         // work after, the channel must have closed, and the exit code is
         // the instance's verdict.
-        let printed_after = GOOD.replace(
-            "init: revoked exited 42\n",
-            "revoked: this line must not appear\ninit: revoked exited 42\n",
-        );
+        let printed_after =
+            GOOD.replace("init: revoked exited 42\n", "revoked: this line must not appear\ninit: revoked exited 42\n");
         assert_eq!(check_scenario(&printed_after).len(), 1);
         let console_kept = GOOD.replace("init: revoked exited 42", "init: revoked exited 43");
         assert_eq!(check_scenario(&console_kept).len(), 1);
-        let not_closed = GOOD.replace(
-            "init: send to revoked receiver: ECLOSED",
-            "init: send to revoked receiver succeeded",
-        );
+        let not_closed = GOOD.replace("init: send to revoked receiver: ECLOSED", "init: send to revoked receiver succeeded");
         assert_eq!(check_scenario(&not_closed).len(), 1);
         let no_hello = GOOD.replace("revoked: hello through a derived console\n", "");
         assert_eq!(check_scenario(&no_hello).len(), 1);
@@ -1600,14 +1363,8 @@ mod tests {
 
     #[test]
     fn shelf_restore_must_beat_init() {
-        assert_eq!(
-            parse_shelf_times("init: shelf init 400000 us, restore 40000 us"),
-            Some((400000, 40000))
-        );
-        assert_eq!(
-            parse_shelf_times("init: shelf init x us, restore 1 us"),
-            None
-        );
+        assert_eq!(parse_shelf_times("init: shelf init 400000 us, restore 40000 us"), Some((400000, 40000)));
+        assert_eq!(parse_shelf_times("init: shelf init x us, restore 1 us"), None);
         assert_eq!(parse_shelf_times("init: shelf init 1 us"), None);
         // A restore that is not faster than the initialisation fails
         // exactly once, with the numbers found.
@@ -1620,10 +1377,8 @@ mod tests {
             assert_eq!(f.len(), 1, "{f:?}");
             assert!(f[0].contains(&format!("found `init 284494 us, restore {slow} us`")));
         }
-        let faster = GOOD.replace(
-            "init: shelf init 284494 us, restore 27429 us",
-            "init: shelf init 284494 us, restore 284493 us",
-        );
+        let faster =
+            GOOD.replace("init: shelf init 284494 us, restore 27429 us", "init: shelf init 284494 us, restore 284493 us");
         assert!(check_scenario(&faster).is_empty());
         // Every restored instance must report, and the state must check.
         let two_resumes = GOOD.replacen("init: resumed shelf exited 0\n", "", 1);
@@ -1649,14 +1404,8 @@ mod tests {
     #[test]
     fn greedy_must_hit_the_limit_exactly() {
         assert_eq!(GREEDY_CHILDREN, 30);
-        assert_eq!(
-            parse_greedy_refused("greedy: spawn refused (ENOMEM) after 30 instances"),
-            Some(30)
-        );
-        assert_eq!(
-            parse_greedy_refused("greedy: spawn refused (ENOMEM) after x instances"),
-            None
-        );
+        assert_eq!(parse_greedy_refused("greedy: spawn refused (ENOMEM) after 30 instances"), Some(30));
+        assert_eq!(parse_greedy_refused("greedy: spawn refused (ENOMEM) after x instances"), None);
         // One child too many or too few means the kernel's limit is off.
         for n in [29, 31] {
             let off = GOOD.replace("after 30 instances", &format!("after {n} instances"));
@@ -1666,10 +1415,7 @@ mod tests {
         }
         // A kernel without the limit: greedy gives up and init fails.
         let unlimited = GOOD
-            .replace(
-                "greedy: spawn refused (ENOMEM) after 30 instances\n",
-                "greedy: no instance limit\n",
-            )
+            .replace("greedy: spawn refused (ENOMEM) after 30 instances\n", "greedy: no instance limit\n")
             .replace("greedy: slot reclaimed, park exited 0\n", "")
             .replace("init: greedy exited 0", "init: greedy exited 1");
         assert_eq!(check_scenario(&unlimited).len(), 3);
@@ -1677,14 +1423,8 @@ mod tests {
 
     #[test]
     fn hog_must_hit_every_quota_exactly() {
-        assert_eq!(
-            parse_hog("hog: memobjs 2, pages 256, channels 64, messages 1024"),
-            Some((2, 256, 64, 1024))
-        );
-        assert_eq!(
-            parse_hog("hog: memobjs x, pages 256, channels 64, messages 1024"),
-            None
-        );
+        assert_eq!(parse_hog("hog: memobjs 2, pages 256, channels 64, messages 1024"), Some((2, 256, 64, 1024)));
+        assert_eq!(parse_hog("hog: memobjs x, pages 256, channels 64, messages 1024"), None);
         assert_eq!((HOG_MEMOBJS, HOG_CHANNELS, HOG_MESSAGES), (2, 64, 1024));
         // A quota that did not hold (or held too early) fails the scenario.
         for wrong in [
@@ -1693,10 +1433,7 @@ mod tests {
             "hog: memobjs 2, pages 256, channels 63, messages 1024",
             "hog: memobjs 2, pages 256, channels 64, messages 1023",
         ] {
-            let off = GOOD.replace(
-                "hog: memobjs 2, pages 256, channels 64, messages 1024",
-                wrong,
-            );
+            let off = GOOD.replace("hog: memobjs 2, pages 256, channels 64, messages 1024", wrong);
             let f = check_scenario(&off);
             assert_eq!(f.len(), 1, "{f:?}");
             assert!(f[0].contains("found `memobjs"), "{f:?}");
@@ -1706,19 +1443,15 @@ mod tests {
         let panicked = GOOD
             .split("hog: memobjs")
             .next()
-            .map(|head| {
-                format!("{head}kalium: panic at x: memory allocation of 4096 bytes failed\n")
-            })
+            .map(|head| format!("{head}kalium: panic at x: memory allocation of 4096 bytes failed\n"))
             .unwrap();
         assert!(check_scenario(&panicked).len() > 5);
         // The kernel survived but a later spawn did not.
         let no_spawn = GOOD.replace("init: after hog, spawn ok\n", "");
         assert_eq!(check_scenario(&no_spawn).len(), 1);
         // An ENOMEM on the fresh send is acceptable; a panic line is not.
-        let enomem = GOOD.replace(
-            "hog: send 4096 bytes on a fresh channel: ok",
-            "hog: send 4096 bytes on a fresh channel: ENOMEM",
-        );
+        let enomem =
+            GOOD.replace("hog: send 4096 bytes on a fresh channel: ok", "hog: send 4096 bytes on a fresh channel: ENOMEM");
         assert!(check_scenario(&enomem).is_empty());
     }
 
@@ -1735,68 +1468,33 @@ mod tests {
         // and the cap-only messages are not free.
         assert!(HOG_DRAINED_BYTES > payload_only);
         assert!(kalium_ipc::Message::cost_of(0, 4) > 0);
+        assert_eq!(parse_hog_cap_only("hog: 15 cap-only messages sent, 8 received back"), Some((15, 8)));
+        assert_eq!(parse_hog_cap_only("hog: x cap-only messages sent, 8 received back"), None);
         assert_eq!(
-            parse_hog_cap_only("hog: 15 cap-only messages sent, 8 received back"),
-            Some((15, 8))
-        );
-        assert_eq!(
-            parse_hog_cap_only("hog: x cap-only messages sent, 8 received back"),
-            None
-        );
-        assert_eq!(
-            parse_hog_drain(
-                "kalium: instance 1 (hog) exit drained 1016 queued messages, 4179200 budget bytes"
-            ),
+            parse_hog_drain("kalium: instance 1 (hog) exit drained 1016 queued messages, 4179200 budget bytes"),
             Some((1016, 4179200))
         );
-        assert_eq!(
-            parse_hog_drain(
-                "kalium: instance 1 (park) exit drained 1 queued messages, 1 budget bytes"
-            ),
-            None
-        );
-        assert_eq!(
-            parse_budget_in_use("kalium: instance budget: 0 bytes in use"),
-            Some(0)
-        );
-        assert_eq!(
-            parse_budget_in_use("kalium: instance budget: 4096 bytes in use"),
-            Some(4096)
-        );
-        assert_eq!(
-            parse_budget_in_use("kalium: instance budget: x bytes in use"),
-            None
-        );
-        let drain =
-            format!("{HOG_DRAINED_MESSAGES} queued messages, {HOG_DRAINED_BYTES} budget bytes");
+        assert_eq!(parse_hog_drain("kalium: instance 1 (park) exit drained 1 queued messages, 1 budget bytes"), None);
+        assert_eq!(parse_budget_in_use("kalium: instance budget: 0 bytes in use"), Some(0));
+        assert_eq!(parse_budget_in_use("kalium: instance budget: 4096 bytes in use"), Some(4096));
+        assert_eq!(parse_budget_in_use("kalium: instance budget: x bytes in use"), None);
+        let drain = format!("{HOG_DRAINED_MESSAGES} queued messages, {HOG_DRAINED_BYTES} budget bytes");
         // Payload-only accounting: the right number of messages, too few bytes.
-        let payload_only_line =
-            format!("{HOG_DRAINED_MESSAGES} queued messages, {payload_only} budget bytes");
+        let payload_only_line = format!("{HOG_DRAINED_MESSAGES} queued messages, {payload_only} budget bytes");
         let f = check_scenario(&GOOD.replace(&drain, &payload_only_line));
         assert_eq!(f.len(), 1, "{f:?}");
         assert!(f[0].contains("found `drained"), "{f:?}");
         // A message not drained (or drained twice).
-        let fewer = format!(
-            "{} queued messages, {HOG_DRAINED_BYTES} budget bytes",
-            HOG_DRAINED_MESSAGES - 1
-        );
+        let fewer = format!("{} queued messages, {HOG_DRAINED_BYTES} budget bytes", HOG_DRAINED_MESSAGES - 1);
         assert_eq!(check_scenario(&GOOD.replace(&drain, &fewer)).len(), 1);
         // The queue refused the cap-only messages early, or gave none back.
-        for wrong in [
-            "hog: 14 cap-only messages sent, 8 received back",
-            "hog: 15 cap-only messages sent, 0 received back",
-        ] {
-            let f = check_scenario(
-                &GOOD.replace("hog: 15 cap-only messages sent, 8 received back", wrong),
-            );
+        for wrong in ["hog: 14 cap-only messages sent, 8 received back", "hog: 15 cap-only messages sent, 0 received back"] {
+            let f = check_scenario(&GOOD.replace("hog: 15 cap-only messages sent, 8 received back", wrong));
             assert_eq!(f.len(), 1, "{f:?}");
             assert!(f[0].contains("found `"), "{f:?}");
         }
         // Something charged to the budget was never released.
-        let leaked = GOOD.replace(
-            "kalium: instance budget: 0 bytes in use",
-            "kalium: instance budget: 4096 bytes in use",
-        );
+        let leaked = GOOD.replace("kalium: instance budget: 0 bytes in use", "kalium: instance budget: 4096 bytes in use");
         let f = check_scenario(&leaked);
         assert_eq!(f.len(), 1, "{f:?}");
         assert!(f[0].contains("found `4096 bytes in use`"), "{f:?}");
@@ -1815,22 +1513,12 @@ mod tests {
         let line = format!(
             "kalium: collected {CYCLE_OBJECTS} unreachable objects: {CYCLE_MESSAGES} queued messages, {CYCLE_BYTES} budget bytes"
         );
+        assert_eq!(parse_collected(&line), Some((CYCLE_OBJECTS, CYCLE_MESSAGES, CYCLE_BYTES)));
         assert_eq!(
-            parse_collected(&line),
-            Some((CYCLE_OBJECTS, CYCLE_MESSAGES, CYCLE_BYTES))
-        );
-        assert_eq!(
-            parse_collected(
-                "kalium: collected 2 unreachable objects: 3 queued messages, 4 budget bytes"
-            ),
+            parse_collected("kalium: collected 2 unreachable objects: 3 queued messages, 4 budget bytes"),
             Some((2, 3, 4))
         );
-        assert_eq!(
-            parse_collected(
-                "kalium: collected x unreachable objects: 3 queued messages, 4 budget bytes"
-            ),
-            None
-        );
+        assert_eq!(parse_collected("kalium: collected x unreachable objects: 3 queued messages, 4 budget bytes"), None);
         assert!(GOOD.contains(&line));
         // The pre-fix kernel: no collection, one channel and one message
         // short of the quota, the exit drain a queue short, and the
@@ -1848,14 +1536,8 @@ mod tests {
         let f = check_scenario(&leaked);
         assert_eq!(f.len(), 3, "{f:?}");
         assert!(f[0].contains("collected"), "{f:?}");
-        assert!(
-            f[1].contains("found `memobjs 2, pages 256, channels 63"),
-            "{f:?}"
-        );
-        assert!(
-            f[2].contains(&format!("found `{CYCLE_BYTES} bytes in use`")),
-            "{f:?}"
-        );
+        assert!(f[1].contains("found `memobjs 2, pages 256, channels 63"), "{f:?}");
+        assert!(f[2].contains(&format!("found `{CYCLE_BYTES} bytes in use`")), "{f:?}");
         // A collection that freed the wrong thing, or reported it wrongly.
         for wrong in [
             "kalium: collected 2 unreachable objects: 1 queued messages, 100 budget bytes",
@@ -1865,10 +1547,7 @@ mod tests {
             assert_eq!(f.len(), 1, "{f:?}");
             assert!(f[0].contains("found `collected"), "{f:?}");
         }
-        let no_step = GOOD.replace(
-            "hog: cycle: a channel's send end sent over itself, both ends dropped\n",
-            "",
-        );
+        let no_step = GOOD.replace("hog: cycle: a channel's send end sent over itself, both ends dropped\n", "");
         assert_eq!(check_scenario(&no_step).len(), 1);
     }
 }

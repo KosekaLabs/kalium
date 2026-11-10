@@ -39,20 +39,17 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use kalium_abi::layout::RecvHeader;
-use kalium_abi::{
-    entry as abi_entry, errno, exit as abi_exit, imports, rights, sched as abi_sched,
-};
+use kalium_abi::{entry as abi_entry, errno, exit as abi_exit, imports, rights, sched as abi_sched};
 use kalium_cap::{CapError, CapIndex, CapTable, Capability, ObjectKind, Rights};
 use kalium_hal::{console, println, timer};
 use kalium_ipc::{Channel, IpcError, Message, WaitQueue};
 use kalium_mm::{MemError, MemObject};
 use kalium_sched::{Class, State, ThreadId};
 use kalium_wasm::{
-    Error as WasmError, FuncType, Host, HostCtx, HostFuncId, HostOutcome, Memory, Snapshot, Trap,
-    ValType, Value,
+    Error as WasmError, FuncType, Host, HostCtx, HostFuncId, HostOutcome, Memory, Snapshot, Trap, ValType, Value,
 };
 
-use crate::kernel::{Kernel, Object, Quota, CAP_TABLE_LIMIT};
+use crate::kernel::{CAP_TABLE_LIMIT, Kernel, Object, Quota};
 
 // Host function ids: positions in `kalium_abi::imports::ALL_IMPORTS`.
 pub const CONSOLE_WRITE: u32 = 0;
@@ -82,11 +79,7 @@ pub const INSTANCE_SNAPSHOT: u32 = 23;
 pub const SPAWN_SNAPSHOT: u32 = 24;
 
 const TABLE: [(u32, &str, &str); 25] = [
-    (
-        CONSOLE_WRITE,
-        imports::core::MODULE,
-        imports::core::CONSOLE_WRITE,
-    ),
+    (CONSOLE_WRITE, imports::core::MODULE, imports::core::CONSOLE_WRITE),
     (CAP_DROP, imports::core::MODULE, imports::core::CAP_DROP),
     (CAP_DERIVE, imports::core::MODULE, imports::core::CAP_DERIVE),
     (CAP_REVOKE, imports::core::MODULE, imports::core::CAP_REVOKE),
@@ -95,66 +88,22 @@ const TABLE: [(u32, &str, &str); 25] = [
     (YIELD, imports::core::MODULE, imports::core::YIELD),
     (SLEEP, imports::core::MODULE, imports::core::SLEEP),
     (EXIT, imports::core::MODULE, imports::core::EXIT),
-    (
-        INSTANCE_ID,
-        imports::core::MODULE,
-        imports::core::INSTANCE_ID,
-    ),
-    (
-        CHANNEL_CREATE,
-        imports::ipc::MODULE,
-        imports::ipc::CHANNEL_CREATE,
-    ),
+    (INSTANCE_ID, imports::core::MODULE, imports::core::INSTANCE_ID),
+    (CHANNEL_CREATE, imports::ipc::MODULE, imports::ipc::CHANNEL_CREATE),
     (SEND, imports::ipc::MODULE, imports::ipc::SEND),
     (RECV, imports::ipc::MODULE, imports::ipc::RECV),
     (TRY_RECV, imports::ipc::MODULE, imports::ipc::TRY_RECV),
     (WAIT_ANY, imports::ipc::MODULE, imports::ipc::WAIT_ANY),
-    (
-        MEMOBJ_CREATE,
-        imports::memory::MODULE,
-        imports::memory::MEMOBJ_CREATE,
-    ),
-    (
-        MEMOBJ_SIZE,
-        imports::memory::MODULE,
-        imports::memory::MEMOBJ_SIZE,
-    ),
-    (
-        MEMOBJ_READ,
-        imports::memory::MODULE,
-        imports::memory::MEMOBJ_READ,
-    ),
-    (
-        MEMOBJ_WRITE,
-        imports::memory::MODULE,
-        imports::memory::MEMOBJ_WRITE,
-    ),
+    (MEMOBJ_CREATE, imports::memory::MODULE, imports::memory::MEMOBJ_CREATE),
+    (MEMOBJ_SIZE, imports::memory::MODULE, imports::memory::MEMOBJ_SIZE),
+    (MEMOBJ_READ, imports::memory::MODULE, imports::memory::MEMOBJ_READ),
+    (MEMOBJ_WRITE, imports::memory::MODULE, imports::memory::MEMOBJ_WRITE),
     (SPAWN, imports::spawn::MODULE, imports::spawn::SPAWN),
-    (
-        INSTANCE_WAIT,
-        imports::spawn::MODULE,
-        imports::spawn::INSTANCE_WAIT,
-    ),
-    (
-        INSTANCE_KILL,
-        imports::spawn::MODULE,
-        imports::spawn::INSTANCE_KILL,
-    ),
-    (
-        MODULE_COUNT,
-        imports::spawn::MODULE,
-        imports::spawn::MODULE_COUNT,
-    ),
-    (
-        INSTANCE_SNAPSHOT,
-        imports::spawn::MODULE,
-        imports::spawn::INSTANCE_SNAPSHOT,
-    ),
-    (
-        SPAWN_SNAPSHOT,
-        imports::spawn::MODULE,
-        imports::spawn::SPAWN_SNAPSHOT,
-    ),
+    (INSTANCE_WAIT, imports::spawn::MODULE, imports::spawn::INSTANCE_WAIT),
+    (INSTANCE_KILL, imports::spawn::MODULE, imports::spawn::INSTANCE_KILL),
+    (MODULE_COUNT, imports::spawn::MODULE, imports::spawn::MODULE_COUNT),
+    (INSTANCE_SNAPSHOT, imports::spawn::MODULE, imports::spawn::INSTANCE_SNAPSHOT),
+    (SPAWN_SNAPSHOT, imports::spawn::MODULE, imports::spawn::SPAWN_SNAPSHOT),
 ];
 
 /// Verifies that the id constants agree with `kalium-abi`'s import table.
@@ -289,12 +238,7 @@ pub(crate) fn range(mem: &Memory, ptr: i32, len: i32) -> Result<(u32, usize), i3
 }
 
 /// `count` elements of `size` bytes at `ptr`; a negative count is `EINVAL`.
-pub(crate) fn range_n(
-    mem: &Memory,
-    ptr: i32,
-    count: i32,
-    size: usize,
-) -> Result<(u32, usize), i32> {
+pub(crate) fn range_n(mem: &Memory, ptr: i32, count: i32, size: usize) -> Result<(u32, usize), i32> {
     let count = usize::try_from(count).map_err(|_| errno::EINVAL)?;
     let bytes = count.checked_mul(size).ok_or(errno::EFAULT)?;
     let bytes = i32::try_from(bytes).map_err(|_| errno::EFAULT)?;
@@ -324,11 +268,7 @@ fn read_i32s(mem: &Memory, ptr: i32, count: i32) -> Result<Vec<i32>, i32> {
     }
     let bytes = mem.slice(p, len).map_err(|_| errno::EFAULT)?;
     let mut v = try_vec(len / 4)?;
-    v.extend(
-        bytes
-            .chunks_exact(4)
-            .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]])),
-    );
+    v.extend(bytes.as_chunks::<4>().0.iter().map(|c| i32::from_le_bytes(*c)));
     Ok(v)
 }
 
@@ -369,11 +309,7 @@ impl Args<'_> {
 
 impl<'a> HostCall<'a> {
     pub fn new(k: &'a mut Kernel, cur: usize) -> HostCall<'a> {
-        HostCall {
-            k,
-            cur,
-            effect: Effect::None,
-        }
+        HostCall { k, cur, effect: Effect::None }
     }
 
     pub(crate) fn tid(&self) -> ThreadId {
@@ -387,41 +323,21 @@ impl<'a> HostCall<'a> {
     /// The capability in `idx`: `EBADCAP` unless the slot is live and the
     /// capability has not been revoked.
     pub(crate) fn get_cap(&self, idx: CapIndex) -> Result<Capability, i32> {
-        let cap = *self.k.instances[self.cur]
-            .caps
-            .get(idx)
-            .map_err(cap_errno)?;
-        if self.k.is_valid(cap) {
-            Ok(cap)
-        } else {
-            Err(errno::EBADCAP)
-        }
+        let cap = *self.k.instances[self.cur].caps.get(idx).map_err(cap_errno)?;
+        if self.k.is_valid(cap) { Ok(cap) } else { Err(errno::EBADCAP) }
     }
 
     /// [`get_cap`](HostCall::get_cap), then kind and rights (`EPERM`).
-    pub(crate) fn check_cap(
-        &self,
-        idx: CapIndex,
-        kind: ObjectKind,
-        rights: Rights,
-    ) -> Result<Capability, i32> {
+    pub(crate) fn check_cap(&self, idx: CapIndex, kind: ObjectKind, rights: Rights) -> Result<Capability, i32> {
         let cap = self.get_cap(idx)?;
         cap.check(kind, rights).map_err(cap_errno)?;
         Ok(cap)
     }
 
     /// [`get_cap`](HostCall::get_cap), then rights of any kind (`EPERM`).
-    pub(crate) fn check_cap_rights(
-        &self,
-        idx: CapIndex,
-        rights: Rights,
-    ) -> Result<Capability, i32> {
+    pub(crate) fn check_cap_rights(&self, idx: CapIndex, rights: Rights) -> Result<Capability, i32> {
         let cap = self.get_cap(idx)?;
-        if cap.has(rights) {
-            Ok(cap)
-        } else {
-            Err(errno::EPERM)
-        }
+        if cap.has(rights) { Ok(cap) } else { Err(errno::EPERM) }
     }
 
     pub(crate) fn block_on(&mut self, objects: &[kalium_cap::ObjectId]) -> Step {
@@ -458,10 +374,7 @@ impl<'a> HostCall<'a> {
         let (op, _) = range(mem, out, 4)?;
         let idx = cap_index(cap)?;
         let rights = Rights::from_bits(rights as u64).ok_or(errno::EINVAL)?;
-        let new = self
-            .k
-            .derive_into(self.cur, idx, rights)
-            .map_err(cap_errno)?;
+        let new = self.k.derive_into(self.cur, idx, rights).map_err(cap_errno)?;
         write_i32(mem, op, new.as_i32())?;
         OK
     }
@@ -546,10 +459,7 @@ impl<'a> HostCall<'a> {
         // Pinned while the two capabilities are minted, so that a failure
         // half-way frees the object (and its charge) through the unpin.
         let id = self.k.new_owned_object(
-            Object::Channel {
-                channel: Channel::with_abi_limits(),
-                waiters: WaitQueue::new(),
-            },
+            Object::Channel { channel: Channel::with_abi_limits(), waiters: WaitQueue::new() },
             1,
             self.cur,
             0,
@@ -580,9 +490,7 @@ impl<'a> HostCall<'a> {
 
     fn send(&mut self, mem: &mut Memory, cap: i32, msg: i32, len: i32, caps: i32, ncaps: i32) -> R {
         let idx = cap_index(cap)?;
-        let chan = self
-            .check_cap(idx, ObjectKind::Channel, Rights::SEND)?
-            .object;
+        let chan = self.check_cap(idx, ObjectKind::Channel, Rights::SEND)?.object;
         let (mp, ml) = range(mem, msg, len)?;
         range_n(mem, caps, ncaps, 4)?;
         // More capabilities than a message may carry: refused before the
@@ -597,11 +505,7 @@ impl<'a> HostCall<'a> {
             self.check_cap_rights(i, Rights::TRANSFER)?;
             idxs.push(i);
         }
-        self.k
-            .channel_mut(chan)
-            .ok_or(errno::EBADCAP)?
-            .can_send(ml, idxs.len())
-            .map_err(|e| e.errno())?;
+        self.k.channel_mut(chan).ok_or(errno::EBADCAP)?.can_send(ml, idxs.len()).map_err(|e| e.errno())?;
         // The kernel's copy of the message (its queue slot, the payload and
         // the capabilities it carries: `Message::cost_of`) is charged to
         // the kernel-wide budget until it is received (or the channel is
@@ -611,13 +515,8 @@ impl<'a> HostCall<'a> {
         if !self.k.budget.reserve(cost) {
             return Err(errno::ENOMEM);
         }
-        let bytes = match if ml > 0 {
-            mem.slice(mp, ml)
-                .map_err(|_| errno::EFAULT)
-                .and_then(try_copy)
-        } else {
-            Ok(Vec::new())
-        } {
+        let bytes = match if ml > 0 { mem.slice(mp, ml).map_err(|_| errno::EFAULT).and_then(try_copy) } else { Ok(Vec::new()) }
+        {
             Ok(b) => b,
             Err(e) => {
                 self.k.budget.release(cost);
@@ -669,9 +568,7 @@ impl<'a> HostCall<'a> {
         blocking: bool,
     ) -> R {
         let idx = cap_index(cap)?;
-        let chan = self
-            .check_cap(idx, ObjectKind::Channel, Rights::RECV)?
-            .object;
+        let chan = self.check_cap(idx, ObjectKind::Channel, Rights::RECV)?.object;
         let (bp, bl) = range(mem, buf, buf_len)?;
         let (cp, _) = range_n(mem, caps, ncaps_max, 4)?;
         let (hp, _) = range(mem, out_hdr, kalium_abi::layout::RECV_HEADER_SIZE as i32)?;
@@ -689,11 +586,7 @@ impl<'a> HostCall<'a> {
         let total = mcaps.len();
         let now = timer::now_ns();
         for (i, c) in mcaps.into_iter().enumerate() {
-            let slot = if i < ncaps_max as usize {
-                self.caps().insert(c).ok()
-            } else {
-                None
-            };
+            let slot = if i < ncaps_max as usize { self.caps().insert(c).ok() } else { None };
             match slot {
                 Some(ix) => {
                     let at = cp.checked_add((i * 4) as u32).ok_or(errno::EFAULT)?;
@@ -704,10 +597,7 @@ impl<'a> HostCall<'a> {
                 None => self.k.release(c, now),
             }
         }
-        let hdr = RecvHeader {
-            len: bytes.len() as u32,
-            ncaps: total as u32,
-        };
+        let hdr = RecvHeader { len: bytes.len() as u32, ncaps: total as u32 };
         write_bytes(mem, hp, &hdr.to_le_bytes())?;
         OK
     }
@@ -767,15 +657,8 @@ impl<'a> HostCall<'a> {
             }
         };
         let now = timer::now_ns();
-        let id = self
-            .k
-            .new_owned_object(Object::MemObj(obj), 1, self.cur, bytes);
-        let minted = self.k.mint_root(
-            self.cur,
-            id,
-            ObjectKind::MemObj,
-            Rights::from_bits_truncate(rights::MEMOBJ_OWNER),
-        );
+        let id = self.k.new_owned_object(Object::MemObj(obj), 1, self.cur, bytes);
+        let minted = self.k.mint_root(self.cur, id, ObjectKind::MemObj, Rights::from_bits_truncate(rights::MEMOBJ_OWNER));
         // The pin kept the object through minting; without a capability
         // it is freed (and its charge released) here.
         self.k.unpin(id, now);
@@ -787,9 +670,7 @@ impl<'a> HostCall<'a> {
     fn memobj_size(&mut self, mem: &mut Memory, cap: i32, out_size: i32) -> R {
         let (op, _) = range(mem, out_size, 8)?;
         let idx = cap_index(cap)?;
-        let id = self
-            .check_cap(idx, ObjectKind::MemObj, Rights::NONE)?
-            .object;
+        let id = self.check_cap(idx, ObjectKind::MemObj, Rights::NONE)?.object;
         let size = self.k.memobj(id).ok_or(errno::EBADCAP)?.size();
         write_i64(mem, op, size as i64)?;
         OK
@@ -797,40 +678,27 @@ impl<'a> HostCall<'a> {
 
     fn memobj_read(&mut self, mem: &mut Memory, cap: i32, offset: i64, ptr: i32, len: i32) -> R {
         let idx = cap_index(cap)?;
-        let id = self
-            .check_cap(idx, ObjectKind::MemObj, Rights::READ)?
-            .object;
+        let id = self.check_cap(idx, ObjectKind::MemObj, Rights::READ)?.object;
         let (p, l) = range(mem, ptr, len)?;
         let offset = u64::try_from(offset).map_err(|_| errno::EINVAL)?;
         if l == 0 {
             return OK;
         }
-        let src = self
-            .k
-            .memobj(id)
-            .ok_or(errno::EBADCAP)?
-            .slice(offset, l)
-            .map_err(mem_errno)?;
+        let src = self.k.memobj(id).ok_or(errno::EBADCAP)?.slice(offset, l).map_err(mem_errno)?;
         mem.write(p, src).map_err(|_| errno::EFAULT)?;
         OK
     }
 
     fn memobj_write(&mut self, mem: &mut Memory, cap: i32, offset: i64, ptr: i32, len: i32) -> R {
         let idx = cap_index(cap)?;
-        let id = self
-            .check_cap(idx, ObjectKind::MemObj, Rights::WRITE)?
-            .object;
+        let id = self.check_cap(idx, ObjectKind::MemObj, Rights::WRITE)?.object;
         let (p, l) = range(mem, ptr, len)?;
         let offset = u64::try_from(offset).map_err(|_| errno::EINVAL)?;
         if l == 0 {
             return OK;
         }
         let data = mem.slice(p, l).map_err(|_| errno::EFAULT)?;
-        self.k
-            .memobj_mut(id)
-            .ok_or(errno::EBADCAP)?
-            .write(offset, data)
-            .map_err(mem_errno)?;
+        self.k.memobj_mut(id).ok_or(errno::EBADCAP)?.write(offset, data).map_err(mem_errno)?;
         OK
     }
 
@@ -851,13 +719,8 @@ impl<'a> HostCall<'a> {
     ) -> R {
         let idx = cap_index(cap)?;
         self.check_cap(idx, ObjectKind::Spawn, Rights::SPAWN)?;
-        let module = usize::try_from(module)
-            .ok()
-            .filter(|&m| m < self.k.modules.len())
-            .ok_or(errno::ENOENT)?;
-        self.spawn_from(
-            mem, module, None, caps, ncaps, class, period_ns, budget_ns, out,
-        )
+        let module = usize::try_from(module).ok().filter(|&m| m < self.k.modules.len()).ok_or(errno::ENOENT)?;
+        self.spawn_from(mem, module, None, caps, ncaps, class, period_ns, budget_ns, out)
     }
 
     /// `instance_snapshot`: see `kernel.rs`, "Snapshots". The instance
@@ -867,19 +730,13 @@ impl<'a> HostCall<'a> {
     fn instance_snapshot(&mut self, mem: &mut Memory, cap: i32, out: i32) -> R {
         let (op, _) = range(mem, out, 4)?;
         let idx = cap_index(cap)?;
-        let id = self
-            .check_cap(idx, ObjectKind::Instance, Rights::SNAPSHOT)?
-            .object;
+        let id = self.check_cap(idx, ObjectKind::Instance, Rights::SNAPSHOT)?.object;
         if self.caps().len() >= self.caps().limit() {
             return Err(errno::ENOMEM);
         }
         let target = match self.k.object(id) {
             Some(Object::Instance { exit: Some(_), .. }) => return Err(errno::ECLOSED),
-            Some(Object::Instance {
-                instance,
-                exit: None,
-                ..
-            }) => *instance,
+            Some(Object::Instance { instance, exit: None, .. }) => *instance,
             _ => return Err(errno::EBADCAP),
         };
         if target == self.cur {
@@ -908,21 +765,8 @@ impl<'a> HostCall<'a> {
         let (pages, bytes) = (snapshot.memory_pages(), snapshot.encoded_len());
         self.k.charge(self.cur, Quota::Snapshot, bytes)?;
         let now = timer::now_ns();
-        let sid = self.k.new_owned_object(
-            Object::Snapshot {
-                module,
-                snapshot: Arc::new(snapshot),
-            },
-            1,
-            self.cur,
-            bytes,
-        );
-        let minted = self.k.mint_root(
-            self.cur,
-            sid,
-            ObjectKind::Snapshot,
-            Rights::from_bits_truncate(rights::SNAPSHOT_OWNER),
-        );
+        let sid = self.k.new_owned_object(Object::Snapshot { module, snapshot: Arc::new(snapshot) }, 1, self.cur, bytes);
+        let minted = self.k.mint_root(self.cur, sid, ObjectKind::Snapshot, Rights::from_bits_truncate(rights::SNAPSHOT_OWNER));
         // The pin kept the object through minting; without a capability it
         // is freed here.
         self.k.unpin(sid, now);
@@ -930,12 +774,7 @@ impl<'a> HostCall<'a> {
         write_i32(mem, op, ix.as_i32())?;
         println!(
             "kalium: instance {} ({}) snapshotted instance {} ({}): {} pages, {} bytes",
-            self.cur,
-            self.k.instances[self.cur].name,
-            target,
-            self.k.instances[target].name,
-            pages,
-            bytes
+            self.cur, self.k.instances[self.cur].name, target, self.k.instances[target].name, pages, bytes
         );
         OK
     }
@@ -959,9 +798,7 @@ impl<'a> HostCall<'a> {
         let idx = cap_index(cap)?;
         self.check_cap(idx, ObjectKind::Spawn, Rights::SPAWN)?;
         let sidx = cap_index(snapshot_cap)?;
-        let sid = self
-            .check_cap(sidx, ObjectKind::Snapshot, Rights::READ)?
-            .object;
+        let sid = self.check_cap(sidx, ObjectKind::Snapshot, Rights::READ)?.object;
         let entry = match entry {
             abi_entry::START => abi_entry::START_EXPORT,
             abi_entry::RESUME => abi_entry::RESUME_EXPORT,
@@ -971,17 +808,7 @@ impl<'a> HostCall<'a> {
             Some(Object::Snapshot { module, snapshot }) => (*module, snapshot.clone()),
             _ => return Err(errno::EBADCAP),
         };
-        self.spawn_from(
-            mem,
-            module,
-            Some((&snapshot, entry)),
-            caps,
-            ncaps,
-            class,
-            period_ns,
-            budget_ns,
-            out,
-        )
+        self.spawn_from(mem, module, Some((&snapshot, entry)), caps, ncaps, class, period_ns, budget_ns, out)
     }
 
     /// The common part of `spawn` and `spawn_snapshot`, after the `Spawn`
@@ -1049,9 +876,7 @@ impl<'a> HostCall<'a> {
         let now = timer::now_ns();
         let created = match source {
             None => self.k.create_instance(module, child, class, now),
-            Some((snapshot, entry)) => self
-                .k
-                .restore_instance(module, snapshot, entry, child, class, now),
+            Some((snapshot, entry)) => self.k.restore_instance(module, snapshot, entry, child, class, now),
         };
         let id = match created {
             Ok(id) => id,
@@ -1087,14 +912,10 @@ impl<'a> HostCall<'a> {
             Some(_) => " from snapshot",
         };
         match class {
-            Class::Fair { .. } => println!(
-                "kalium: instance {} ({}) spawned instance {} ({}, fair){}",
-                self.cur, parent, id, name, how
-            ),
-            Class::RealTime {
-                period_ns,
-                budget_ns,
-            } => println!(
+            Class::Fair { .. } => {
+                println!("kalium: instance {} ({}) spawned instance {} ({}, fair){}", self.cur, parent, id, name, how)
+            }
+            Class::RealTime { period_ns, budget_ns } => println!(
                 "kalium: instance {} ({}) spawned instance {} ({}, rt period {} us budget {} us){}",
                 self.cur,
                 parent,
@@ -1110,14 +931,10 @@ impl<'a> HostCall<'a> {
 
     fn instance_wait(&mut self, mem: &mut Memory, cap: i32, out_code: i32) -> R {
         let idx = cap_index(cap)?;
-        let id = self
-            .check_cap(idx, ObjectKind::Instance, Rights::WAIT)?
-            .object;
+        let id = self.check_cap(idx, ObjectKind::Instance, Rights::WAIT)?.object;
         let (op, _) = range(mem, out_code, 4)?;
         match self.k.object(id) {
-            Some(Object::Instance {
-                exit: Some(code), ..
-            }) => {
+            Some(Object::Instance { exit: Some(code), .. }) => {
                 write_i32(mem, op, *code)?;
                 OK
             }
@@ -1128,18 +945,12 @@ impl<'a> HostCall<'a> {
 
     fn instance_kill(&mut self, cap: i32) -> R {
         let idx = cap_index(cap)?;
-        let id = self
-            .check_cap(idx, ObjectKind::Instance, Rights::KILL)?
-            .object;
+        let id = self.check_cap(idx, ObjectKind::Instance, Rights::KILL)?.object;
         let target = match self.k.object(id) {
             // Already exited: its slot may belong to another instance by
             // now, so the object's own record decides, not the slot.
             Some(Object::Instance { exit: Some(_), .. }) => return OK,
-            Some(Object::Instance {
-                instance,
-                exit: None,
-                ..
-            }) => *instance,
+            Some(Object::Instance { instance, exit: None, .. }) => *instance,
             _ => return Err(errno::EBADCAP),
         };
         if target == self.cur {
@@ -1189,32 +1000,13 @@ impl Host for HostCall<'_> {
             }
             CHANNEL_CREATE => self.channel_create(mem, a.i32(0)?, a.i32(1)?),
             SEND => self.send(mem, a.i32(0)?, a.i32(1)?, a.i32(2)?, a.i32(3)?, a.i32(4)?),
-            RECV | TRY_RECV => self.recv(
-                mem,
-                a.i32(0)?,
-                a.i32(1)?,
-                a.i32(2)?,
-                a.i32(3)?,
-                a.i32(4)?,
-                a.i32(5)?,
-                func.0 == RECV,
-            ),
+            RECV | TRY_RECV => self.recv(mem, a.i32(0)?, a.i32(1)?, a.i32(2)?, a.i32(3)?, a.i32(4)?, a.i32(5)?, func.0 == RECV),
             WAIT_ANY => self.wait_any(mem, a.i32(0)?, a.i32(1)?, a.i32(2)?),
             MEMOBJ_CREATE => self.memobj_create(mem, a.i64(0)?, a.i32(1)?),
             MEMOBJ_SIZE => self.memobj_size(mem, a.i32(0)?, a.i32(1)?),
             MEMOBJ_READ => self.memobj_read(mem, a.i32(0)?, a.i64(1)?, a.i32(2)?, a.i32(3)?),
             MEMOBJ_WRITE => self.memobj_write(mem, a.i32(0)?, a.i64(1)?, a.i32(2)?, a.i32(3)?),
-            SPAWN => self.spawn(
-                mem,
-                a.i32(0)?,
-                a.i32(1)?,
-                a.i32(2)?,
-                a.i32(3)?,
-                a.i32(4)?,
-                a.i64(5)?,
-                a.i64(6)?,
-                a.i32(7)?,
-            ),
+            SPAWN => self.spawn(mem, a.i32(0)?, a.i32(1)?, a.i32(2)?, a.i32(3)?, a.i32(4)?, a.i64(5)?, a.i64(6)?, a.i32(7)?),
             INSTANCE_WAIT => self.instance_wait(mem, a.i32(0)?, a.i32(1)?),
             INSTANCE_KILL => self.instance_kill(a.i32(0)?),
             MODULE_COUNT => {

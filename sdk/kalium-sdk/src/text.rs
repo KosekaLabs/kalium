@@ -21,11 +21,9 @@ fn digits(buf: &mut [u8; MAX_INT_LEN], mut v: u64, negative: bool) -> &[u8] {
             break;
         }
     }
-    if negative {
-        if let Some(slot) = slots.next() {
-            *slot = b'-';
-            used += 1;
-        }
+    if negative && let Some(slot) = slots.next() {
+        *slot = b'-';
+        used += 1;
     }
     buf.get(MAX_INT_LEN.saturating_sub(used)..).unwrap_or(&[])
 }
@@ -84,11 +82,7 @@ impl Default for Line {
 impl Line {
     /// An empty line.
     pub const fn new() -> Line {
-        Line {
-            buf: [0; LINE_CAP],
-            len: 0,
-            truncated: false,
-        }
+        Line { buf: [0; LINE_CAP], len: 0, truncated: false }
     }
 
     /// Appends raw bytes.
@@ -199,20 +193,7 @@ mod tests {
 
     #[test]
     fn integers_match_core_fmt() {
-        let cases: [i64; 12] = [
-            0,
-            1,
-            -1,
-            9,
-            10,
-            -10,
-            12345,
-            -98765,
-            i64::MAX,
-            i64::MIN,
-            i32::MAX as i64,
-            i32::MIN as i64,
-        ];
+        let cases: [i64; 12] = [0, 1, -1, 9, 10, -10, 12345, -98765, i64::MAX, i64::MIN, i32::MAX as i64, i32::MIN as i64];
         for v in cases {
             let mut buf = [0u8; MAX_INT_LEN];
             assert_eq!(fmt_i64(&mut buf, v), v.to_string());
@@ -231,11 +212,7 @@ mod tests {
 
     #[test]
     fn line_builds_and_truncates_without_panicking() {
-        let l = Line::new()
-            .str("init: ")
-            .str("ping")
-            .str(" exited ")
-            .int(-1);
+        let l = Line::new().str("init: ").str("ping").str(" exited ").int(-1);
         assert_eq!(l.as_bytes(), b"init: ping exited -1");
         assert_eq!(l.len(), 20);
         assert!(!l.truncated());

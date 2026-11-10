@@ -70,11 +70,7 @@ pub fn putc(byte: u8) {
 
 /// Read one byte if one is available, without blocking.
 pub fn try_getc() -> Option<u8> {
-    if reg_read(FR) & FR_RXFE != 0 {
-        None
-    } else {
-        Some((reg_read(DR) & 0xff) as u8)
-    }
+    if reg_read(FR) & FR_RXFE != 0 { None } else { Some((reg_read(DR) & 0xff) as u8) }
 }
 
 /// Block until every byte has left the transmitter.
@@ -116,10 +112,7 @@ static LOCK: AtomicBool = AtomicBool::new(false);
 /// Run `f` with exclusive access to the console, IRQs masked.
 pub fn with_console<R>(f: impl FnOnce(&mut Console) -> R) -> R {
     let daif = cpu::save_and_disable_irqs();
-    while LOCK
-        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_err()
-    {
+    while LOCK.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
         cpu::spin_hint();
     }
     let r = f(&mut Console { _private: () });

@@ -32,10 +32,7 @@ impl Global {
         if value.ty() != ty.ty {
             return None;
         }
-        Some(Global {
-            ty,
-            value: Cell::new(value),
-        })
+        Some(Global { ty, value: Cell::new(value) })
     }
 
     /// Wrap the global in a shared handle.
@@ -85,10 +82,7 @@ mod tests {
 
     #[test]
     fn typed_cell() {
-        let ty = GlobalType {
-            ty: ValType::I32,
-            mutable: true,
-        };
+        let ty = GlobalType { ty: ValType::I32, mutable: true };
         assert!(Global::new(ty, Value::I64(1)).is_none());
         let g = Global::new(ty, Value::I32(1)).unwrap().into_shared();
         let h = g.clone();
@@ -97,13 +91,7 @@ mod tests {
         g.set(Value::I32(2)).unwrap();
         assert_eq!(h.get(), Value::I32(2));
         assert!(g.matches(&ty));
-        assert!(!g.matches(&GlobalType {
-            ty: ValType::I32,
-            mutable: false,
-        }));
-        assert!(!g.matches(&GlobalType {
-            ty: ValType::I64,
-            mutable: true,
-        }));
+        assert!(!g.matches(&GlobalType { ty: ValType::I32, mutable: false }));
+        assert!(!g.matches(&GlobalType { ty: ValType::I64, mutable: true }));
     }
 }

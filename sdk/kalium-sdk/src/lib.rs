@@ -51,8 +51,7 @@ pub use console::Console;
 pub use ipc::{Channel, Receiver, Sender};
 pub use memobj::MemObj;
 pub use spawn::{
-    instance_kill, instance_snapshot, instance_wait, module_count, spawn, spawn_snapshot, Class,
-    Entry, Instance, Snapshot,
+    Class, Entry, Instance, Snapshot, instance_kill, instance_snapshot, instance_wait, module_count, spawn, spawn_snapshot,
 };
 pub use text::Line;
 
@@ -289,11 +288,7 @@ static GLOBAL_CONSOLE: AtomicI32 = AtomicI32::new(kalium_abi::CAP_NONE);
 
 pub(crate) fn global_console_cap() -> Option<Cap> {
     let cap = Cap(GLOBAL_CONSOLE.load(Ordering::Relaxed));
-    if cap.is_none() {
-        None
-    } else {
-        Some(cap)
-    }
+    if cap.is_none() { None } else { Some(cap) }
 }
 
 pub(crate) fn set_global_console_cap(cap: Cap) {

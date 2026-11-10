@@ -1,0 +1,92 @@
+# Make sure that the git branches and the runners are properly set.
+
+name: CI/CD
+
+on:
+  push:
+    branches: [dev, v1]
+    tags: [v*-*.*]
+  pull_request:
+    branches: [dev, v1]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ci:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout the code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # The host crates (the root workspace's default members). The kernel is
+      # built for aarch64 by the `kernel` job.
+      - name: Build for debugging
+        run: cargo build --all-features --verbose
+
+      - name: Build for release
+        run: cargo build --release --all-features --verbose
+
+      - name: Run tests
+        run: cargo test --all-features --verbose
+
+  kernel:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout the code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install QEMU
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-system-arm
+
+      - name: Check the formatting
+        run: cargo xtask fmt-check
+
+      - name: Run clippy
+        run: cargo xtask clippy
+
+      # Host tests, the HAL self-test, the SDK and demo modules, the kernel,
+      # and the QEMU boot scenario with its ordered expectations.
+      - name: Run the boot scenario
+        run: cargo xtask test
+
+      - name: Upload the kernel image
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: kalium-aarch64
+          path: target/aarch64-unknown-none/release/kalium
+
+  cd:
+    needs: [ci, kernel]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Explicit write permission for releases.
+
+    steps:
+      - name: Checkout the code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - name: Create the release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RELEASE_VERSION="${GITHUB_REF#refs/tags/}"
+          if [ -f "CHANGELOG.md" ]; then
+             RELEASE_NOTES=$(awk '/^## /{i++}i==1{print; while(getline && !/^## /) print; exit}' CHANGELOG.md | tail -n +2)
+          else
+             RELEASE_NOTES="No changelog found."
+          fi
+          gh release create "$RELEASE_VERSION" --title "$RELEASE_VERSION" --notes "$RELEASE_NOTES"

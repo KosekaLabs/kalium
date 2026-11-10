@@ -46,6 +46,7 @@
 #![no_main]
 
 #[cfg(not(target_arch = "aarch64"))]
+// trunk-ignore(clippy/compiler): Trunk lints for the host; `cargo xtask clippy` lints the kernel for aarch64.
 compile_error!("the kernel binary only builds for aarch64-unknown-none; use `cargo xtask build`");
 
 #[cfg(target_arch = "aarch64")]
@@ -185,7 +186,7 @@ mod imp {
         use kalium_wasm::Limits;
 
         use crate::boot_image::BOOT_IMAGE;
-        use crate::kernel::{Kernel, CAP_TABLE_LIMIT, HEAP_HEADROOM};
+        use crate::kernel::{CAP_TABLE_LIMIT, HEAP_HEADROOM, Kernel};
 
         /// Instance limits; `max_memory_pages` shrinks on a small heap.
         fn limits(heap_bytes: usize) -> Limits {
@@ -204,20 +205,12 @@ mod imp {
             }
             println!("kalium: boot image: {} modules", BOOT_IMAGE.len());
             for (i, m) in BOOT_IMAGE.iter().enumerate() {
-                println!(
-                    "kalium:   module {}: {} ({} bytes)",
-                    i,
-                    m.name,
-                    m.bytes.len()
-                );
+                println!("kalium:   module {}: {} ({} bytes)", i, m.name, m.bytes.len());
             }
             let limits = limits(heap_bytes);
             println!(
                 "kalium: instance limits: {} pages, {} stack values, call depth {}, {} cap slots",
-                limits.max_memory_pages,
-                limits.max_stack_values,
-                limits.max_call_depth,
-                CAP_TABLE_LIMIT
+                limits.max_memory_pages, limits.max_stack_values, limits.max_call_depth, CAP_TABLE_LIMIT
             );
             // What instances may take of the heap between them; the rest is
             // the kernel's (`kernel.rs`, "Quotas and the instance budget").
@@ -233,18 +226,10 @@ mod imp {
 
             let mut k = Kernel::new(&BOOT_IMAGE, limits, instance_bytes);
             let mut caps = CapTable::new(CAP_TABLE_LIMIT);
-            let console = k.mint_root_into(
-                &mut caps,
-                k.console,
-                ObjectKind::Console,
-                Rights::from_bits_truncate(rights::INIT_CONSOLE),
-            );
-            let spawner = k.mint_root_into(
-                &mut caps,
-                k.spawner,
-                ObjectKind::Spawn,
-                Rights::from_bits_truncate(rights::INIT_SPAWN),
-            );
+            let console =
+                k.mint_root_into(&mut caps, k.console, ObjectKind::Console, Rights::from_bits_truncate(rights::INIT_CONSOLE));
+            let spawner =
+                k.mint_root_into(&mut caps, k.spawner, ObjectKind::Spawn, Rights::from_bits_truncate(rights::INIT_SPAWN));
             if console.is_err() || spawner.is_err() {
                 panic!("cannot create init's capabilities");
             }
@@ -260,7 +245,7 @@ mod imp {
         }
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "C" fn kmain() -> ! {
         init_hal();
         print_banner();

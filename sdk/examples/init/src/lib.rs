@@ -8,8 +8,8 @@
 #![no_std]
 
 use kalium_sdk::{
-    cap_drop, cap_revoke, exit, rights, spawn, spawn_snapshot, time_now, yield_now, Cap, Channel,
-    Class, Console, Entry, Errno, Instance, Line, MemObj,
+    Cap, Channel, Class, Console, Entry, Errno, Instance, Line, MemObj, cap_drop, cap_revoke, exit, rights, spawn,
+    spawn_snapshot, time_now, yield_now,
 };
 
 /// Boot image module indices (the order `cargo xtask wasm` lays out and
@@ -32,7 +32,7 @@ const MOD_HELLO_C: u32 = 12;
 const RT_PERIOD_NS: i64 = 2_000_000;
 const RT_BUDGET_NS: i64 = 500_000;
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn _start() {
     let console = Console::from_cap(Cap::slot(0));
     console.set_global();
@@ -44,10 +44,8 @@ pub extern "C" fn _start() {
     // one carries a memory object.
     let (tx, rx) = Channel::create().unwrap_or_else(|e| fail("channel_create", e));
     // ping gets a write-only console (no DERIVE); pong gets the full set.
-    let ping_console = console
-        .cap()
-        .derive(rights::WRITE | rights::TRANSFER)
-        .unwrap_or_else(|e| fail("cap_derive (ping console)", e));
+    let ping_console =
+        console.cap().derive(rights::WRITE | rights::TRANSFER).unwrap_or_else(|e| fail("cap_derive (ping console)", e));
     let pong_console = console
         .cap()
         .derive(rights::WRITE | rights::DERIVE | rights::TRANSFER)
@@ -61,19 +59,10 @@ pub extern "C" fn _start() {
     // loops. The fair ones start first so that rt runs entirely under load.
     let fair_a = spawn_fair(spawner, MOD_FAIR, &[], "fair");
     let fair_b = spawn_fair(spawner, MOD_FAIR, &[], "fair");
-    let rt_console = console
-        .cap()
-        .derive(rights::WRITE | rights::TRANSFER)
-        .unwrap_or_else(|e| fail("cap_derive (rt console)", e));
-    let rt = spawn(
-        spawner,
-        MOD_RT,
-        &[rt_console],
-        Class::RealTime,
-        RT_PERIOD_NS,
-        RT_BUDGET_NS,
-    )
-    .unwrap_or_else(|e| fail("spawn rt", e));
+    let rt_console =
+        console.cap().derive(rights::WRITE | rights::TRANSFER).unwrap_or_else(|e| fail("cap_derive (rt console)", e));
+    let rt = spawn(spawner, MOD_RT, &[rt_console], Class::RealTime, RT_PERIOD_NS, RT_BUDGET_NS)
+        .unwrap_or_else(|e| fail("spawn rt", e));
     report("rt", rt);
     report("fair", fair_a);
     report("fair", fair_b);
@@ -96,20 +85,12 @@ pub extern "C" fn _start() {
     // until hello_c has exited, so a read that blocked on the empty channel
     // instead of returning (a zero-length read must not) would deadlock the
     // kernel rather than pass as end of file. hello_c exits 5.
-    let (stdin_tx, stdin_rx) =
-        Channel::create().unwrap_or_else(|e| fail("channel_create (hello_c stdin)", e));
+    let (stdin_tx, stdin_rx) = Channel::create().unwrap_or_else(|e| fail("channel_create (hello_c stdin)", e));
     for msg in [&b"hello\n"[..], b"world", b""] {
-        stdin_tx
-            .send(msg, &[])
-            .unwrap_or_else(|e| fail("send (hello_c stdin)", e));
+        stdin_tx.send(msg, &[]).unwrap_or_else(|e| fail("send (hello_c stdin)", e));
     }
     let demo_console = derive_demo_console(console);
-    let hello_c = spawn_fair(
-        spawner,
-        MOD_HELLO_C,
-        &[demo_console, stdin_rx.cap()],
-        "hello_c",
-    );
+    let hello_c = spawn_fair(spawner, MOD_HELLO_C, &[demo_console, stdin_rx.cap()], "hello_c");
     report("hello_c", hello_c);
     cap_drop(stdin_tx.cap()).unwrap_or_else(|e| fail("cap_drop (hello_c stdin)", e));
 
@@ -122,29 +103,20 @@ pub extern "C" fn _start() {
     // init's own send fails with ECLOSED. Then `go` tells `revoked` to try
     // its capabilities, which must fail with EBADCAP; it exits 42.
     let (go_tx, go_rx) = Channel::create().unwrap_or_else(|e| fail("channel_create (go)", e));
-    let (ready_tx, ready_rx) =
-        Channel::create().unwrap_or_else(|e| fail("channel_create (ready)", e));
+    let (ready_tx, ready_rx) = Channel::create().unwrap_or_else(|e| fail("channel_create (ready)", e));
     let (data_tx, data_rx) = Channel::create().unwrap_or_else(|e| fail("channel_create (data)", e));
     let handle = console
         .cap()
         .derive(rights::WRITE | rights::DERIVE | rights::TRANSFER)
         .unwrap_or_else(|e| fail("cap_derive (revoked handle)", e));
-    let revoked_console = handle
-        .derive(rights::WRITE | rights::TRANSFER)
-        .unwrap_or_else(|e| fail("cap_derive (revoked console)", e));
+    let revoked_console =
+        handle.derive(rights::WRITE | rights::TRANSFER).unwrap_or_else(|e| fail("cap_derive (revoked console)", e));
     let revoked_rx = data_rx
         .cap()
         .derive(rights::RECV | rights::WAIT | rights::TRANSFER)
         .unwrap_or_else(|e| fail("cap_derive (revoked receiver)", e));
-    let revoked = spawn_fair(
-        spawner,
-        MOD_REVOKED,
-        &[revoked_console, go_rx.cap(), ready_tx.cap(), revoked_rx],
-        "revoked",
-    );
-    ready_rx
-        .recv(&mut [0u8; 8], &mut [])
-        .unwrap_or_else(|e| fail("recv (ready)", e));
+    let revoked = spawn_fair(spawner, MOD_REVOKED, &[revoked_console, go_rx.cap(), ready_tx.cap(), revoked_rx], "revoked");
+    ready_rx.recv(&mut [0u8; 8], &mut []).unwrap_or_else(|e| fail("recv (ready)", e));
     cap_revoke(handle).unwrap_or_else(|e| fail("cap_revoke (handle)", e));
     cap_revoke(data_rx.cap()).unwrap_or_else(|e| fail("cap_revoke (data receiver)", e));
     cap_drop(data_rx.cap()).unwrap_or_else(|e| fail("cap_drop (data receiver)", e));
@@ -154,21 +126,11 @@ pub extern "C" fn _start() {
         Err(e) => fail("send (data)", e),
     }
     // The handle still works: init prints through a child of it.
-    let via_handle = handle
-        .derive(rights::WRITE)
-        .unwrap_or_else(|e| fail("cap_derive (after revoke)", e));
+    let via_handle = handle.derive(rights::WRITE).unwrap_or_else(|e| fail("cap_derive (after revoke)", e));
     let _ = Console::from_cap(via_handle).println("init: handle derives again after revoke");
-    go_tx
-        .send(b"go", &[])
-        .unwrap_or_else(|e| fail("send (go)", e));
+    go_tx.send(b"go", &[]).unwrap_or_else(|e| fail("send (go)", e));
     report("revoked", revoked);
-    for c in [
-        go_tx.cap(),
-        ready_rx.cap(),
-        data_tx.cap(),
-        handle,
-        via_handle,
-    ] {
+    for c in [go_tx.cap(), ready_rx.cap(), data_tx.cap(), handle, via_handle] {
         cap_drop(c).unwrap_or_else(|e| fail("cap_drop (revocation phase)", e));
     }
 
@@ -179,20 +141,12 @@ pub extern "C" fn _start() {
     // The times from spawn to the child's signal (its `ready` for the
     // fresh start, its exit for the restored ones) are compared: the
     // restore must be the faster start.
-    let (ready_tx, ready_rx) =
-        Channel::create().unwrap_or_else(|e| fail("channel_create (shelf ready)", e));
+    let (ready_tx, ready_rx) = Channel::create().unwrap_or_else(|e| fail("channel_create (shelf ready)", e));
     let (go_tx, go_rx) = Channel::create().unwrap_or_else(|e| fail("channel_create (shelf go)", e));
     let shelf_console = derive_demo_console(console);
     let t0 = time_now();
-    let shelf = spawn_fair(
-        spawner,
-        MOD_SHELF,
-        &[shelf_console, ready_tx.cap(), go_rx.cap()],
-        "shelf",
-    );
-    ready_rx
-        .recv(&mut [0u8; 8], &mut [])
-        .unwrap_or_else(|e| fail("recv (shelf ready)", e));
+    let shelf = spawn_fair(spawner, MOD_SHELF, &[shelf_console, ready_tx.cap(), go_rx.cap()], "shelf");
+    ready_rx.recv(&mut [0u8; 8], &mut []).unwrap_or_else(|e| fail("recv (shelf ready)", e));
     let init_ns = time_now() - t0;
     let snapshot = loop {
         match shelf.snapshot() {
@@ -206,16 +160,8 @@ pub extern "C" fn _start() {
     for _ in 0..3 {
         let resumed_console = derive_demo_console(console);
         let t0 = time_now();
-        let resumed = spawn_snapshot(
-            spawner,
-            snapshot,
-            &[resumed_console],
-            Class::Fair,
-            0,
-            0,
-            Entry::Resume,
-        )
-        .unwrap_or_else(|e| fail("spawn_snapshot (shelf)", e));
+        let resumed = spawn_snapshot(spawner, snapshot, &[resumed_console], Class::Fair, 0, 0, Entry::Resume)
+            .unwrap_or_else(|e| fail("spawn_snapshot (shelf)", e));
         report("resumed shelf", resumed);
         restore_ns = restore_ns.min(time_now() - t0);
     }
@@ -242,23 +188,18 @@ pub extern "C" fn _start() {
     let hog_console = derive_demo_console(console);
     let hog = spawn_fair(spawner, MOD_HOG, &[hog_console], "hog");
     report("hog", hog);
-    let (park_tx, park_rx) =
-        Channel::create().unwrap_or_else(|e| fail("channel_create (after hog)", e));
+    let (park_tx, park_rx) = Channel::create().unwrap_or_else(|e| fail("channel_create (after hog)", e));
     let park = spawn_fair(spawner, MOD_PARK, &[park_rx.cap()], "park");
     cap_drop(park_tx.cap()).unwrap_or_else(|e| fail("cap_drop (after hog)", e));
     match park.wait() {
         Ok(0) => {}
         Ok(code) => {
-            let _ = Line::new()
-                .str("init: after hog, park exited ")
-                .int(code as i64)
-                .println(console);
+            let _ = Line::new().str("init: after hog, park exited ").int(code as i64).println(console);
             exit(1)
         }
         Err(e) => fail("instance_wait (after hog)", e),
     }
-    let probe = MemObj::create(kalium_sdk::memobj::MAX_SIZE)
-        .unwrap_or_else(|e| fail("memobj_create (after hog)", e));
+    let probe = MemObj::create(kalium_sdk::memobj::MAX_SIZE).unwrap_or_else(|e| fail("memobj_create (after hog)", e));
     cap_drop(probe.cap()).unwrap_or_else(|e| fail("cap_drop (after hog probe)", e));
     cap_drop(park.cap()).unwrap_or_else(|e| fail("cap_drop (after hog park)", e));
     say("init: after hog, spawn ok");
@@ -268,10 +209,8 @@ pub extern "C" fn _start() {
     // limit refuses it, then shows the slots come back. It takes init's
     // Spawn capability with it (init has nothing left to spawn), so this is
     // the last phase.
-    let greedy_console = console
-        .cap()
-        .derive(rights::WRITE | rights::TRANSFER)
-        .unwrap_or_else(|e| fail("cap_derive (greedy console)", e));
+    let greedy_console =
+        console.cap().derive(rights::WRITE | rights::TRANSFER).unwrap_or_else(|e| fail("cap_derive (greedy console)", e));
     let greedy = spawn_fair(spawner, MOD_GREEDY, &[greedy_console, spawner], "greedy");
     report("greedy", greedy);
 
@@ -290,20 +229,12 @@ fn say(s: &str) {
 
 /// A write-only console for a WASI demo (its stdout and stderr).
 fn derive_demo_console(console: Console) -> Cap {
-    console
-        .cap()
-        .derive(rights::WRITE | rights::TRANSFER)
-        .unwrap_or_else(|e| fail("cap_derive (demo console)", e))
+    console.cap().derive(rights::WRITE | rights::TRANSFER).unwrap_or_else(|e| fail("cap_derive (demo console)", e))
 }
 
 fn spawn_fair(spawner: Cap, module: u32, caps: &[Cap], name: &str) -> Instance {
     spawn(spawner, module, caps, Class::Fair, 0, 0).unwrap_or_else(|e| {
-        let _ = Line::new()
-            .str("init: spawn ")
-            .str(name)
-            .str(" failed: ")
-            .errno(e)
-            .println(console());
+        let _ = Line::new().str("init: spawn ").str(name).str(" failed: ").errno(e).println(console());
         exit(1)
     })
 }
@@ -312,31 +243,16 @@ fn spawn_fair(spawner: Cap, module: u32, caps: &[Cap], name: &str) -> Instance {
 fn report(name: &str, instance: Instance) {
     match instance.wait() {
         Ok(code) => {
-            let _ = Line::new()
-                .str("init: ")
-                .str(name)
-                .str(" exited ")
-                .int(code as i64)
-                .println(console());
+            let _ = Line::new().str("init: ").str(name).str(" exited ").int(code as i64).println(console());
         }
         Err(e) => {
-            let _ = Line::new()
-                .str("init: instance_wait ")
-                .str(name)
-                .str(" failed: ")
-                .errno(e)
-                .println(console());
+            let _ = Line::new().str("init: instance_wait ").str(name).str(" failed: ").errno(e).println(console());
             exit(1)
         }
     }
 }
 
 fn fail(what: &str, e: Errno) -> ! {
-    let _ = Line::new()
-        .str("init: ")
-        .str(what)
-        .str(" failed: ")
-        .errno(e)
-        .println(console());
+    let _ = Line::new().str("init: ").str(what).str(" failed: ").errno(e).println(console());
     exit(1)
 }

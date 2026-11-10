@@ -12,7 +12,7 @@ use kalium_sdk::exit;
 /// 4 GiB), so the load is out of bounds and traps.
 const BAD_ADDR: usize = 0xFFFF_FFF0;
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn _start() {
     let p = black_box(BAD_ADDR) as *const i32;
     // SAFETY: this is deliberately *not* a valid read; on Kalium it traps
