@@ -35,6 +35,7 @@ built out of WebAssembly modules that the OS ships next to it.
   crate layout.
 - [docs/prototype-plan.md](docs/prototype-plan.md): the M1 prototype
   contract: definition of done, host ABI tables, crate contracts.
+- [HANDOFF.md](HANDOFF.md): where the prototype stands and what to do next.
 - [docs/running.md](docs/running.md): building, running and testing the
   prototype on QEMU; adding a service.
 - [sdk/README.md](sdk/README.md): the service SDK and the example services.
