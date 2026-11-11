@@ -471,6 +471,10 @@ fn qemu_command(root: &Path, memory: &str) -> Command {
         "-m",
         memory,
         "-nographic",
+        // Kalium has no network driver; without this QEMU adds a virtio NIC
+        // and needs its boot ROM (efi-virtio.rom), which minimal installs lack.
+        "-nic",
+        "none",
         "-semihosting-config",
         "enable=on,target=native",
         "-no-reboot",

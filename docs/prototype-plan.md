@@ -469,7 +469,7 @@ Examples (each a `cdylib`/`bin` built with `--target wasm32-unknown-unknown`): `
 `cargo xtask wasm` (build SDK examples), `build` (wasm, then kernel for aarch64 in release; `--boot-only`, `--selftest` select the kernel features), `run` (build, then QEMU), `boot-test`, `selftest` (HAL checks, see above; boots twice, at `-m 256M` and `-m 129M`), `test` (host tests, then selftest, then build, then QEMU in boot-test mode with a timeout, asserting the expected lines and exit code; exit code 2 is reported as a kernel fault), `clippy`, `fmt-check`. QEMU command:
 
 ```text
-qemu-system-aarch64 -M virt,gic-version=2 -cpu cortex-a72 -m 256M -nographic \
+qemu-system-aarch64 -M virt,gic-version=2 -cpu cortex-a72 -m 256M -nographic -nic none \
   -semihosting-config enable=on,target=native -no-reboot \
   -kernel target/aarch64-unknown-none/release/kalium
 ```

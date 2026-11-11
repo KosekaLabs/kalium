@@ -27,7 +27,7 @@ The M1 prototype boots on QEMU `virt` (aarch64, cortex-a72, GICv2), runs the boo
 The QEMU command `xtask` uses (run it by hand after `cargo xtask build`):
 
 ```text
-qemu-system-aarch64 -M virt,gic-version=2 -cpu cortex-a72 -m 256M -nographic \
+qemu-system-aarch64 -M virt,gic-version=2 -cpu cortex-a72 -m 256M -nographic -nic none \
   -semihosting-config enable=on,target=native -no-reboot \
   -kernel target/aarch64-unknown-none/release/kalium
 ```
