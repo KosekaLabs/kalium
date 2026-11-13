@@ -36,7 +36,7 @@ There is no native user space. Every service, every interpreter, every app above
 - Carry a file system, network stack, window system or shell as kernel code where a WebAssembly service can do the job.
 - Special-case any language, interpreter or application.
 
-**Status.** The first prototype is complete: a `no_std` Rust kernel that boots on QEMU `virt` (aarch64) and runs WebAssembly services through its own spec-tested interpreter, with capabilities (including revocation), channels with capability transfer, memory objects, per-instance resource quotas, instance snapshots, a WASI preview1 layer for unmodified Rust `std` and C programs, and a two-class scheduler (real-time EDF plus weighted fair). Ahead-of-time compilation, MMU-backed instance memory, SMP and devices are future milestones. [docs/status.md](docs/status.md) has the details, and [HANDOFF.md](HANDOFF.md) where the work stands and what comes next.
+**Status.** The first prototype is complete: a `no_std` Rust kernel that boots on QEMU `virt` (aarch64) and runs WebAssembly services through its own spec-tested interpreter, with capabilities (including revocation), channels with capability transfer, memory objects, per-instance resource quotas, instance snapshots, a WASI preview1 layer for unmodified Rust `std` and C programs, and a two-class scheduler (real-time EDF plus weighted fair). Ahead-of-time compilation, MMU-backed instance memory, SMP and devices are future milestones. [docs/status.md](docs/status.md) has the details, the open decisions and what comes next.
 
 <h2><img height="20" alt="branches" src="./img/branches.svg">&nbsp;&nbsp;Branches</h2>
 

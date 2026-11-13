@@ -21,6 +21,7 @@ Here are the main directories and files in the project:
 ├── demos/             # Separate workspace: unmodified Rust std and C programs (WASI).
 ├── xtask/             # The build, run and test driver behind `cargo xtask`.
 ├── docs/              # Architecture, prototype contract, running guide, status.
+├── AGENTS.md          # Standing instructions for coding agents.
 ├── Cargo.toml
 └── package.json
 ```
