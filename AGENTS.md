@@ -45,6 +45,7 @@ Other commands: `cargo xtask run` boots interactively (`Ctrl-A X` quits), `cargo
 - Host paths whose size depends on service input use fallible allocation and return `ENOMEM`; a service must never be able to panic the kernel.
 - Every bug fix comes with a regression test.
 - Rust edition 2024 throughout, except the test fixture crate in `crates/kalium-wasm/tests/fixtures/rust-src`, which stays on 2021 on purpose.
+- The Rust version is pinned in `rust-toolchain.toml`, and trunk's `clippy` and `rustfmt` in `.trunk/trunk.yaml` use the same version. Move to a newer Rust deliberately: change all three in one commit, reformat, and run every gate, since a new rustfmt can reformat existing code (1.100's did).
 - Error handling in std Rust binaries (today only `xtask`) follows Koseka's standard, [Mabe](https://github.com/AmonRayfa/mabe) (`#[mabe::main]`, `bail`, `Context`, `Result`). `xtask` has not been converted yet (it is on the list in docs/status.md). The `no_std` crates use their own error types.
 
 ## Repository conventions

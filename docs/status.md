@@ -88,7 +88,7 @@ Gates that must stay green: `cargo xtask test`, `boot-test`, `selftest`, `clippy
 - `kernel` installs QEMU on Ubuntu and runs `cargo xtask fmt-check`, `clippy` and `test` (which includes the self-test and the QEMU scenario), then uploads the kernel image.
 - `cd` runs only for a release tag and publishes the GitHub release.
 
-Both jobs passed on GitHub on 2026-11-11, the first time the workflow ran. The only failure on the way was QEMU looking for the boot ROM of a network card it adds by default, which minimal QEMU installs lack; the kernel has no network driver, so xtask starts QEMU with `-nic none`. Locally the gates also pass on macOS (Intel) with QEMU 11.1.
+Both jobs passed on GitHub on 2026-11-11, the first time the workflow ran. The only failure on the way was QEMU looking for the boot ROM of a network card it adds by default, which minimal QEMU installs lack; the kernel has no network driver, so xtask starts QEMU with `-nic none`. Locally the gates also pass on macOS (Intel) with QEMU 11.1. The toolchain was pinned to Rust 1.100.0 on 2026-11-13, after the release of 1.100 turned CI red: its rustfmt formats doc-commented macro arguments differently, and the floating `stable` channel had picked it up on the runners.
 
 ## Known limitations
 

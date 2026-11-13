@@ -21,14 +21,14 @@ lint:
   enabled:
     - actionlint@1.7.12
     - checkov@3.4.3
-    - clippy@1.99.1
+    - clippy@1.100.0
     - git-diff-check
     - grype@0.121.3
     - markdownlint@0.50.0
     - osv-scanner@2.7.1
     - pinact@4.1.1
     - prettier@3.9.10
-    - rustfmt@1.99.1
+    - rustfmt@1.100.0
     - svgo@4.1.0
     - taplo@0.10.0
     - trufflehog@3.99.8

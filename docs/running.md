@@ -4,7 +4,7 @@ The M1 prototype boots on QEMU `virt` (aarch64, cortex-a72, GICv2), runs the boo
 
 ## Prerequisites
 
-- The pinned stable toolchain from `rust-toolchain.toml` with the `aarch64-unknown-none`, `wasm32-unknown-unknown` and `wasm32-wasip1` targets (`rustup show` installs them).
+- The Rust toolchain pinned in `rust-toolchain.toml` (1.100.0) with the `aarch64-unknown-none`, `wasm32-unknown-unknown` and `wasm32-wasip1` targets (`rustup show` installs them).
 - `qemu-system-aarch64` (QEMU 8.x; Debian/Ubuntu package `qemu-system-arm`).
 - Optional: `clang` with `lld` and a wasi-libc sysroot (Debian/Ubuntu packages `clang`, `lld`, `wasi-libc`, or a wasi-sdk) to rebuild the C demo; without them `cargo xtask demos` uses the checked-in `demos/hello-c/prebuilt/hello_c.wasm` and says so.
 

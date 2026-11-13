@@ -183,37 +183,53 @@ macro_rules! range_fn {
 range_fn!(
     /// `[__kernel_start, __kernel_end)`: the whole image including `.bss`,
     /// the stacks and their guard pages.
-    kernel_image_range, __kernel_start, __kernel_end
+    kernel_image_range,
+    __kernel_start,
+    __kernel_end
 );
 range_fn!(
     /// The code: `.text.boot`, the vector table and all functions. Mapped
     /// read-only and executable.
-    text_range, __text_start, __text_end
+    text_range,
+    __text_start,
+    __text_end
 );
 range_fn!(
     /// Constants and the embedded boot image. Mapped read-only, never
     /// executable.
-    rodata_range, __rodata_start, __rodata_end
+    rodata_range,
+    __rodata_start,
+    __rodata_end
 );
 range_fn!(
     /// `.data` and `.bss`. Mapped read-write, never executable.
-    data_range, __data_start, __data_end
+    data_range,
+    __data_start,
+    __data_end
 );
 range_fn!(
     /// The unmapped pages directly below the boot stack.
-    boot_stack_guard_range, __stack_guard_start, __stack_guard_end
+    boot_stack_guard_range,
+    __stack_guard_start,
+    __stack_guard_end
 );
 range_fn!(
     /// The 1 MiB boot stack the kernel runs on (`SP_EL0`).
-    boot_stack_range, __stack_bottom, __stack_top
+    boot_stack_range,
+    __stack_bottom,
+    __stack_top
 );
 range_fn!(
     /// The unmapped pages directly below the exception stack.
-    exception_stack_guard_range, __exc_stack_guard_start, __exc_stack_guard_end
+    exception_stack_guard_range,
+    __exc_stack_guard_start,
+    __exc_stack_guard_end
 );
 range_fn!(
     /// The stack every exception taken at EL1 runs on (`SP_EL1`).
-    exception_stack_range, __exc_stack_bottom, __exc_stack_top
+    exception_stack_range,
+    __exc_stack_bottom,
+    __exc_stack_top
 );
 
 /// `[RAM_START, __kernel_start)`: where QEMU installs the device tree. Mapped
